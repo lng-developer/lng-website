@@ -1,26 +1,40 @@
 const express = require('express');
-const mongoose = require('mongoose');
+const morgan = require('morgan');
+const cors = require('cors');
+const dotenv = require('dotenv');
+dotenv.config();
+
+const connectDB = require('./src/config/db.config');
+const { roleRoutes, userRoutes, accountRoutes, authRoutes, orderCustomProductRoutes } = require('./src/routes');
 
 const app = express();
 app.use(express.json());
+app.use(morgan('dev'));
+app.use(cors());
 
-// Kết nối MongoDB
-mongoose.connect('mongodb://localhost:27017/lng-website', {
-    useNewUrlParser: true,
-    useUnifiedTopology: true
-}).then(() => {
-    console.log('✅ Connected to MongoDB');
-}).catch(err => {
-    console.error('❌ MongoDB connection error:', err);
-});
-
-// Route mẫu
+// Root Route
 app.get('/', (req, res) => {
-    res.send('Hello from Express.js + MongoDB!');
+    res.json({ message: 'Welcome to RESTful API - Node.js' });
 });
 
-// Lắng nghe port
-const PORT = 5000;
+// API Routes
+app.use('/api/role', roleRoutes);
+app.use('/api/user', userRoutes);
+app.use('/api/account', accountRoutes);
+app.use('/api/auth', authRoutes);
+app.use('/api/order', orderCustomProductRoutes);
+
+
+// Error Handler
+app.use((err, req, res, next) => {
+    res.status(err.status || 500).json({
+        error: { message: err.message || 'Internal Server Error' }
+    });
+});
+
+// Run Server
+const PORT = process.env.PORT || 5000;
+connectDB();
 app.listen(PORT, () => {
-    console.log(`🚀 Server is running on http://localhost:${PORT}`);
+    console.log(`🚀 Server running at http://localhost:${PORT}`);
 });
