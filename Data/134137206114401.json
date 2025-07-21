@@ -1,0 +1,278 @@
+{
+  "orderId" : "111-9078428-5088268",
+  "orderItemId" : "134137206114401",
+  "merchantId" : "A2A6U8L88CPMNT",
+  "marketplaceId" : "ATVPDKIKX0DER",
+  "asin" : "B0DTYK7H7C",
+  "title" : "GIANTBIGHANDS Custom Photo 90th Birthday Napkins, Personalized 90th Birthday Napkins, Look Who's 90 Portrait Napkin, Cocktail Beverage Napkins, Birthday Party Decorations, Birthday Party Supplies",
+  "quantity" : 1,
+  "vendorCode" : {
+    "empty" : true,
+    "present" : false
+  },
+  "customizationData" : {
+    "type" : "PageContainerCustomization",
+    "children" : [ {
+      "type" : "PreviewContainerCustomization",
+      "name" : "Surface 1",
+      "label" : "Surface 1",
+      "children" : [ {
+        "type" : "FlatContainerCustomization",
+        "children" : [ {
+          "type" : "FlatRatePriceDeltaContainerCustomization",
+          "name" : "Data 1",
+          "label" : "Data 1",
+          "children" : [ {
+            "type" : "TextCustomization",
+            "name" : "",
+            "label" : "Custom Name",
+            "inputValue" : "Shirley"
+          } ],
+          "priceDelta" : {
+            "amount" : 0
+          }
+        }, {
+          "type" : "OptionCustomization",
+          "name" : "Option Dropdown 5",
+          "label" : "Text Color",
+          "optionSelection" : {
+            "additionalCost" : {
+              "amount" : 0
+            },
+            "label" : "Gold Glitter",
+            "name" : "Gold Glitter",
+            "thumbnailImage" : {
+              "dimension" : {
+                "height" : 1000,
+                "width" : 1000
+              },
+              "imageUrl" : "https://m.media-amazon.com/images/S/gestalt-seller-images-prod-us-east-1/ATVPDKIKX0DER/A2A6U8L88CPMNT/051ce779b25546de98639e5ce945c525.png"
+            }
+          },
+          "displayValue" : "Gold Glitter"
+        }, {
+          "type" : "PlacementContainerCustomization",
+          "name" : "Image 1",
+          "label" : "Image 1",
+          "children" : [ {
+            "type" : "ImageCustomization",
+            "name" : "",
+            "label" : "Upload Your Photo",
+            "image" : {
+              "imageName" : "e431f6f3-8a4c-4704-8273-63cbb35b0264.jpg",
+              "buyerFilename" : "IMG_1067.jpeg"
+            }
+          } ],
+          "dimension" : {
+            "height" : 131,
+            "width" : 136
+          },
+          "position" : {
+            "x" : 0,
+            "y" : 0
+          },
+          "buyerPlacement" : {
+            "position" : {
+              "x" : 0,
+              "y" : -17.669230769230765
+            },
+            "dimension" : {
+              "width" : 1170,
+              "height" : 1431
+            },
+            "scale" : {
+              "scaleX" : 0.11623931623931624,
+              "scaleY" : 0.11623931623931624
+            },
+            "angleOfRotation" : 0
+          }
+        }, {
+          "type" : "OptionCustomization",
+          "name" : "Option Dropdown 4",
+          "label" : "Photo Options",
+          "optionSelection" : {
+            "additionalCost" : {
+              "amount" : 0
+            },
+            "label" : "Original",
+            "name" : "Original",
+            "thumbnailImage" : {
+              "dimension" : {
+                "height" : 756,
+                "width" : 756
+              },
+              "imageUrl" : "https://m.media-amazon.com/images/S/gestalt-seller-images-prod-us-east-1/ATVPDKIKX0DER/A2A6U8L88CPMNT/80dedb6652c249cd88fe85804c238aad.png"
+            }
+          },
+          "displayValue" : "Original"
+        }, {
+          "type" : "OptionCustomization",
+          "name" : "Option Dropdown 6",
+          "label" : "Photo Quality Enhancement",
+          "optionSelection" : {
+            "additionalCost" : {
+              "amount" : 0.95
+            },
+            "label" : "Yes, I need it.",
+            "name" : "Yes, I need it."
+          },
+          "displayValue" : "Yes, I need it."
+        }, {
+          "type" : "OptionCustomization",
+          "name" : "Option Dropdown 1",
+          "label" : "Select Size",
+          "optionSelection" : {
+            "additionalCost" : {
+              "amount" : 5
+            },
+            "label" : "Beverage (4.8\" x 4.8\")",
+            "name" : "Beverage (4.8\" x 4.8\")"
+          },
+          "displayValue" : "Beverage (4.8\" x 4.8\")"
+        }, {
+          "type" : "OptionCustomization",
+          "name" : "Option Dropdown 2",
+          "label" : "Select Pack",
+          "optionSelection" : {
+            "additionalCost" : {
+              "amount" : 12.95
+            },
+            "label" : "Pack 30pcs",
+            "name" : "Pack 30pcs"
+          },
+          "displayValue" : "Pack 30pcs"
+        }, {
+          "type" : "OptionCustomization",
+          "name" : "Option Dropdown 7",
+          "label" : "Priority Production",
+          "optionSelection" : {
+            "additionalCost" : {
+              "amount" : 0
+            },
+            "label" : "I don't think I need to.",
+            "name" : "I don't think I need to."
+          },
+          "displayValue" : "I don't think I need to."
+        }, {
+          "type" : "OptionCustomization",
+          "name" : "Option Dropdown 3",
+          "label" : "We would be grateful for love and support you may wish to offer. Thank you so much <3",
+          "optionSelection" : {
+            "additionalCost" : {
+              "amount" : 1
+            },
+            "label" : "Thank You So Much!!!",
+            "name" : "Thank You So Much!!!"
+          },
+          "displayValue" : "Thank You So Much!!!"
+        } ]
+      } ],
+      "baseImage" : {
+        "dimension" : {
+          "height" : 3140,
+          "width" : 3140
+        },
+        "imageUrl" : "https://m.media-amazon.com/images/S/gestalt-seller-images-prod-us-east-1/ATVPDKIKX0DER/A2A6U8L88CPMNT/21ae406427cc66093aaeb9255475aee1.png"
+      },
+      "snapshot" : {
+        "imageName" : "8b275ff7-065d-7f99-b751-549f02efe3c2.jpg",
+        "dimension" : {
+          "width" : 400,
+          "height" : 400
+        }
+      },
+      "svg" : "333cf403-f811-ec7c-07a2-44c8dabe1c0b.svg"
+    } ]
+  },
+  "version3.0" : {
+    "customizationInfo" : {
+      "surfaces" : [ {
+        "name" : "Surface 1",
+        "areas" : [ {
+          "customizationType" : "TextPrinting",
+          "priceDelta" : {
+            "value" : 0.0
+          },
+          "name" : "Data 1",
+          "label" : "Custom Name",
+          "text" : "Shirley"
+        }, {
+          "customizationType" : "Options",
+          "name" : "Option Dropdown 5",
+          "label" : "Text Color",
+          "optionValue" : "Gold Glitter",
+          "priceDelta" : {
+            "value" : 0.0
+          },
+          "optionImage" : ""
+        }, {
+          "customizationType" : "ImagePrinting",
+          "Dimensions" : {
+            "height" : 131,
+            "width" : 136
+          },
+          "Position" : {
+            "x" : 0,
+            "y" : 0
+          },
+          "name" : "Image 1",
+          "svgImage" : "333cf403-f811-ec7c-07a2-44c8dabe1c0b.svg"
+        }, {
+          "customizationType" : "Options",
+          "name" : "Option Dropdown 4",
+          "label" : "Photo Options",
+          "optionValue" : "Original",
+          "priceDelta" : {
+            "value" : 0.0
+          },
+          "optionImage" : ""
+        }, {
+          "customizationType" : "Options",
+          "name" : "Option Dropdown 6",
+          "label" : "Photo Quality Enhancement",
+          "optionValue" : "Yes, I need it.",
+          "priceDelta" : {
+            "value" : 0.95
+          },
+          "optionImage" : ""
+        }, {
+          "customizationType" : "Options",
+          "name" : "Option Dropdown 1",
+          "label" : "Select Size",
+          "optionValue" : "Beverage (4.8\" x 4.8\")",
+          "priceDelta" : {
+            "value" : 5.0
+          },
+          "optionImage" : ""
+        }, {
+          "customizationType" : "Options",
+          "name" : "Option Dropdown 2",
+          "label" : "Select Pack",
+          "optionValue" : "Pack 30pcs",
+          "priceDelta" : {
+            "value" : 12.95
+          },
+          "optionImage" : ""
+        }, {
+          "customizationType" : "Options",
+          "name" : "Option Dropdown 7",
+          "label" : "Priority Production",
+          "optionValue" : "I don't think I need to.",
+          "priceDelta" : {
+            "value" : 0.0
+          },
+          "optionImage" : ""
+        }, {
+          "customizationType" : "Options",
+          "name" : "Option Dropdown 3",
+          "label" : "We would be grateful for love and support you may wish to offer. Thank you so much <3",
+          "optionValue" : "Thank You So Much!!!",
+          "priceDelta" : {
+            "value" : 1.0
+          },
+          "optionImage" : ""
+        } ]
+      } ]
+    }
+  }
+}
