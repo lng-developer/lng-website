@@ -5,10 +5,16 @@ const fs = require('fs');
 const XLSX = require('xlsx');
 const path = require('path');
 const upload = multer({ dest: 'uploads/' });
+const axios = require('axios');
+const AdmZip = require('adm-zip');
 
 const importOrderJson = async (req, res) => {
     try {
         const jsonData = req.body;
+        const existingOrder = await OrderCustomProduct.findOne({ orderId: jsonData.orderId });
+        if (!existingOrder) {
+            return res.status(404).json({ message: 'Order ID not found in DB' });
+        }
 
         let totalCustomizationPrice = 0;
         const options = jsonData?.customizationData?.children?.[0]?.children?.[0]?.children || [];
@@ -53,7 +59,6 @@ const importOrderJson = async (req, res) => {
             }
         });
 
-        // Lấy ảnh khách upload
         const imageCustomization = options.find(opt => opt?.type === "PlacementContainerCustomization");
         const imageData = imageCustomization?.children?.[0]?.image || {};
 
@@ -62,20 +67,16 @@ const importOrderJson = async (req, res) => {
             buyerFilename: imageData?.buyerFilename || ""
         };
 
-        const order = new OrderCustomProduct({
-            orderId: jsonData.orderId,
+        const updateFields = {
             orderItemId: jsonData.orderItemId,
             merchantId: jsonData.merchantId,
             marketplaceId: jsonData.marketplaceId,
             asin: jsonData.asin,
             title: jsonData.title,
             quantity: jsonData.quantity,
-
             customization: customizationOptions,
-
             customizationData: jsonData.customizationData || null,
             version3Data: jsonData["version3.0"] || null,
-
             baseImage: {
                 imageUrl: jsonData?.customizationData?.children?.[0]?.baseImage?.imageUrl || "",
                 width: jsonData?.customizationData?.children?.[0]?.baseImage?.dimension?.width || null,
@@ -83,22 +84,13 @@ const importOrderJson = async (req, res) => {
             },
             snapshotImage: jsonData?.customizationData?.children?.[0]?.snapshot?.imageName || "",
             svgFile: jsonData?.customizationData?.children?.[0]?.svg || "",
-
             totalCustomizationPrice
-        });
+        };
 
-        await order.save();
-
-        res.status(201).json({
-            message: 'Order imported successfully!',
-            id: order._id
-        });
-
+        await OrderCustomProduct.updateOne({ orderId: jsonData.orderId }, updateFields);
+        res.status(200).json({ message: 'Order updated successfully!' });
     } catch (error) {
-        res.status(500).json({
-            message: 'Failed to import order',
-            error: error.message
-        });
+        res.status(500).json({ message: 'Failed to update order', error: error.message });
     }
 };
 
@@ -120,19 +112,14 @@ const importOrderFromFile = async (req, res) => {
 const updateOrdersFromXlsx = async (req, res) => {
     try {
         const filePath = req.file.path;
-        const ext = path.extname(req.file.originalname).toLowerCase();  // Sửa dòng này
+        const ext = path.extname(req.file.originalname).toLowerCase();
         let rows = [];
 
         if (ext === '.txt') {
             const raw = fs.readFileSync(filePath, 'utf8');
             const delimiter = raw.includes('\t') ? '\t' : ',';
-            const lines = raw.split('\n').filter(Boolean);
-
-            // Xử lý header: loại bỏ khoảng trắng và thay "-" thành "_"
-            const rawHeaders = lines[0].trim().split(delimiter);
-            const headers = rawHeaders.map(h => h.trim().replace(/-/g, '_'));
-
-            // Parse từng dòng thành object
+            const lines = raw.split('\n').filter(line => line.trim() !== '');
+            const headers = lines[0].trim().split(delimiter).map(h => h.trim().replace(/-/g, '_'));
             rows = lines.slice(1).map(line => {
                 const values = line.trim().split(delimiter);
                 const obj = {};
@@ -141,42 +128,79 @@ const updateOrdersFromXlsx = async (req, res) => {
                 });
                 return obj;
             });
-        } else if (ext === '.xlsx') {
-            const workbook = XLSX.readFile(filePath);
-            const sheetName = workbook.SheetNames[0];
-            rows = XLSX.utils.sheet_to_json(workbook.Sheets[sheetName]);
         } else {
-            return res.status(400).json({ message: 'Unsupported file type. Please upload .xlsx or .txt files.' });
+            return res.status(400).json({ message: 'Only .txt files are supported' });
         }
+        console.log("rows:" + rows[1].order_id);
 
         const results = [];
-
         for (const row of rows) {
             const orderId = row.order_id || row.orderId;
+
             if (!orderId) continue;
 
-            const updateData = {
+            const basicData = {
+                orderId,
                 sku: row.sku,
                 customer_infor: {
                     email: row.buyer_email,
-                    name: row.buyer_name,
-                    phone_number: row.buyer_phone_number
-                }
+                    name: row.recipient_name,
+                    phone_number: row.ship_phone_number,
+                    address: row.ship_address_1,
+                    address_2: row.ship_address_2,
+                    province: row.province,
+                    city: row.ship_city,
+                    state: row.ship_state,
+                    zip_code: row.ship_postal_code,
+                    country: row.ship_country
+                },
+                customized_url: row.customized_url,
+                purchase_date: row.purchase_date
             };
 
-            const updated = await OrderCustomProduct.findOneAndUpdate(
-                { orderId },
-                updateData,
-                { new: true }
-            );
+            const existing = await OrderCustomProduct.findOne({ orderId });
+            if (existing) {
+                await OrderCustomProduct.updateOne({ orderId }, basicData);
+            } else {
+                const newOrder = new OrderCustomProduct(basicData);
+                await newOrder.save();
+            }
+            // Step 2: Fetch and process JSON
+            try {
+                const url = row.customized_url;
+                if (!url) {
+                    results.push({ orderId, status: 'no URL' });
+                    continue;
+                }
 
-            results.push({ orderId, status: updated ? 'updated' : 'not found' });
+                const zipResponse = await axios.get(url, { responseType: 'arraybuffer' });
+                const zip = new AdmZip(Buffer.from(zipResponse.data));
+                const zipEntries = zip.getEntries();
+                const jsonEntry = zipEntries.find(entry => entry.entryName.endsWith('.json'));
+                if (!jsonEntry) {
+                    results.push({ orderId, status: 'no JSON in ZIP' });
+                    continue;
+                }
+
+                const jsonContent = zip.readAsText(jsonEntry);
+                const jsonData = JSON.parse(jsonContent);
+
+                const fakeReq = { body: jsonData };
+                const fakeRes = {
+                    status: code => ({
+                        json: msg => results.push({ orderId, status: code, message: msg?.message || msg })
+                    })
+                };
+                await importOrderJson(fakeReq, fakeRes);
+            } catch (err) {
+                results.push({ orderId, status: 'failed', error: err.message });
+            }
         }
 
         fs.unlinkSync(filePath);
-        res.json({ message: "Batch update completed", results });
+        res.json({ message: 'Batch import completed', results });
     } catch (error) {
-        res.status(500).json({ message: "Batch update failed", error: error.message });
+        res.status(500).json({ message: 'Batch import failed', error: error.message });
     }
 };
 
@@ -219,12 +243,18 @@ const getFrontendOrders = async (req, res) => {
                 orderId: order.orderId,
                 orderItemId: order.orderItemId || null,
                 merchantId: order.merchantId || null,
+                marketplaceId: order.marketplaceId || null,
+                asin: order.asin,
+                sku: order.sku,
                 title: order.title || '',
                 quantity: order.quantity || 1,
+                customer_infor: order.customer_infor,
                 version3Data,
                 baseImageUrl: order.baseImage?.imageUrl || null,
                 snapshotImage: order.snapshotImage || null,
-                totalCustomizationPrice: order.totalCustomizationPrice || 0
+                totalCustomizationPrice: order.totalCustomizationPrice || 0,
+                customized_url: order.customized_url,
+                purchase_date: order.purchase_date
             };
         });
         res.json(result);
