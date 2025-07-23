@@ -1,0 +1,67 @@
+{
+    "order_id": "",
+    "status": "",
+    "created_at": "",
+    "order_date": "",
+    "delivery_date": "",
+    "handling_time": "",
+    "shipping_type": "",
+    "customer_infor": {
+        "email": "",
+        "name": "",
+        "address": "",
+        "address2": "",
+        "province": "",
+        "city": "",
+        "state": "",
+        "zip_code": "",
+        "country": "",
+        "phone_number":""
+    },
+    "case": ["Cần chờ xử lý", "Fullfill lỗi CC"],
+    "config": {
+
+    },
+    "base_cost": "",
+    "store": "",
+    "png_status": "",
+    "psd": "",
+    "asin_type": "",
+    "scale_by": "userId",
+    "qc_by": "userId",
+    "sku": "",
+    "asin": "",
+    "psd_id": "",
+    "seller": "userID",
+    "team": "",                                     
+    "customization": {
+        "custome_name": "",
+        "text_color": "",
+        "select_size": "",
+        "select_pack": "",
+        "priority_production": "",
+        "customization_url": "",
+        "photos": {
+            "upload_your_photo": "",
+            "photo_options": "",
+            "photo_quality_enhancement": ""
+        },
+        "files": {
+            "customer_image_1": ""
+        },
+        "customer_photo": ""
+    },
+    "quantity": "",
+    "fullfill_qty": "",
+    "vendor_product": "",
+    "size": "",
+    "color": "",
+    "fullfill_name": "",
+    "tracking": {
+        "tracking_id": "",
+        "tracking_code": "",
+        "shipping_status": "",
+        "note": ""
+    }
+
+}

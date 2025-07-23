@@ -1,0 +1,351 @@
+{
+    "_id": {
+        "$oid": "6879c31ceb286b2d3563fd95"
+    },
+    "orderId": "114-1996626-9897045",
+    "orderItemId": "134016752544441",
+    "merchantId": "AXQF0TJ1AYTJM",
+    "marketplaceId": "ATVPDKIKX0DER",
+    "asin": "B0DHQPKDXZ",
+    "title": "UrbanNEST I Need a Diet Embroidered Sweatshirt, for Soda Lovers, Fun and Quirky Design for Comfortable Everyday Style, Ideal for Relaxed Outfits",
+    "quantity": 1,
+    "customization": {
+        "sizeOption": {
+            "name": "XL",
+            "label": "XL",
+            "additionalCost": {
+                "amount": 4
+            }
+        },
+        "priorityProduction": {
+            "name": "No",
+            "label": "No",
+            "additionalCost": {
+                "amount": 0
+            }
+        },
+        "photoUploaded": {
+            "imageName": "",
+            "buyerFilename": ""
+        }
+    },
+    "customizationData": {
+        "type": "PageContainerCustomization",
+        "children": [
+            {
+                "type": "PreviewContainerCustomization",
+                "name": "Surface 1",
+                "label": "Customization",
+                "children": [
+                    {
+                        "type": "FlatContainerCustomization",
+                        "children": [
+                            {
+                                "type": "ContainerCustomization",
+                                "name": "Text 1",
+                                "label": "Text 1",
+                                "children": [
+                                    {
+                                        "type": "FontCustomization",
+                                        "name": "",
+                                        "label": "x",
+                                        "fontSelection": {
+                                            "family": "Lato"
+                                        }
+                                    },
+                                    {
+                                        "type": "ColorCustomization",
+                                        "name": "",
+                                        "label": "x",
+                                        "colorSelection": {
+                                            "name": "Black",
+                                            "value": "#000000",
+                                            "colorModel": "rgb"
+                                        }
+                                    },
+                                    {
+                                        "type": "ContainerCustomization",
+                                        "children": [
+                                            {
+                                                "type": "PlacementContainerCustomization",
+                                                "name": "Custom Nickname",
+                                                "label": "Text Input 1",
+                                                "children": [
+                                                    {
+                                                        "type": "FlatRatePriceDeltaContainerCustomization",
+                                                        "children": [
+                                                            {
+                                                                "type": "TextCustomization",
+                                                                "name": "",
+                                                                "label": "Custom text on middle",
+                                                                "inputValue": "I need diet coke"
+                                                            }
+                                                        ],
+                                                        "priceDelta": {
+                                                            "amount": 0
+                                                        }
+                                                    }
+                                                ],
+                                                "dimension": {
+                                                    "width": 145,
+                                                    "height": 28
+                                                },
+                                                "position": {
+                                                    "x": 241,
+                                                    "y": 37
+                                                }
+                                            },
+                                            {
+                                                "type": "PlacementContainerCustomization",
+                                                "name": "Name On Sleeve",
+                                                "label": "Text Input 3",
+                                                "children": [
+                                                    {
+                                                        "type": "FlatRatePriceDeltaContainerCustomization",
+                                                        "children": [
+                                                            {
+                                                                "type": "TextCustomization",
+                                                                "name": "",
+                                                                "label": "Custom text on Sleeve",
+                                                                "inputValue": "Don’t forget the ice!"
+                                                            }
+                                                        ],
+                                                        "priceDelta": {
+                                                            "amount": 0
+                                                        }
+                                                    }
+                                                ],
+                                                "dimension": {
+                                                    "width": 256,
+                                                    "height": 44
+                                                },
+                                                "position": {
+                                                    "x": 133,
+                                                    "y": 306
+                                                }
+                                            }
+                                        ]
+                                    }
+                                ]
+                            },
+                            {
+                                "type": "OptionCustomization",
+                                "name": "Text color",
+                                "label": "Choose Thread Color",
+                                "optionSelection": {
+                                    "name": "Black-8",
+                                    "label": "Black-8",
+                                    "additionalCost": {
+                                        "amount": 0
+                                    },
+                                    "thumbnailImage": {
+                                        "imageUrl": "https://m.media-amazon.com/images/S/gestalt-seller-images-prod-us-east-1/ATVPDKIKX0DER/AXQF0TJ1AYTJM/e772b0d3-bff2-460c-96fe-dd77089a7f66.png",
+                                        "dimension": {
+                                            "width": 200,
+                                            "height": 200
+                                        }
+                                    }
+                                },
+                                "displayValue": "Black-8"
+                            },
+                            {
+                                "type": "OptionCustomization",
+                                "name": "Select Product Type",
+                                "label": "Select Product Type",
+                                "optionSelection": {
+                                    "additionalCost": {
+                                        "amount": 17.95
+                                    },
+                                    "label": "Crewneck Sweatshirt",
+                                    "name": "Crewneck Sweatshirt",
+                                    "thumbnailImage": {
+                                        "dimension": {
+                                            "height": 1000,
+                                            "width": 1000
+                                        },
+                                        "imageUrl": "https://m.media-amazon.com/images/S/gestalt-seller-images-prod-us-east-1/ATVPDKIKX0DER/A2ZMARM99FJE1U/057b273f-c90c-4833-8635-7fd08cc705f6.png"
+                                    }
+                                },
+                                "displayValue": "Crewneck Sweatshirt"
+                            },
+                            {
+                                "type": "OptionCustomization",
+                                "name": "Select Size",
+                                "label": "Select Size",
+                                "optionSelection": {
+                                    "additionalCost": {
+                                        "amount": 4
+                                    },
+                                    "label": "XL",
+                                    "name": "XL"
+                                },
+                                "displayValue": "XL"
+                            },
+                            {
+                                "type": "OptionCustomization",
+                                "name": "Select Color",
+                                "label": "Color",
+                                "optionSelection": {
+                                    "name": "Sand",
+                                    "label": "Sand",
+                                    "additionalCost": {
+                                        "amount": 0
+                                    },
+                                    "thumbnailImage": {
+                                        "imageUrl": "https://m.media-amazon.com/images/S/gestalt-seller-images-prod-us-east-1/ATVPDKIKX0DER/AXQF0TJ1AYTJM/8b64411b-ae94-4eb4-a8cd-4d8dc4229caa.png",
+                                        "dimension": {
+                                            "width": 500,
+                                            "height": 500
+                                        }
+                                    }
+                                },
+                                "displayValue": "Sand"
+                            },
+                            {
+                                "type": "OptionCustomization",
+                                "name": "Option Dropdown 5",
+                                "label": "Priority Production",
+                                "optionSelection": {
+                                    "name": "No",
+                                    "label": "No",
+                                    "additionalCost": {
+                                        "amount": 0
+                                    }
+                                },
+                                "displayValue": "No"
+                            }
+                        ]
+                    }
+                ],
+                "baseImage": {
+                    "imageUrl": "https://m.media-amazon.com/images/S/gestalt-seller-images-prod-us-east-1/ATVPDKIKX0DER/AXQF0TJ1AYTJM/bf54fa2c-c308-45b3-91c3-000ddf57a4c6.png",
+                    "dimension": {
+                        "width": 1000,
+                        "height": 1000
+                    }
+                },
+                "snapshot": {
+                    "imageName": "c292a7d1-42b6-8a0e-f7ff-d3c06a0efdab.jpg",
+                    "dimension": {
+                        "width": 400,
+                        "height": 400
+                    }
+                },
+                "svg": "82dee2c8-634e-2cae-8961-da7a725be00b.svg"
+            }
+        ]
+    },
+    "version3Data": {
+        "customizationInfo": {
+            "surfaces": [
+                {
+                    "name": "Customization",
+                    "areas": [
+                        {
+                            "customizationType": "TextPrinting",
+                            "colorName": "Black",
+                            "fill": "#000000",
+                            "fontFamily": "Lato",
+                            "Dimensions": {
+                                "width": 145,
+                                "height": 28
+                            },
+                            "Position": {
+                                "x": 241,
+                                "y": 37
+                            },
+                            "priceDelta": {
+                                "value": 0
+                            },
+                            "name": "Custom Nickname",
+                            "label": "Custom text on middle",
+                            "text": "I need diet coke"
+                        },
+                        {
+                            "customizationType": "TextPrinting",
+                            "colorName": "Black",
+                            "fill": "#000000",
+                            "fontFamily": "Lato",
+                            "Dimensions": {
+                                "width": 256,
+                                "height": 44
+                            },
+                            "Position": {
+                                "x": 133,
+                                "y": 306
+                            },
+                            "priceDelta": {
+                                "value": 0
+                            },
+                            "name": "Name On Sleeve",
+                            "label": "Custom text on Sleeve",
+                            "text": "Don’t forget the ice!"
+                        },
+                        {
+                            "customizationType": "Options",
+                            "name": "Text color",
+                            "label": "Choose Thread Color",
+                            "optionValue": "Black-8",
+                            "priceDelta": {
+                                "value": 0
+                            },
+                            "optionImage": ""
+                        },
+                        {
+                            "customizationType": "Options",
+                            "name": "Select Product Type",
+                            "label": "Select Product Type",
+                            "optionValue": "Crewneck Sweatshirt",
+                            "priceDelta": {
+                                "value": 17.95
+                            },
+                            "optionImage": ""
+                        },
+                        {
+                            "customizationType": "Options",
+                            "name": "Select Size",
+                            "label": "Select Size",
+                            "optionValue": "XL",
+                            "priceDelta": {
+                                "value": 4
+                            },
+                            "optionImage": ""
+                        },
+                        {
+                            "customizationType": "Options",
+                            "name": "Select Color",
+                            "label": "Color",
+                            "optionValue": "Sand",
+                            "priceDelta": {
+                                "value": 0
+                            },
+                            "optionImage": ""
+                        },
+                        {
+                            "customizationType": "Options",
+                            "name": "Option Dropdown 5",
+                            "label": "Priority Production",
+                            "optionValue": "No",
+                            "priceDelta": {
+                                "value": 0
+                            },
+                            "optionImage": ""
+                        }
+                    ]
+                }
+            ]
+        }
+    },
+    "baseImage": {
+        "imageUrl": "https://m.media-amazon.com/images/S/gestalt-seller-images-prod-us-east-1/ATVPDKIKX0DER/AXQF0TJ1AYTJM/bf54fa2c-c308-45b3-91c3-000ddf57a4c6.png",
+        "width": 1000,
+        "height": 1000
+    },
+    "snapshotImage": "c292a7d1-42b6-8a0e-f7ff-d3c06a0efdab.jpg",
+    "svgFile": "82dee2c8-634e-2cae-8961-da7a725be00b.svg",
+    "totalCustomizationPrice": 21.95,
+    "createdAt": {
+        "$date": "2025-07-18T03:44:28.176Z"
+    },
+    "__v": 0
+}
