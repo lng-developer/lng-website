@@ -114,7 +114,7 @@ const updateOrdersFromXlsx = async (req, res) => {
         const filePath = req.file.path;
         const ext = path.extname(req.file.originalname).toLowerCase();
         let rows = [];
-
+        const shopId = req.body.shopId;
         if (ext === '.txt') {
             const raw = fs.readFileSync(filePath, 'utf8');
             const delimiter = raw.includes('\t') ? '\t' : ',';
@@ -142,6 +142,7 @@ const updateOrdersFromXlsx = async (req, res) => {
             const basicData = {
                 orderId,
                 sku: row.sku,
+                shopId,
                 customer_infor: {
                     email: row.buyer_email,
                     name: row.recipient_name,
@@ -235,7 +236,10 @@ const getFrontendOrders = async (req, res) => {
             filter.status = status;
         }
 
-        const orders = await OrderCustomProduct.find(filter).sort({ createdAt: -1 });
+        const orders = await OrderCustomProduct.find(filter)
+            .populate('shopId', 'name')
+            .sort({ createdAt: -1 });
+
 
         const result = orders.map(order => {
             let version3Data = [];
@@ -264,7 +268,8 @@ const getFrontendOrders = async (req, res) => {
                 totalCustomizationPrice: order.totalCustomizationPrice || 0,
                 customized_url: order.customized_url,
                 purchase_date: order.purchase_date,
-                createdAt: order.createdAt
+                createdAt: order.createdAt,
+                shopName: order.shopId?.name
             };
         });
 

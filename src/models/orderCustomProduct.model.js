@@ -90,7 +90,10 @@ const orderCustomProductSchema = new mongoose.Schema({
 
     createdAt: { type: Date, default: Date.now },
     purchase_date: { type: Date },
-    store: String
+    shopId: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'Shop'
+    },
 });
 
 module.exports = mongoose.model('OrderCustomProduct', orderCustomProductSchema);
