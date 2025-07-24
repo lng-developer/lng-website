@@ -227,9 +227,17 @@ const getOrderById = async (req, res) => {
 
 const getFrontendOrders = async (req, res) => {
     try {
-        const orders = await OrderCustomProduct.find().sort({ createdAt: -1 });
+        const { status } = req.query;
+        let filter = {};
+
+        // Nếu có truyền status thì lọc theo status
+        if (status) {
+            filter.status = status;
+        }
+
+        const orders = await OrderCustomProduct.find(filter).sort({ createdAt: -1 });
+
         const result = orders.map(order => {
-            // Rút gọn version3Data nếu có
             let version3Data = [];
             const areas = order.version3Data?.customizationInfo?.surfaces?.[0]?.areas || [];
 
@@ -249,19 +257,23 @@ const getFrontendOrders = async (req, res) => {
                 title: order.title || '',
                 quantity: order.quantity || 1,
                 customer_infor: order.customer_infor,
+                status: order.status || '', // Đảm bảo trả ra status
                 version3Data,
                 baseImageUrl: order.baseImage?.imageUrl || null,
                 snapshotImage: order.snapshotImage || null,
                 totalCustomizationPrice: order.totalCustomizationPrice || 0,
                 customized_url: order.customized_url,
-                purchase_date: order.purchase_date
+                purchase_date: order.purchase_date,
+                createdAt: order.createdAt
             };
         });
+
         res.json(result);
     } catch (error) {
         res.status(500).json({ message: 'Failed to retrieve frontend orders', error: error.message });
     }
 };
+
 
 
 

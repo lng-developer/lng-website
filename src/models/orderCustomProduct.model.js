@@ -36,13 +36,13 @@ const customizationSchema = new mongoose.Schema({
 
 const orderCustomProductSchema = new mongoose.Schema({
     orderId: { type: String, required: true },
-    orderItemId: { type: String},
-    merchantId: { type: String},
+    orderItemId: { type: String },
+    merchantId: { type: String },
     marketplaceId: { type: String },
     asin: { type: String },
-    sku: { type: String},
-    title: { type: String},
-    quantity: { type: Number},
+    sku: { type: String },
+    title: { type: String },
+    quantity: { type: Number },
     customer_infor: {
         email: String,
         name: String,
@@ -78,14 +78,18 @@ const orderCustomProductSchema = new mongoose.Schema({
         width: Number,
         height: Number
     },
-
+    status: {
+        type: String,
+        enum: ["New", "Fulfilled", "Shipped", "Cancelled"],
+        default: "New"
+    },
     snapshotImage: String,
     svgFile: String,
     customized_url: String,
     totalCustomizationPrice: { type: Number, default: 0 },
 
     createdAt: { type: Date, default: Date.now },
-    purchase_date: {type: Date},
+    purchase_date: { type: Date },
     store: String
 });
 
