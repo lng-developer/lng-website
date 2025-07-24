@@ -3,10 +3,12 @@ const userRoutes = require('./user.routes');
 const accountRoutes = require('./account.routes');
 const authRoutes = require('./auth.routes');
 const orderCustomProductRoutes = require('./orderCustomProduct.routes');
+const shopRoutes = require('./shop.routes')
 module.exports = {
     roleRoutes,
     userRoutes,
     accountRoutes,
     authRoutes,
-    orderCustomProductRoutes
+    orderCustomProductRoutes,
+    shopRoutes
 };

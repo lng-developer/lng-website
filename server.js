@@ -5,7 +5,7 @@ const dotenv = require('dotenv');
 dotenv.config();
 
 const connectDB = require('./src/config/db.config');
-const { roleRoutes, userRoutes, accountRoutes, authRoutes, orderCustomProductRoutes } = require('./src/routes');
+const { roleRoutes, userRoutes, accountRoutes, authRoutes, orderCustomProductRoutes, shopRoutes } = require('./src/routes');
 
 const app = express();
 app.use(express.json());
@@ -23,6 +23,7 @@ app.use('/api/user', userRoutes);
 app.use('/api/account', accountRoutes);
 app.use('/api/auth', authRoutes);
 app.use('/api/order', orderCustomProductRoutes);
+app.use('/api/shop', shopRoutes);
 
 
 // Error Handler
