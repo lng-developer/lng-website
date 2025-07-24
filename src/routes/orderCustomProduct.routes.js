@@ -15,4 +15,7 @@ router.get('/fe', controller.getFrontendOrders);
 router.get('/:id', controller.getOrderById);
 
 router.post('/update-from-xlsx', controller.upload.single('file'), controller.updateOrdersFromXlsx);
+
+router.put('/update-status', controller.updateOrderStatus);
+
 module.exports = router;
