@@ -274,6 +274,33 @@ const getFrontendOrders = async (req, res) => {
     }
 };
 
+const updateOrderStatus = async (req, res) => {
+    try {
+        const { orderId, status } = req.body;
+        const allowedStatuses = ['New', 'Fulfilled', 'Shipped', 'Cancelled'];
+
+        if (!orderId || !status) {
+            return res.status(400).json({ message: 'Missing orderId or status' });
+        }
+
+        if (!allowedStatuses.includes(status)) {
+            return res.status(400).json({ message: 'Invalid status value' });
+        }
+
+        const order = await OrderCustomProduct.findOne({ orderId });
+        if (!order) {
+            return res.status(404).json({ message: 'Order not found' });
+        }
+
+        order.status = status;
+        await order.save();
+
+        res.status(200).json({ message: 'Order status updated successfully', orderId, newStatus: status });
+    } catch (error) {
+        res.status(500).json({ message: 'Failed to update order status', error: error.message });
+    }
+};
+
 
 
 
@@ -284,5 +311,6 @@ module.exports = {
     getOrderById,
     getFrontendOrders,
     upload,
-    updateOrdersFromXlsx
+    updateOrdersFromXlsx,
+    updateOrderStatus
 };
