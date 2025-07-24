@@ -228,24 +228,32 @@ const getOrderById = async (req, res) => {
 
 const getFrontendOrders = async (req, res) => {
     try {
-        const { status } = req.query;
+        const { status, search } = req.query;
         let filter = {};
 
-        // Nếu có truyền status thì lọc theo status
+        // Nếu có status thì thêm vào filter
         if (status) {
             filter.status = status;
+        }
+
+        // Nếu có từ khóa tìm kiếm
+        if (search) {
+            const keyword = new RegExp(search, 'i'); // Regex không phân biệt hoa thường
+
+            // Tìm theo orderId hoặc customer_infor.name
+            filter.$or = [
+                { orderId: keyword },
+                { 'customer_infor.name': keyword }
+            ];
         }
 
         const orders = await OrderCustomProduct.find(filter)
             .populate('shopId', 'name')
             .sort({ createdAt: -1 });
 
-
         const result = orders.map(order => {
-            let version3Data = [];
             const areas = order.version3Data?.customizationInfo?.surfaces?.[0]?.areas || [];
-
-            version3Data = areas.map(area => {
+            const version3Data = areas.map(area => {
                 const label = area.label || area.name || '';
                 const value = area.optionValue || area.text || '';
                 return { label, value };
@@ -261,7 +269,7 @@ const getFrontendOrders = async (req, res) => {
                 title: order.title || '',
                 quantity: order.quantity || 1,
                 customer_infor: order.customer_infor,
-                status: order.status || '', // Đảm bảo trả ra status
+                status: order.status || '',
                 version3Data,
                 baseImageUrl: order.baseImage?.imageUrl || null,
                 snapshotImage: order.snapshotImage || null,
@@ -269,7 +277,7 @@ const getFrontendOrders = async (req, res) => {
                 customized_url: order.customized_url,
                 purchase_date: order.purchase_date,
                 createdAt: order.createdAt,
-                shopName: order.shopId?.name
+                shopName: order.shopId?.name || null
             };
         });
 
