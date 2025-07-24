@@ -4,7 +4,7 @@ const User = require('./user.model')
 const Role = require('./role.model')
 const Account = require('./account.model')
 const OrderCustomProduct = require('./orderCustomProduct.model')
-
+const Shop = require('./shop.model')
 
 // Cau hinh mongoose dang global
 mongoose.Promise = global.Promise
@@ -17,6 +17,7 @@ db.user = User
 db.role = Role
 db.account = Account
 db.orderCustomProduct = OrderCustomProduct
+db.shop = Shop
 db.connectDB = async () => {
     await mongoose.connect(process.env.MONGO_URI, {
         dbName: process.env.DB_NAME
