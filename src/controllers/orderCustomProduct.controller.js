@@ -11,10 +11,11 @@ const AdmZip = require('adm-zip');
 const importOrderJson = async (req, res) => {
     try {
         const jsonData = req.body;
-        const existingOrder = await OrderCustomProduct.findOne({ orderId: jsonData.orderId });
-        if (!existingOrder) {
-            return res.status(404).json({ message: 'Order ID not found in DB' });
-        }
+        const order = await OrderCustomProduct.findOne({ orderId: jsonData.orderId });
+        if (!order) return res.status(404).json({ message: 'Order ID not found' });
+
+        const item = order.items.find(i => i.orderItemId === jsonData.orderItemId);
+        if (!item) return res.status(404).json({ message: 'OrderItem ID not found in Order' });
 
         let totalCustomizationPrice = 0;
         const options = jsonData?.customizationData?.children?.[0]?.children?.[0]?.children || [];
@@ -66,28 +67,20 @@ const importOrderJson = async (req, res) => {
             imageName: imageData?.imageName || "",
             buyerFilename: imageData?.buyerFilename || ""
         };
-
-        const updateFields = {
-            orderItemId: jsonData.orderItemId,
-            merchantId: jsonData.merchantId,
-            marketplaceId: jsonData.marketplaceId,
-            asin: jsonData.asin,
-            title: jsonData.title,
-            quantity: jsonData.quantity,
-            customization: customizationOptions,
-            customizationData: jsonData.customizationData || null,
-            version3Data: jsonData["version3.0"] || null,
-            baseImage: {
-                imageUrl: jsonData?.customizationData?.children?.[0]?.baseImage?.imageUrl || "",
-                width: jsonData?.customizationData?.children?.[0]?.baseImage?.dimension?.width || null,
-                height: jsonData?.customizationData?.children?.[0]?.baseImage?.dimension?.height || null
-            },
-            snapshotImage: jsonData?.customizationData?.children?.[0]?.snapshot?.imageName || "",
-            svgFile: jsonData?.customizationData?.children?.[0]?.svg || "",
-            totalCustomizationPrice
+        item.asin = jsonData.asin;
+        item.customization = customizationOptions;
+        item.customizationData = jsonData.customizationData || null;
+        item.version3Data = jsonData["version3.0"] || null;
+        item.baseImage = {
+            imageUrl: jsonData?.customizationData?.children?.[0]?.baseImage?.imageUrl || "",
+            width: jsonData?.customizationData?.children?.[0]?.baseImage?.dimension?.width || null,
+            height: jsonData?.customizationData?.children?.[0]?.baseImage?.dimension?.height || null
         };
+        item.snapshotImage = jsonData?.customizationData?.children?.[0]?.snapshot?.imageName || "";
+        item.svgFile = jsonData?.customizationData?.children?.[0]?.svg || "";
+        item.totalCustomizationPrice = totalCustomizationPrice;
 
-        await OrderCustomProduct.updateOne({ orderId: jsonData.orderId }, updateFields);
+        await order.save();
         res.status(200).json({ message: 'Order updated successfully!' });
     } catch (error) {
         res.status(500).json({ message: 'Failed to update order', error: error.message });
@@ -115,6 +108,7 @@ const updateOrdersFromXlsx = async (req, res) => {
         const ext = path.extname(req.file.originalname).toLowerCase();
         let rows = [];
         const shopId = req.body.shopId;
+
         if (ext === '.txt') {
             const raw = fs.readFileSync(filePath, 'utf8');
             const delimiter = raw.includes('\t') ? '\t' : ',';
@@ -131,18 +125,25 @@ const updateOrdersFromXlsx = async (req, res) => {
         } else {
             return res.status(400).json({ message: 'Only .txt files are supported' });
         }
-        console.log("rows:" + rows[1].order_id);
 
         const results = [];
         for (const row of rows) {
-            const orderId = row.order_id || row.orderId;
-
+            const orderId = row.order_id;
             if (!orderId) continue;
+
+            const itemData = {
+                orderItemId: row.order_item_id,
+                sku: row.sku,
+                title: row.product_name,
+                customized_url: row.customized_url,
+                quantity: Number(row.quantity_purchased || 1)
+            };
 
             const basicData = {
                 orderId,
-                sku: row.sku,
                 shopId,
+
+                purchase_date: row.purchase_date,
                 customer_infor: {
                     email: row.buyer_email,
                     name: row.recipient_name,
@@ -154,19 +155,21 @@ const updateOrdersFromXlsx = async (req, res) => {
                     state: row.ship_state,
                     zip_code: row.ship_postal_code,
                     country: row.ship_country
-                },
-                customized_url: row.customized_url,
-                purchase_date: row.purchase_date
+                }
             };
 
             const existing = await OrderCustomProduct.findOne({ orderId });
             if (existing) {
-                await OrderCustomProduct.updateOne({ orderId }, basicData);
+                const exists = existing.items.some(i => i.orderItemId === itemData.orderItemId);
+                if (!exists) {
+                    existing.items.push(itemData);
+                    await existing.save();
+                }
             } else {
-                const newOrder = new OrderCustomProduct(basicData);
-                await newOrder.save();
+                await new OrderCustomProduct({ ...basicData, items: [itemData] }).save();
             }
-            // Step 2: Fetch and process JSON
+
+            // fetch json & update
             try {
                 const url = row.customized_url;
                 if (!url) {
@@ -176,21 +179,16 @@ const updateOrdersFromXlsx = async (req, res) => {
 
                 const zipResponse = await axios.get(url, { responseType: 'arraybuffer' });
                 const zip = new AdmZip(Buffer.from(zipResponse.data));
-                const zipEntries = zip.getEntries();
-                const jsonEntry = zipEntries.find(entry => entry.entryName.endsWith('.json'));
+                const jsonEntry = zip.getEntries().find(entry => entry.entryName.endsWith('.json'));
                 if (!jsonEntry) {
                     results.push({ orderId, status: 'no JSON in ZIP' });
                     continue;
                 }
 
-                const jsonContent = zip.readAsText(jsonEntry);
-                const jsonData = JSON.parse(jsonContent);
-
+                const jsonData = JSON.parse(zip.readAsText(jsonEntry));
                 const fakeReq = { body: jsonData };
                 const fakeRes = {
-                    status: code => ({
-                        json: msg => results.push({ orderId, status: code, message: msg?.message || msg })
-                    })
+                    status: code => ({ json: msg => results.push({ orderId, status: code, message: msg?.message || msg }) })
                 };
                 await importOrderJson(fakeReq, fakeRes);
             } catch (err) {
@@ -226,21 +224,18 @@ const getOrderById = async (req, res) => {
     }
 };
 
+// ✅ Updated getFrontendOrders to group multiple items under one orderId
 const getFrontendOrders = async (req, res) => {
     try {
         const { status, search } = req.query;
         let filter = {};
 
-        // Nếu có status thì thêm vào filter
         if (status) {
             filter.status = status;
         }
 
-        // Nếu có từ khóa tìm kiếm
         if (search) {
-            const keyword = new RegExp(search, 'i'); // Regex không phân biệt hoa thường
-
-            // Tìm theo orderId hoặc customer_infor.name
+            const keyword = new RegExp(search, 'i');
             filter.$or = [
                 { orderId: keyword },
                 { 'customer_infor.name': keyword }
@@ -252,32 +247,39 @@ const getFrontendOrders = async (req, res) => {
             .sort({ createdAt: -1 });
 
         const result = orders.map(order => {
-            const areas = order.version3Data?.customizationInfo?.surfaces?.[0]?.areas || [];
-            const version3Data = areas.map(area => {
-                const label = area.label || area.name || '';
-                const value = area.optionValue || area.text || '';
-                return { label, value };
+            const items = order.items.map(item => {
+                const areas = item.version3Data?.customizationInfo?.surfaces?.[0]?.areas || [];
+                const version3Data = areas.map(area => {
+                    const label = area.label || area.name || '';
+                    const value = area.optionValue || area.text || '';
+                    return { label, value };
+                });
+
+                return {
+                    orderItemId: item.orderItemId || null,
+                    sku: item.sku,
+                    title: item.title || '',
+                    quantity: item.quantity || 1,
+                    version3Data,
+                    baseImageUrl: item.baseImage?.imageUrl || null,
+                    snapshotImage: item.snapshotImage || null,
+                    totalCustomizationPrice: item.totalCustomizationPrice || 0,
+                    asin: item.asin,
+                    customized_url: item.customized_url
+                };
             });
 
             return {
                 orderId: order.orderId,
-                orderItemId: order.orderItemId || null,
                 merchantId: order.merchantId || null,
                 marketplaceId: order.marketplaceId || null,
-                asin: order.asin,
-                sku: order.sku,
-                title: order.title || '',
-                quantity: order.quantity || 1,
                 customer_infor: order.customer_infor,
                 status: order.status || '',
-                version3Data,
-                baseImageUrl: order.baseImage?.imageUrl || null,
-                snapshotImage: order.snapshotImage || null,
-                totalCustomizationPrice: order.totalCustomizationPrice || 0,
                 customized_url: order.customized_url,
                 purchase_date: order.purchase_date,
                 createdAt: order.createdAt,
-                shopName: order.shopId?.name || null
+                shopName: order.shopId?.name || null,
+                items
             };
         });
 
@@ -286,6 +288,7 @@ const getFrontendOrders = async (req, res) => {
         res.status(500).json({ message: 'Failed to retrieve frontend orders', error: error.message });
     }
 };
+
 
 const updateOrderStatus = async (req, res) => {
     try {
@@ -313,10 +316,6 @@ const updateOrderStatus = async (req, res) => {
         res.status(500).json({ message: 'Failed to update order status', error: error.message });
     }
 };
-
-
-
-
 
 module.exports = {
     importOrderFromFile,

@@ -1,3 +1,4 @@
+// ✅ orderCustomProduct.model.js
 const mongoose = require('mongoose');
 
 const customizationOptionSchema = new mongoose.Schema({
@@ -34,15 +35,31 @@ const customizationSchema = new mongoose.Schema({
     photoUploaded: imageUploadSchema
 }, { _id: false });
 
+const orderItemSchema = new mongoose.Schema({
+    orderItemId: String,
+    sku: String,
+    title: String,
+    quantity: Number,
+    customization: customizationSchema,
+    customizationData: { type: Object, default: null },
+    version3Data: { type: Object, default: null },
+    baseImage: {
+        imageUrl: String,
+        width: Number,
+        height: Number
+    },
+    snapshotImage: String,
+    svgFile: String,
+    totalCustomizationPrice: { type: Number, default: 0 },
+    customized_url: String,
+    asin: String
+}, { _id: false });
+
 const orderCustomProductSchema = new mongoose.Schema({
     orderId: { type: String, required: true },
-    orderItemId: { type: String },
-    merchantId: { type: String },
-    marketplaceId: { type: String },
-    asin: { type: String },
-    sku: { type: String },
-    title: { type: String },
-    quantity: { type: Number },
+    items: [orderItemSchema],
+    merchantId: String,
+    marketplaceId: String,
     customer_infor: {
         email: String,
         name: String,
@@ -55,45 +72,18 @@ const orderCustomProductSchema = new mongoose.Schema({
         country: String,
         phone_number: String
     },
-    vendorProduct: {
-        name: String,
-        size: String,
-        color: String
-    },
 
-    customization: customizationSchema,
-
-    customizationData: {
-        type: Object,
-        default: null
-    },
-
-    version3Data: {
-        type: Object,
-        default: null
-    },
-
-    baseImage: {
-        imageUrl: String,
-        width: Number,
-        height: Number
-    },
     status: {
         type: String,
         enum: ["New", "Fulfilled", "Shipped", "Cancelled"],
         default: "New"
     },
-    snapshotImage: String,
-    svgFile: String,
-    customized_url: String,
-    totalCustomizationPrice: { type: Number, default: 0 },
-
-    createdAt: { type: Date, default: Date.now },
     purchase_date: { type: Date },
     shopId: {
         type: mongoose.Schema.Types.ObjectId,
         ref: 'Shop'
     },
+    createdAt: { type: Date, default: Date.now }
 });
 
 module.exports = mongoose.model('OrderCustomProduct', orderCustomProductSchema);
