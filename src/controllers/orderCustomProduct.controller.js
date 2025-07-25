@@ -127,6 +127,7 @@ const updateOrdersFromXlsx = async (req, res) => {
         }
 
         const results = [];
+
         for (const row of rows) {
             const orderId = row.order_id;
             if (!orderId) continue;
@@ -142,7 +143,6 @@ const updateOrdersFromXlsx = async (req, res) => {
             const basicData = {
                 orderId,
                 shopId,
-
                 purchase_date: row.purchase_date,
                 customer_infor: {
                     email: row.buyer_email,
@@ -169,7 +169,6 @@ const updateOrdersFromXlsx = async (req, res) => {
                 await new OrderCustomProduct({ ...basicData, items: [itemData] }).save();
             }
 
-            // fetch json & update
             try {
                 const url = row.customized_url;
                 if (!url) {
@@ -179,16 +178,42 @@ const updateOrdersFromXlsx = async (req, res) => {
 
                 const zipResponse = await axios.get(url, { responseType: 'arraybuffer' });
                 const zip = new AdmZip(Buffer.from(zipResponse.data));
+
+                // ✅ Extract .png images
+                const imageEntries = zip.getEntries().filter(entry => entry.entryName.endsWith('.jpg' || '.png'));
+                const imageUrls = [];
+
+                for (const imageEntry of imageEntries) {
+                    const imageBuffer = imageEntry.getData();
+                    const imageName = path.basename(imageEntry.entryName);
+                    const imageDir = path.join(__dirname, '../public/uploads/images');
+                    const imagePath = path.join(imageDir, imageName);
+
+                    fs.mkdirSync(imageDir, { recursive: true });
+                    fs.writeFileSync(imagePath, imageBuffer);
+
+                    const publicUrl = `/uploads/images/${imageName}`;
+                    imageUrls.push(publicUrl);
+                }
+
+                // ✅ Extract .json and process
                 const jsonEntry = zip.getEntries().find(entry => entry.entryName.endsWith('.json'));
                 if (!jsonEntry) {
-                    results.push({ orderId, status: 'no JSON in ZIP' });
+                    results.push({ orderId, status: 'no JSON in ZIP', images: imageUrls });
                     continue;
                 }
 
                 const jsonData = JSON.parse(zip.readAsText(jsonEntry));
                 const fakeReq = { body: jsonData };
                 const fakeRes = {
-                    status: code => ({ json: msg => results.push({ orderId, status: code, message: msg?.message || msg }) })
+                    status: code => ({
+                        json: msg => results.push({
+                            orderId,
+                            status: code,
+                            message: msg?.message || msg,
+                            images: imageUrls
+                        })
+                    })
                 };
                 await importOrderJson(fakeReq, fakeRes);
             } catch (err) {
@@ -202,6 +227,7 @@ const updateOrdersFromXlsx = async (req, res) => {
         res.status(500).json({ message: 'Batch import failed', error: error.message });
     }
 };
+
 
 const getAllOrders = async (req, res) => {
     try {
@@ -255,6 +281,20 @@ const getFrontendOrders = async (req, res) => {
                     return { label, value };
                 });
 
+                // ✅ lấy snapshot từ customizationData nếu có
+                let snapshotImage = null;
+                try {
+                    const previewContainers = item.customizationData?.children || [];
+                    for (const container of previewContainers) {
+                        if (container?.snapshot?.imageName) {
+                            snapshotImage = container.snapshot.imageName;
+                            break;
+                        }
+                    }
+                } catch (e) {
+                    snapshotImage = null;
+                }
+
                 return {
                     orderItemId: item.orderItemId || null,
                     sku: item.sku,
@@ -262,13 +302,12 @@ const getFrontendOrders = async (req, res) => {
                     quantity: item.quantity || 1,
                     version3Data,
                     baseImageUrl: item.baseImage?.imageUrl || null,
-                    snapshotImage: item.snapshotImage || null,
+                    snapshotImage: snapshotImage ? `https://lng-website-production.up.railway.app/uploads/images/${snapshotImage}` : null,
                     totalCustomizationPrice: item.totalCustomizationPrice || 0,
                     asin: item.asin,
                     customized_url: item.customized_url
                 };
             });
-
             return {
                 orderId: order.orderId,
                 merchantId: order.merchantId || null,
