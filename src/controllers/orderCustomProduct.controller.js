@@ -155,7 +155,7 @@ const updateOrdersFromXlsx = async (req, res) => {
                     zip_code: row.ship_postal_code,
                     country: row.ship_country
                 },
-                shipping_type: row.ship - service - level
+                shipping_type: row.ship_service_level
             };
 
             const existing = await OrderCustomProduct.findOne({ orderId });
