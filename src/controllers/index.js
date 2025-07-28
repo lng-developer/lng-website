@@ -5,4 +5,6 @@ const authController = require('./auth.controller');
 const orderCustomProductController = require('./orderCustomProduct.controller');
 const shopController = require('./shop.controller')
 const vendorController = require('./vendor.controller')
-module.exports = { roleController, userController, accountController, authController, orderCustomProductController, shopController, vendorController};
+const vendorProductController = require('./vendorProduct.controller')
+
+module.exports = { roleController, userController, accountController, authController, orderCustomProductController, shopController, vendorController, vendorProductController};
