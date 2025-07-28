@@ -18,4 +18,6 @@ router.post('/update-from-xlsx', controller.upload.single('file'), controller.up
 
 router.put('/update-status', controller.updateOrderStatus);
 
+router.put('/update-shipping-type', controller.updateShippingType);
+
 module.exports = router;

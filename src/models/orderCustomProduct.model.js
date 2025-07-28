@@ -72,7 +72,6 @@ const orderCustomProductSchema = new mongoose.Schema({
         country: String,
         phone_number: String
     },
-
     status: {
         type: String,
         enum: ["New", "Fulfilled", "Shipped", "Cancelled"],
@@ -83,7 +82,11 @@ const orderCustomProductSchema = new mongoose.Schema({
         type: mongoose.Schema.Types.ObjectId,
         ref: 'Shop'
     },
-    createdAt: { type: Date, default: Date.now }
+    createdAt: { type: Date, default: Date.now },
+    shipping_type: {
+        type: String,
+        enum: ["Second Day", "Ground", "Overngight", "Economy", "Standard"]
+    }
 });
 
 module.exports = mongoose.model('OrderCustomProduct', orderCustomProductSchema);

@@ -79,7 +79,6 @@ const importOrderJson = async (req, res) => {
         item.snapshotImage = jsonData?.customizationData?.children?.[0]?.snapshot?.imageName || "";
         item.svgFile = jsonData?.customizationData?.children?.[0]?.svg || "";
         item.totalCustomizationPrice = totalCustomizationPrice;
-
         await order.save();
         res.status(200).json({ message: 'Order updated successfully!' });
     } catch (error) {
@@ -155,7 +154,8 @@ const updateOrdersFromXlsx = async (req, res) => {
                     state: row.ship_state,
                     zip_code: row.ship_postal_code,
                     country: row.ship_country
-                }
+                },
+                shipping_type: row.ship - service - level
             };
 
             const existing = await OrderCustomProduct.findOne({ orderId });
@@ -318,6 +318,7 @@ const getFrontendOrders = async (req, res) => {
                 purchase_date: order.purchase_date,
                 createdAt: order.createdAt,
                 shopName: order.shopId?.name || null,
+                shipping_type: order.shipping_type || null,
                 items
             };
         });
@@ -356,6 +357,34 @@ const updateOrderStatus = async (req, res) => {
     }
 };
 
+
+const updateShippingType = async (req, res) => {
+    try {
+        const { orderId, shipping_type } = req.body;
+        const allowedShippingType = ["Second Day", "Ground", "Overngight", "Economy", "Standard"];
+
+        if (!orderId || !shipping_type) {
+            return res.status(400).json({ message: 'Missing orderId or shipping type' });
+        }
+
+        if (!allowedShippingType.includes(shipping_type)) {
+            return res.status(400).json({ message: 'Invalid status value' });
+        }
+
+        const order = await OrderCustomProduct.findOne({ orderId });
+        if (!order) {
+            return res.status(404).json({ message: 'Order not found' });
+        }
+
+        order.shipping_type = shipping_type;
+        await order.save();
+
+        res.status(200).json({ message: 'Order shipping type updated successfully', orderId, newShippingType: shipping_type });
+    } catch (error) {
+        res.status(500).json({ message: 'Failed to update order shipping type', error: error.message });
+    }
+};
+
 module.exports = {
     importOrderFromFile,
     getAllOrders,
@@ -363,5 +392,6 @@ module.exports = {
     getFrontendOrders,
     upload,
     updateOrdersFromXlsx,
-    updateOrderStatus
+    updateOrderStatus,
+    updateShippingType
 };
