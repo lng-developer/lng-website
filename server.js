@@ -5,7 +5,7 @@ const dotenv = require('dotenv');
 dotenv.config();
 const path = require('path');
 const connectDB = require('./src/config/db.config');
-const { roleRoutes, userRoutes, accountRoutes, authRoutes, orderCustomProductRoutes, shopRoutes, vendorRoutes } = require('./src/routes');
+const { roleRoutes, userRoutes, accountRoutes, authRoutes, orderCustomProductRoutes, shopRoutes, vendorRoutes, vendorProductRoutes } = require('./src/routes');
 
 const app = express();
 app.use(express.json());
@@ -25,6 +25,8 @@ app.use('/api/auth', authRoutes);
 app.use('/api/order', orderCustomProductRoutes);
 app.use('/api/shop', shopRoutes);
 app.use('/api/vendor', vendorRoutes);
+app.use('/api/vendor-product', vendorProductRoutes);
+
 
 app.use('/uploads', express.static(path.join(__dirname, 'src/public/uploads')));
 
