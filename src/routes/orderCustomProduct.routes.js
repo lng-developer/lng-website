@@ -24,6 +24,7 @@ router.put('/update-base-cost', controller.updateBaseCost);
 
 router.put('/update-customer-info', controller.updateCustomerInfo);
 
+router.put('/open-case', controller.openCaseInOrder);
 
 
 module.exports = router;
