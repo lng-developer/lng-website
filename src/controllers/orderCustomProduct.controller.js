@@ -7,6 +7,8 @@ const path = require('path');
 const upload = multer({ dest: 'uploads/' });
 const axios = require('axios');
 const AdmZip = require('adm-zip');
+const streamifier = require('streamifier');
+const cloudinary = require('../utils/cloudinary');
 
 const importOrderJson = async (req, res) => {
     try {
@@ -67,6 +69,7 @@ const importOrderJson = async (req, res) => {
             imageName: imageData?.imageName || "",
             buyerFilename: imageData?.buyerFilename || ""
         };
+
         item.asin = jsonData.asin;
         item.customization = customizationOptions;
         item.customizationData = jsonData.customizationData || null;
@@ -76,9 +79,13 @@ const importOrderJson = async (req, res) => {
             width: jsonData?.customizationData?.children?.[0]?.baseImage?.dimension?.width || null,
             height: jsonData?.customizationData?.children?.[0]?.baseImage?.dimension?.height || null
         };
-        item.snapshotImage = jsonData?.customizationData?.children?.[0]?.snapshot?.imageName || "";
+
+        // ✅ Gán link snapshot từ Cloudinary
+        item.snapshotImage = (jsonData?.cloudinarySnapshots && jsonData.cloudinarySnapshots[0]) || "";
+
         item.svgFile = jsonData?.customizationData?.children?.[0]?.svg || "";
         item.totalCustomizationPrice = totalCustomizationPrice;
+
         await order.save();
         res.status(200).json({ message: 'Order updated successfully!' });
     } catch (error) {
@@ -101,6 +108,7 @@ const importOrderFromFile = async (req, res) => {
         res.status(500).json({ message: 'Failed to process JSON file', error: error.message });
     }
 };
+
 const updateOrdersFromXlsx = async (req, res) => {
     try {
         const filePath = req.file.path;
@@ -180,31 +188,25 @@ const updateOrdersFromXlsx = async (req, res) => {
                 const zipResponse = await axios.get(url, { responseType: 'arraybuffer' });
                 const zip = new AdmZip(Buffer.from(zipResponse.data));
 
-                // ✅ Extract .png images
-                const imageEntries = zip.getEntries().filter(entry => entry.entryName.endsWith('.jpg' || '.png'));
-                const imageUrls = [];
+                const imageEntries = zip.getEntries().filter(entry => /\.(jpe?g|png)$/i.test(entry.entryName));
+                const cloudinaryUrls = [];
 
                 for (const imageEntry of imageEntries) {
                     const imageBuffer = imageEntry.getData();
                     const imageName = path.basename(imageEntry.entryName);
-                    const imageDir = path.join(__dirname, '../public/uploads/images');
-                    const imagePath = path.join(imageDir, imageName);
-
-                    fs.mkdirSync(imageDir, { recursive: true });
-                    fs.writeFileSync(imagePath, imageBuffer);
-
-                    const publicUrl = `/uploads/images/${imageName}`;
-                    imageUrls.push(publicUrl);
+                    const cloudinaryUrl = await uploadToCloudinary(imageBuffer, imageName);
+                    cloudinaryUrls.push(cloudinaryUrl);
                 }
 
-                // ✅ Extract .json and process
                 const jsonEntry = zip.getEntries().find(entry => entry.entryName.endsWith('.json'));
                 if (!jsonEntry) {
-                    results.push({ orderId, status: 'no JSON in ZIP', images: imageUrls });
+                    results.push({ orderId, status: 'no JSON in ZIP', snapshots: cloudinaryUrls });
                     continue;
                 }
 
                 const jsonData = JSON.parse(zip.readAsText(jsonEntry));
+                jsonData.cloudinarySnapshots = cloudinaryUrls;
+
                 const fakeReq = { body: jsonData };
                 const fakeRes = {
                     status: code => ({
@@ -212,10 +214,11 @@ const updateOrdersFromXlsx = async (req, res) => {
                             orderId,
                             status: code,
                             message: msg?.message || msg,
-                            images: imageUrls
+                            snapshots: cloudinaryUrls
                         })
                     })
                 };
+
                 await importOrderJson(fakeReq, fakeRes);
             } catch (err) {
                 results.push({ orderId, status: 'failed', error: err.message });
@@ -227,6 +230,23 @@ const updateOrdersFromXlsx = async (req, res) => {
     } catch (error) {
         res.status(500).json({ message: 'Batch import failed', error: error.message });
     }
+};
+
+const uploadToCloudinary = (buffer, filename) => {
+    return new Promise((resolve, reject) => {
+        const stream = cloudinary.uploader.upload_stream(
+            {
+                resource_type: 'image',
+                folder: 'snapshot_images',
+                public_id: path.parse(filename).name
+            },
+            (error, result) => {
+                if (error) reject(error);
+                else resolve(result.secure_url);
+            }
+        );
+        streamifier.createReadStream(buffer).pipe(stream);
+    });
 };
 
 
