@@ -26,10 +26,29 @@ const deleteVendorProduct = async (req, res) => {
     res.status(204).send();
 };
 
+const getVendorProductsByVendorId = async (req, res) => {
+    try {
+        const { vendorId } = req.params;
+
+        if (!vendorId) {
+            return res.status(400).json({ message: 'Missing vendorId in params' });
+        }
+
+        const products = await VendorProduct.find({ vendor_id: vendorId })
+            .populate('vendor_id')
+
+        res.status(200).json(products);
+    } catch (error) {
+        res.status(500).json({ message: 'Failed to fetch vendor products', error: error.message });
+    }
+};
+
+
 module.exports = {
     getAllVendorProducts,
     getVendorProductById,
     createVendorProduct,
     updateVendorProduct,
-    deleteVendorProduct
+    deleteVendorProduct,
+    getVendorProductsByVendorId
 };
