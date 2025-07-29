@@ -412,6 +412,36 @@ const updateBaseCost = async (req, res) => {
     }
 };
 
+const updateCustomerInfo = async (req, res) => {
+    try {
+        const { orderId, customer_infor } = req.body;
+
+        if (!orderId || !customer_infor || typeof customer_infor !== 'object') {
+            return res.status(400).json({ message: 'Missing or invalid orderId or customer_infor' });
+        }
+
+        const order = await OrderCustomProduct.findOne({ orderId });
+        if (!order) {
+            return res.status(404).json({ message: 'Order not found' });
+        }
+
+        // Nếu chưa có field customer_infor, khởi tạo object
+        if (!order.customer_infor) order.customer_infor = {};
+
+        // Chỉ cập nhật các trường được truyền lên
+        Object.keys(customer_infor).forEach(key => {
+            order.customer_infor[key] = customer_infor[key];
+        });
+
+        await order.save();
+
+        res.status(200).json({ message: 'Customer info updated successfully', orderId });
+    } catch (error) {
+        res.status(500).json({ message: 'Failed to update customer info', error: error.message });
+    }
+};
+
+
 
 module.exports = {
     importOrderFromFile,
@@ -422,5 +452,6 @@ module.exports = {
     updateOrdersFromXlsx,
     updateOrderStatus,
     updateShippingType,
-    updateBaseCost
+    updateBaseCost,
+    updateCustomerInfo
 };
