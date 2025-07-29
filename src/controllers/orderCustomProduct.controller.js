@@ -324,7 +324,7 @@ const getFrontendOrders = async (req, res) => {
                     quantity: item.quantity || 1,
                     version3Data,
                     baseImageUrl: item.baseImage?.imageUrl || null,
-                    snapshotImage: snapshotImage ? `https://lng-website-production.up.railway.app/uploads/images/${snapshotImage}` : null,
+                    snapshotImage: snapshotImage,
                     totalCustomizationPrice: item.totalCustomizationPrice || 0,
                     asin: item.asin,
                     customized_url: item.customized_url
