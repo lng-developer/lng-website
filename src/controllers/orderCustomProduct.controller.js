@@ -271,6 +271,7 @@ const getFrontendOrders = async (req, res) => {
 
         const orders = await OrderCustomProduct.find(filter)
             .populate('shopId', 'name')
+            .populate("case", 'name')
             .sort({ createdAt: -1 });
 
         const result = orders.map(order => {
@@ -321,7 +322,8 @@ const getFrontendOrders = async (req, res) => {
                 shopName: order.shopId?.name || null,
                 shipping_type: order.shipping_type || null,
                 items,
-                base_cost: order.base_cost
+                base_cost: order.base_cost,
+                case: order.case
             };
         });
 
@@ -441,6 +443,27 @@ const updateCustomerInfo = async (req, res) => {
     }
 };
 
+const openCaseInOrder = async (req, res) => {
+    try {
+        const { orderId, caseIds } = req.body;
+
+        if (!orderId || !Array.isArray(caseIds)) {
+            return res.status(400).json({ message: 'Missing orderId or caseIds (should be an array)' });
+        }
+
+        const order = await OrderCustomProduct.findOne({ orderId });
+        if (!order) {
+            return res.status(404).json({ message: 'Order not found' });
+        }
+
+        order.case = caseIds;
+        await order.save();
+
+        res.status(200).json({ message: 'Case field updated successfully', orderId, case: order.case });
+    } catch (error) {
+        res.status(500).json({ message: 'Failed to update case field', error: error.message });
+    }
+};
 
 
 module.exports = {
@@ -453,5 +476,6 @@ module.exports = {
     updateOrderStatus,
     updateShippingType,
     updateBaseCost,
-    updateCustomerInfo
+    updateCustomerInfo,
+    openCaseInOrder
 };

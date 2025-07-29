@@ -87,7 +87,10 @@ const orderCustomProductSchema = new mongoose.Schema({
     shipping_type: {
         type: String,
         enum: ["Second Day", "Ground", "Overngight", "Economy", "Standard"]
-    }
+    },
+    case: [
+        { type: mongoose.Schema.Types.ObjectId, ref: 'Case', required: true }
+    ]
 });
 
 module.exports = mongoose.model('OrderCustomProduct', orderCustomProductSchema);

@@ -13,7 +13,8 @@ const { roleRoutes,
     shopRoutes,
     vendorRoutes,
     vendorProductRoutes,
-    vendorCostCenterRoutes
+    vendorCostCenterRoutes,
+    caseRoutes
 } = require('./src/routes');
 
 const app = express();
@@ -36,6 +37,7 @@ app.use('/api/shop', shopRoutes);
 app.use('/api/vendor', vendorRoutes);
 app.use('/api/vendor-product', vendorProductRoutes);
 app.use('/api/vendor-cost-center', vendorCostCenterRoutes);
+app.use('/api/case', caseRoutes);
 
 
 app.use('/uploads', express.static(path.join(__dirname, 'src/public/uploads')));
