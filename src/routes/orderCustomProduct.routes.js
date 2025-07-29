@@ -20,4 +20,8 @@ router.put('/update-status', controller.updateOrderStatus);
 
 router.put('/update-shipping-type', controller.updateShippingType);
 
+router.put('/update-base-cost', controller.updateBaseCost);
+
+
+
 module.exports = router;

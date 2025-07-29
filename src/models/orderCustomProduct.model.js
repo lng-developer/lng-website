@@ -77,6 +77,7 @@ const orderCustomProductSchema = new mongoose.Schema({
         enum: ["New", "Fulfilled", "Shipped", "Cancelled"],
         default: "New"
     },
+    base_cost: Number,
     purchase_date: { type: Date },
     shopId: {
         type: mongoose.Schema.Types.ObjectId,

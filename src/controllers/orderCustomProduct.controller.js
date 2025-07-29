@@ -155,7 +155,8 @@ const updateOrdersFromXlsx = async (req, res) => {
                     zip_code: row.ship_postal_code,
                     country: row.ship_country
                 },
-                shipping_type: row.ship_service_level
+                shipping_type: row.ship_service_level,
+                base_cost: 0
             };
 
             const existing = await OrderCustomProduct.findOne({ orderId });
@@ -319,7 +320,8 @@ const getFrontendOrders = async (req, res) => {
                 createdAt: order.createdAt,
                 shopName: order.shopId?.name || null,
                 shipping_type: order.shipping_type || null,
-                items
+                items,
+                base_cost: order.base_cost
             };
         });
 
@@ -384,6 +386,32 @@ const updateShippingType = async (req, res) => {
         res.status(500).json({ message: 'Failed to update order shipping type', error: error.message });
     }
 };
+const updateBaseCost = async (req, res) => {
+    try {
+        const { orderId, base_cost } = req.body;
+
+        if (!orderId || base_cost === undefined || base_cost === null) {
+            return res.status(400).json({ message: 'Missing orderId or base cost' });
+        }
+
+        if (typeof base_cost !== 'number' || base_cost <= 0) {
+            return res.status(400).json({ message: 'Base Cost must be a positive number' });
+        }
+
+        const order = await OrderCustomProduct.findOne({ orderId });
+        if (!order) {
+            return res.status(404).json({ message: 'Order not found' });
+        }
+
+        order.base_cost = base_cost;
+        await order.save();
+
+        res.status(200).json({ message: 'Order base cost updated successfully', orderId, newBaseCost: base_cost });
+    } catch (error) {
+        res.status(500).json({ message: 'Failed to update order base cost', error: error.message });
+    }
+};
+
 
 module.exports = {
     importOrderFromFile,
@@ -393,5 +421,6 @@ module.exports = {
     upload,
     updateOrdersFromXlsx,
     updateOrderStatus,
-    updateShippingType
+    updateShippingType,
+    updateBaseCost
 };
