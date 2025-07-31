@@ -303,20 +303,6 @@ const getFrontendOrders = async (req, res) => {
                     return { label, value };
                 });
 
-                // ✅ lấy snapshot từ customizationData nếu có
-                let snapshotImage = null;
-                try {
-                    const previewContainers = item.customizationData?.children || [];
-                    for (const container of previewContainers) {
-                        if (container?.snapshot?.imageName) {
-                            snapshotImage = container.snapshot.imageName;
-                            break;
-                        }
-                    }
-                } catch (e) {
-                    snapshotImage = null;
-                }
-
                 return {
                     orderItemId: item.orderItemId || null,
                     sku: item.sku,
@@ -324,7 +310,7 @@ const getFrontendOrders = async (req, res) => {
                     quantity: item.quantity || 1,
                     version3Data,
                     baseImageUrl: item.baseImage?.imageUrl || null,
-                    snapshotImage: snapshotImage,
+                    snapshotImage: item.snapshotImage,
                     totalCustomizationPrice: item.totalCustomizationPrice || 0,
                     asin: item.asin,
                     customized_url: item.customized_url
