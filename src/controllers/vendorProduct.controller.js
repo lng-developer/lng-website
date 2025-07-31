@@ -12,8 +12,25 @@ const getVendorProductById = async (req, res) => {
 };
 
 const createVendorProduct = async (req, res) => {
-    const item = await VendorProduct.create(req.body);
-    res.status(201).json(item);
+    try {
+        const data = req.body;
+
+        if (Array.isArray(data)) {
+            if (data.length === 0) {
+                return res.status(400).json({ message: 'Empty array provided' });
+            }
+
+            const items = await VendorProduct.insertMany(data);
+            return res.status(201).json(items);
+        }
+
+        // Nếu là object → tạo 1 bản ghi
+        const item = await VendorProduct.create(data);
+        return res.status(201).json(item);
+
+    } catch (error) {
+        res.status(500).json({ message: 'Failed to create vendor product(s)', error: error.message });
+    }
 };
 
 const updateVendorProduct = async (req, res) => {

@@ -295,13 +295,32 @@ const getOrderById = async (req, res) => {
 // ✅ Updated getFrontendOrders to group multiple items under one orderId
 const getFrontendOrders = async (req, res) => {
     try {
-        const { status, search } = req.query;
-        let filter = {};
+        const {
+            page = 1,
+            perPage = 10,
+            from,
+            to,
+            statuses,
+            isNoCostCenter,
+            financialStatus,
+            sevenDayAlert,
+            platform,
+            search,
+            userNull,
+            noPsd
+        } = req.query;
 
-        if (status) {
-            filter.status = status;
+        const filter = {};
+
+        // Trạng thái đơn
+        if (statuses) {
+            const statusArray = statuses.split(',').filter(s => s);
+            if (statusArray.length > 0) {
+                filter.status = { $in: statusArray };
+            }
         }
 
+        // Tìm kiếm theo orderId hoặc customer name
         if (search) {
             const keyword = new RegExp(search, 'i');
             filter.$or = [
@@ -310,10 +329,64 @@ const getFrontendOrders = async (req, res) => {
             ];
         }
 
-        const orders = await OrderCustomProduct.find(filter)
+        // Khoảng thời gian tạo đơn
+        if (from && to) {
+            filter.createdAt = {
+                $gte: new Date(from),
+                $lte: new Date(to)
+            };
+        }
+
+        // Đơn chưa có cost center
+        if (isNoCostCenter === 'true') {
+            filter.base_cost = { $in: [null, 0] };
+        }
+
+        // Financial status
+        if (financialStatus) {
+            filter.financialStatus = financialStatus;
+        }
+
+        // Cảnh báo 7 ngày
+        if (sevenDayAlert === 'true') {
+            const today = new Date();
+            const sevenDaysLater = new Date(today);
+            sevenDaysLater.setDate(today.getDate() + 7);
+            filter.deliveryDate = { $lte: sevenDaysLater };
+        }
+
+        // Platform
+        if (platform) {
+            filter.platform = platform;
+        }
+
+        // Đơn không có user
+        if (userNull === 'true') {
+            filter.userId = null;
+        }
+
+        // Đơn không có PSD
+        if (noPsd === 'true') {
+            filter['items.snapshotImage'] = { $in: [null, ''] };
+        }
+
+        const isAll = perPage === 'All';
+        const skip = (parseInt(page) - 1) * parseInt(perPage);
+        const limit = parseInt(perPage);
+
+        let query = OrderCustomProduct.find(filter)
             .populate('shopId', 'name')
-            .populate("case", 'name')
+            .populate('case', 'name')
             .sort({ createdAt: -1 });
+
+        if (!isAll && !isNaN(skip) && !isNaN(limit)) {
+            query = query.skip(skip).limit(limit);
+        }
+
+        const [orders, totalCount] = await Promise.all([
+            query,
+            OrderCustomProduct.countDocuments(filter)
+        ]);
 
         const result = orders.map(order => {
             const items = order.items.map(item => {
@@ -337,6 +410,7 @@ const getFrontendOrders = async (req, res) => {
                     customized_url: item.customized_url
                 };
             });
+
             return {
                 orderId: order.orderId,
                 merchantId: order.merchantId || null,
@@ -354,11 +428,21 @@ const getFrontendOrders = async (req, res) => {
             };
         });
 
-        res.json(result);
+        res.json({
+            data: result,
+            totalCount,
+            totalPages: isAll ? 1 : Math.ceil(totalCount / limit),
+            currentPage: parseInt(page)
+        });
+
     } catch (error) {
-        res.status(500).json({ message: 'Failed to retrieve frontend orders', error: error.message });
+        res.status(500).json({
+            message: 'Failed to retrieve frontend orders',
+            error: error.message
+        });
     }
 };
+
 
 
 const updateOrderStatus = async (req, res) => {
