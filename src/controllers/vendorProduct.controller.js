@@ -2,7 +2,7 @@ const db = require('../models');
 const VendorProduct = db.vendorProduct;
 
 const getAllVendorProducts = async (req, res) => {
-    const list = await VendorProduct.find().populate('vendorId').populate('productId');
+    const list = await VendorProduct.find().populate('vendor_id')
     res.json(list);
 };
 
