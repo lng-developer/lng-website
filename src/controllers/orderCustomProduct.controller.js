@@ -19,6 +19,12 @@ const importOrderJson = async (req, res) => {
         const item = order.items.find(i => i.orderItemId === jsonData.orderItemId);
         if (!item) return res.status(404).json({ message: 'OrderItem ID not found in Order' });
 
+        // ❌ Nếu item đã có customization hoặc snapshotImage → bỏ qua hoàn toàn
+        if (item.customization || item.snapshotImage) {
+            return res.status(409).json({ message: 'Item already has customization data. Skipped.' });
+        }
+
+        // ✅ Tính tổng phí tùy chọn
         let totalCustomizationPrice = 0;
         const options = jsonData?.customizationData?.children?.[0]?.children?.[0]?.children || [];
 
@@ -27,6 +33,7 @@ const importOrderJson = async (req, res) => {
             totalCustomizationPrice += Number(amount);
         });
 
+        // ✅ Map các tùy chọn tuỳ chỉnh
         const customizationOptions = {};
         options.forEach(opt => {
             const label = opt?.label;
@@ -62,6 +69,7 @@ const importOrderJson = async (req, res) => {
             }
         });
 
+        // ✅ Ảnh khách upload
         const imageCustomization = options.find(opt => opt?.type === "PlacementContainerCustomization");
         const imageData = imageCustomization?.children?.[0]?.image || {};
 
@@ -70,6 +78,7 @@ const importOrderJson = async (req, res) => {
             buyerFilename: imageData?.buyerFilename || ""
         };
 
+        // ✅ Gán thông tin cho item
         item.asin = jsonData.asin;
         item.customization = customizationOptions;
         item.customizationData = jsonData.customizationData || null;
@@ -80,9 +89,7 @@ const importOrderJson = async (req, res) => {
             height: jsonData?.customizationData?.children?.[0]?.baseImage?.dimension?.height || null
         };
 
-        // ✅ Gán link snapshot từ Cloudinary
         item.snapshotImage = (jsonData?.cloudinarySnapshots && jsonData.cloudinarySnapshots[0]) || "";
-
         item.svgFile = jsonData?.customizationData?.children?.[0]?.svg || "";
         item.totalCustomizationPrice = totalCustomizationPrice;
 
@@ -92,6 +99,8 @@ const importOrderJson = async (req, res) => {
         res.status(500).json({ message: 'Failed to update order', error: error.message });
     }
 };
+
+
 
 const importOrderFromFile = async (req, res) => {
     try {
@@ -168,15 +177,26 @@ const updateOrdersFromXlsx = async (req, res) => {
             };
 
             const existing = await OrderCustomProduct.findOne({ orderId });
+
+            let skipProcessingZip = false;
+
             if (existing) {
                 const exists = existing.items.some(i => i.orderItemId === itemData.orderItemId);
                 if (!exists) {
                     existing.items.push(itemData);
                     await existing.save();
+                    results.push({ orderId, status: 'item added' });
+                } else {
+                    results.push({ orderId, status: 'item exists' });
+                    skipProcessingZip = true;
                 }
             } else {
                 await new OrderCustomProduct({ ...basicData, items: [itemData] }).save();
+                results.push({ orderId, status: 'new order created' });
             }
+
+            // ❌ Nếu item đã tồn tại, bỏ qua toàn bộ ZIP handling
+            if (skipProcessingZip) continue;
 
             try {
                 const url = row.customized_url;
@@ -231,6 +251,7 @@ const updateOrdersFromXlsx = async (req, res) => {
         res.status(500).json({ message: 'Batch import failed', error: error.message });
     }
 };
+
 
 const uploadToCloudinary = (buffer, filename) => {
     return new Promise((resolve, reject) => {
