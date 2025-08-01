@@ -86,7 +86,8 @@ const orderCustomProductSchema = new mongoose.Schema({
     createdAt: { type: Date, default: Date.now },
     shipping_type: {
         type: String,
-        enum: ["Second Day", "Ground", "Overngight", "Economy", "Standard"]
+        enum: ["Second Day", "Ground", "Overnight", "Economy", "Standard", "Expedited"],
+        default: "Standard"
     },
     case: [
         { type: mongoose.Schema.Types.ObjectId, ref: 'Case', required: true }
