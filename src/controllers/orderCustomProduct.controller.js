@@ -508,7 +508,7 @@ const getOrderStatistics = async (req, res) => {
             new: newCount,
             noCostCenter,
             paymentPending,
-            fulfillment,
+            fulfilled: fulfillment,
             shipped,
             cancelled,
             refund
