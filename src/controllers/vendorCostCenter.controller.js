@@ -8,12 +8,72 @@ const VendorProduct = require('../models/vendorProduct.model'); // import nếu 
 // GET all vendor cost centers
 const getAllVendorCostCenters = async (req, res) => {
     try {
-        const list = await VendorCostCenter.find().populate('history.updated_by', 'name');
-        res.json(list);
+        const {
+            vendor_product,
+            status,
+            vendor_size,
+            vendor_color,
+            sku,
+            search,         // search keyword for sku/size/color
+            page = 1,
+            perPage = 10
+        } = req.query;
+
+        const filter = {};
+
+        if (vendor_product) {
+            filter.vendor_product = vendor_product;
+        }
+
+        if (status) {
+            filter.status = status;
+        }
+
+        if (vendor_size) {
+            filter.vendor_size = vendor_size;
+        }
+
+        if (vendor_color) {
+            filter.vendor_color = vendor_color;
+        }
+
+        if (sku) {
+            filter.sku = sku;
+        }
+
+        // Search keyword
+        if (search) {
+            const regex = new RegExp(search, 'i');
+            filter.$or = [
+                { sku: regex },
+                { vendor_size: regex },
+                { vendor_color: regex }
+            ];
+        }
+
+        const skip = (parseInt(page) - 1) * parseInt(perPage);
+        const limit = parseInt(perPage);
+
+        const [total, items] = await Promise.all([
+            VendorCostCenter.countDocuments(filter),
+            VendorCostCenter.find(filter)
+                .populate('history.updated_by', 'name')
+                .sort({ created_at: -1 }) // optional
+                .skip(skip)
+                .limit(limit)
+        ]);
+
+        res.json({
+            total,
+            page: parseInt(page),
+            perPage: parseInt(perPage),
+            data: items
+        });
     } catch (error) {
         res.status(500).json({ message: error.message });
     }
 };
+
 
 // GET single vendor cost center by ID
 const getVendorCostCenterById = async (req, res) => {
