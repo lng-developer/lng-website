@@ -2,6 +2,8 @@ const XLSX = require('xlsx');
 const fs = require('fs');
 const db = require('../models');
 const VendorCostCenter = db.vendorCostCenter;
+const VendorProduct = require('../models/vendorProduct.model'); // import nếu chưa
+
 
 // GET all vendor cost centers
 const getAllVendorCostCenters = async (req, res) => {
@@ -79,9 +81,22 @@ const updateVendorCostCenterStatus = async (req, res) => {
 const getCostCentersByVendorProduct = async (req, res) => {
     try {
         const { vendorProductId } = req.params;
+
+        // Lấy thông tin sản phẩm
+        const vendorProduct = await VendorProduct.findById(vendorProductId);
+        if (!vendorProduct) {
+            return res.status(404).json({ message: 'Vendor Product not found' });
+        }
+
+        // Lấy cost center liên quan
         const items = await VendorCostCenter.find({ vendor_product: vendorProductId })
             .populate('history.updated_by', 'name');
-        res.json(items);
+
+        // Trả về kèm tên sản phẩm
+        res.json({
+            vendor_product_name: vendorProduct.product_name || '',
+            items
+        });
     } catch (error) {
         res.status(500).json({ message: error.message });
     }
