@@ -11,6 +11,7 @@ router.get('/', controller.getAllOrders);
 // API dành riêng FE (tối ưu chỉ dữ liệu cần hiển thị)
 router.get('/fe', controller.getFrontendOrders);
 
+router.get('/statistic', controller.getOrderStatistics);
 // API xem chi tiết đơn hàng
 router.get('/:id', controller.getOrderById);
 
