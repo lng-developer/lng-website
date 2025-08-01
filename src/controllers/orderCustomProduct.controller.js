@@ -307,14 +307,15 @@ const getFrontendOrders = async (req, res) => {
             platform,
             search,
             userNull,
-            noPsd
+            noPsd,
+            shippingType
         } = req.query;
 
         const filter = {};
 
         // Trạng thái đơn
-        if (statuses) {
-            const statusArray = statuses.split(',').filter(s => s);
+        if (statuses && statuses.trim() !== '') {
+            const statusArray = statuses.split(',').filter(s => s.trim());
             if (statusArray.length > 0) {
                 filter.status = { $in: statusArray };
             }
@@ -368,6 +369,17 @@ const getFrontendOrders = async (req, res) => {
         // Đơn không có PSD
         if (noPsd === 'true') {
             filter['items.snapshotImage'] = { $in: [null, ''] };
+        }
+
+        // Filter theo shipping_type
+        if (shippingType && shippingType.trim() !== '') {
+            const validShippingTypes = ["Second Day", "Ground", "Overnight", "Economy", "Standard", "Expedited"];
+            const types = shippingType.split(',').map(t => t.trim()).filter(t => validShippingTypes.includes(t));
+            if (types.length === 1) {
+                filter.shipping_type = types[0];
+            } else if (types.length > 1) {
+                filter.shipping_type = { $in: types };
+            }
         }
 
         const isAll = perPage === 'All';
@@ -442,6 +454,7 @@ const getFrontendOrders = async (req, res) => {
         });
     }
 };
+
 
 const getOrderStatistics = async (req, res) => {
     try {
