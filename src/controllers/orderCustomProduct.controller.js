@@ -448,88 +448,77 @@ const getOrderStatistics = async (req, res) => {
         const {
             from,
             to,
-            statuses,
-            isNoCostCenter,
-            financialStatus,
-            sevenDayAlert,
-            platform,
             search,
+            platform,
             userNull,
             noPsd
         } = req.query;
 
-        const filter = {};
+        const baseFilter = {};
 
-        // Trạng thái đơn
-        if (statuses) {
-            const statusArray = statuses.split(',').filter(s => s);
-            if (statusArray.length > 0) {
-                filter.status = { $in: statusArray };
-            }
-        }
-
-        // Tìm kiếm theo orderId hoặc customer name
-        if (search) {
-            const keyword = new RegExp(search, 'i');
-            filter.$or = [
-                { orderId: keyword },
-                { 'customer_infor.name': keyword }
-            ];
-        }
-
-        // Khoảng thời gian tạo đơn
+        // Lọc theo ngày tạo
         if (from && to) {
-            filter.purchase_date = {
+            if (isNaN(Date.parse(from)) || isNaN(Date.parse(to))) {
+                return res.status(400).json({ message: 'Invalid date format in from or to' });
+            }
+            baseFilter.createdAt = {
                 $gte: new Date(from),
                 $lte: new Date(to)
             };
         }
 
-        // Đơn chưa có cost center
-        if (isNoCostCenter === 'true') {
-            filter.base_cost = { $in: [null, 0] };
+        // Lọc theo từ khoá
+        if (search) {
+            const keyword = new RegExp(search, 'i');
+            baseFilter.$or = [
+                { orderId: keyword },
+                { 'customer_infor.name': keyword }
+            ];
         }
 
-        // Financial status
-        if (financialStatus) {
-            filter.financialStatus = financialStatus;
-        }
-
-        // Cảnh báo 7 ngày
-        if (sevenDayAlert === 'true') {
-            const today = new Date();
-            const sevenDaysLater = new Date(today);
-            sevenDaysLater.setDate(today.getDate() + 7);
-            filter.deliveryDate = { $lte: sevenDaysLater };
-        }
-
-        // Platform
+        // Lọc theo platform
         if (platform) {
-            filter.platform = platform;
+            baseFilter.platform = platform;
         }
 
         // Đơn không có user
         if (userNull === 'true') {
-            filter.userId = null;
+            baseFilter.userId = null;
         }
 
-        // Đơn không có PSD
+        // Đơn không có PSD (ảnh snapshot)
         if (noPsd === 'true') {
-            filter['items.snapshotImage'] = { $in: [null, ''] };
+            baseFilter['items.snapshotImage'] = { $in: [null, ''] };
         }
 
-        // Lấy thống kê
-        const orders = await OrderCustomProduct.find(filter);
-
-        const totalOrders = orders.length;
-        const totalItems = orders.reduce((sum, order) => sum + (order.items?.length || 0), 0);
+        // Bắt đầu đếm
+        const [all, newCount, noCostCenter, paymentPending, fulfillment, shipped, cancelled, refund] = await Promise.all([
+            OrderCustomProduct.countDocuments(baseFilter),
+            OrderCustomProduct.countDocuments({ ...baseFilter, status: 'New' }),
+            OrderCustomProduct.countDocuments({ ...baseFilter, base_cost: { $in: [null, 0] } }),
+            OrderCustomProduct.countDocuments({ ...baseFilter, financialStatus: 'Pending' }),
+            OrderCustomProduct.countDocuments({ ...baseFilter, status: 'Fulfilled' }),
+            OrderCustomProduct.countDocuments({ ...baseFilter, status: 'Shipped' }),
+            OrderCustomProduct.countDocuments({ ...baseFilter, status: 'Cancelled' }),
+            OrderCustomProduct.countDocuments({ ...baseFilter, status: 'Refund' })
+        ]);
 
         res.json({
-            totalOrders,
-            totalItems
+            all,
+            new: newCount,
+            noCostCenter,
+            paymentPending,
+            fulfillment,
+            shipped,
+            cancelled,
+            refund
         });
+
     } catch (error) {
-        res.status(500).json({ message: 'Failed to retrieve order statistics', error: error.message });
+        res.status(500).json({
+            message: 'Failed to retrieve order statistics',
+            error: error.message
+        });
     }
 };
 
