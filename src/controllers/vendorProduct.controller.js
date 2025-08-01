@@ -2,9 +2,59 @@ const db = require('../models');
 const VendorProduct = db.vendorProduct;
 
 const getAllVendorProducts = async (req, res) => {
-    const list = await VendorProduct.find().populate('vendor_id')
-    res.json(list);
+    try {
+        const {
+            vendor_id,
+            status,
+            product_type_design,
+            search,
+            page = 1,
+            perPage = 10
+        } = req.query;
+
+        const filter = {};
+
+        // Filter
+        if (vendor_id) {
+            filter.vendor_id = vendor_id;
+        }
+
+        if (status) {
+            filter.status = status;
+        }
+
+        if (product_type_design) {
+            filter.product_type_design = product_type_design;
+        }
+
+        // Search by product_name (case-insensitive, partial match)
+        if (search) {
+            filter.product_name = { $regex: search, $options: 'i' };
+        }
+
+        const skip = (parseInt(page) - 1) * parseInt(perPage);
+        const limit = parseInt(perPage);
+
+        const [total, items] = await Promise.all([
+            VendorProduct.countDocuments(filter),
+            VendorProduct.find(filter)
+                .populate('vendor_id')
+                .sort({ created_at: -1 }) // Optional: newest first
+                .skip(skip)
+                .limit(limit)
+        ]);
+
+        res.json({
+            total,
+            page: parseInt(page),
+            perPage: parseInt(perPage),
+            data: items
+        });
+    } catch (error) {
+        res.status(500).json({ message: 'Failed to fetch vendor products', error: error.message });
+    }
 };
+
 
 const getVendorProductById = async (req, res) => {
     const item = await VendorProduct.findById(req.params.id);
