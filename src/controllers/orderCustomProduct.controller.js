@@ -443,6 +443,95 @@ const getFrontendOrders = async (req, res) => {
     }
 };
 
+const getOrderStatistics = async (req, res) => {
+    try {
+        const {
+            from,
+            to,
+            statuses,
+            isNoCostCenter,
+            financialStatus,
+            sevenDayAlert,
+            platform,
+            search,
+            userNull,
+            noPsd
+        } = req.query;
+
+        const filter = {};
+
+        // Trạng thái đơn
+        if (statuses) {
+            const statusArray = statuses.split(',').filter(s => s);
+            if (statusArray.length > 0) {
+                filter.status = { $in: statusArray };
+            }
+        }
+
+        // Tìm kiếm theo orderId hoặc customer name
+        if (search) {
+            const keyword = new RegExp(search, 'i');
+            filter.$or = [
+                { orderId: keyword },
+                { 'customer_infor.name': keyword }
+            ];
+        }
+
+        // Khoảng thời gian tạo đơn
+        if (from && to) {
+            filter.purchase_date = {
+                $gte: new Date(from),
+                $lte: new Date(to)
+            };
+        }
+
+        // Đơn chưa có cost center
+        if (isNoCostCenter === 'true') {
+            filter.base_cost = { $in: [null, 0] };
+        }
+
+        // Financial status
+        if (financialStatus) {
+            filter.financialStatus = financialStatus;
+        }
+
+        // Cảnh báo 7 ngày
+        if (sevenDayAlert === 'true') {
+            const today = new Date();
+            const sevenDaysLater = new Date(today);
+            sevenDaysLater.setDate(today.getDate() + 7);
+            filter.deliveryDate = { $lte: sevenDaysLater };
+        }
+
+        // Platform
+        if (platform) {
+            filter.platform = platform;
+        }
+
+        // Đơn không có user
+        if (userNull === 'true') {
+            filter.userId = null;
+        }
+
+        // Đơn không có PSD
+        if (noPsd === 'true') {
+            filter['items.snapshotImage'] = { $in: [null, ''] };
+        }
+
+        // Lấy thống kê
+        const orders = await OrderCustomProduct.find(filter);
+
+        const totalOrders = orders.length;
+        const totalItems = orders.reduce((sum, order) => sum + (order.items?.length || 0), 0);
+
+        res.json({
+            totalOrders,
+            totalItems
+        });
+    } catch (error) {
+        res.status(500).json({ message: 'Failed to retrieve order statistics', error: error.message });
+    }
+};
 
 
 const updateOrderStatus = async (req, res) => {
@@ -588,5 +677,6 @@ module.exports = {
     updateShippingType,
     updateBaseCost,
     updateCustomerInfo,
-    openCaseInOrder
+    openCaseInOrder,
+    getOrderStatistics
 };
