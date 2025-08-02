@@ -581,7 +581,7 @@ const updateOrderStatus = async (req, res) => {
 const updateShippingType = async (req, res) => {
     try {
         const { orderId, shipping_type } = req.body;
-        const allowedShippingType = ["Second Day", "Ground", "Overngight", "Economy", "Standard"];
+        const allowedShippingType = ["Second Day", "Ground", "Overnight", "Economy", "Standard"];
 
         if (!orderId || !shipping_type) {
             return res.status(400).json({ message: 'Missing orderId or shipping type' });
