@@ -61,4 +61,31 @@ const refreshToken = async (req, res) => {
     }
 };
 
-module.exports = { login, refreshToken };
+const changePassword = async (req, res) => {
+    try {
+        const { username, oldPassword, newPassword } = req.body;
+
+        if (!username || !oldPassword || !newPassword) {
+            return res.status(400).json({ message: 'Missing required fields' });
+        }
+
+        const account = await Account.findOne({ username });
+        if (!account) return res.status(404).json({ message: 'Account not found' });
+
+        const isMatch = await bcrypt.compare(oldPassword, account.password_hash);
+        if (!isMatch) return res.status(400).json({ message: 'Old password is incorrect' });
+
+        const salt = await bcrypt.genSalt(10);
+        const hashedNewPassword = await bcrypt.hash(newPassword, salt);
+
+        account.password_hash = hashedNewPassword;
+        await account.save();
+
+        res.json({ message: 'Password updated successfully' });
+    } catch (error) {
+        res.status(500).json({ error: { message: error.message } });
+    }
+};
+
+
+module.exports = { login, refreshToken, changePassword };
