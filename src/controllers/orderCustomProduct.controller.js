@@ -464,7 +464,8 @@ const getOrderStatistics = async (req, res) => {
             search,
             platform,
             userNull,
-            noPsd
+            noPsd,
+            shippingType // ✅ Thêm shippingType vào query
         } = req.query;
 
         const baseFilter = {};
@@ -504,6 +505,17 @@ const getOrderStatistics = async (req, res) => {
             baseFilter['items.snapshotImage'] = { $in: [null, ''] };
         }
 
+        // ✅ Lọc theo shipping_type
+        if (shippingType && shippingType.trim() !== '') {
+            const validShippingTypes = ["Second Day", "Ground", "Overnight", "Economy", "Standard", "Expedited"];
+            const types = shippingType.split(',').map(t => t.trim()).filter(t => validShippingTypes.includes(t));
+            if (types.length === 1) {
+                baseFilter.shipping_type = types[0];
+            } else if (types.length > 1) {
+                baseFilter.shipping_type = { $in: types };
+            }
+        }
+
         // Bắt đầu đếm
         const [all, newCount, noCostCenter, paymentPending, fulfillment, shipped, cancelled, refund] = await Promise.all([
             OrderCustomProduct.countDocuments(baseFilter),
@@ -515,6 +527,7 @@ const getOrderStatistics = async (req, res) => {
             OrderCustomProduct.countDocuments({ ...baseFilter, status: 'Cancelled' }),
             OrderCustomProduct.countDocuments({ ...baseFilter, status: 'Refund' })
         ]);
+
 
         res.json({
             all,
@@ -534,6 +547,7 @@ const getOrderStatistics = async (req, res) => {
         });
     }
 };
+
 
 
 const updateOrderStatus = async (req, res) => {
