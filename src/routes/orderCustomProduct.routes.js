@@ -27,5 +27,8 @@ router.put('/update-customer-info', controller.updateCustomerInfo);
 
 router.put('/open-case', controller.openCaseInOrder);
 
+router.put('/remove-case', controller.removeCaseFromOrder);
+
+
 
 module.exports = router;

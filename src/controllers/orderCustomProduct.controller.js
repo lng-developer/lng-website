@@ -722,6 +722,30 @@ const openCaseInOrder = async (req, res) => {
     }
 };
 
+const removeCaseFromOrder = async (req, res) => {
+    try {
+        const { orderId, caseIds } = req.body;
+
+        if (!orderId || !Array.isArray(caseIds)) {
+            return res.status(400).json({ message: 'Missing orderId or caseIds (should be an array)' });
+        }
+
+        const order = await OrderCustomProduct.findOne({ orderId });
+        if (!order) {
+            return res.status(404).json({ message: 'Order not found' });
+        }
+
+        // Loại bỏ các case có trong caseIds
+        order.case = order.case.filter(existingCaseId => !caseIds.includes(String(existingCaseId)));
+
+        await order.save();
+
+        res.status(200).json({ message: 'Case(s) removed successfully', orderId, case: order.case });
+    } catch (error) {
+        res.status(500).json({ message: 'Failed to remove case(s)', error: error.message });
+    }
+};
+
 
 
 module.exports = {
@@ -736,5 +760,6 @@ module.exports = {
     updateBaseCost,
     updateCustomerInfo,
     openCaseInOrder,
-    getOrderStatistics
+    getOrderStatistics,
+    removeCaseFromOrder
 };
