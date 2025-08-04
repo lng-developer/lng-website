@@ -8,41 +8,66 @@ const getAllVendorProducts = async (req, res) => {
             status,
             product_type_design,
             search,
+            vendor_name, // <-- thêm trường này
             page = 1,
             perPage = 10
         } = req.query;
 
-        const filter = {};
-
-        // Filter
-        if (vendor_id) {
-            filter.vendor_id = vendor_id;
-        }
-
-        if (status) {
-            filter.status = status;
-        }
-
-        if (product_type_design) {
-            filter.product_type_design = product_type_design;
-        }
-
-        // Search by product_name (case-insensitive, partial match)
-        if (search) {
-            filter.product_name = { $regex: search, $options: 'i' };
-        }
-
         const skip = (parseInt(page) - 1) * parseInt(perPage);
         const limit = parseInt(perPage);
 
-        const [total, items] = await Promise.all([
-            VendorProduct.countDocuments(filter),
-            VendorProduct.find(filter)
-                .populate('vendor_id')
-                .sort({ created_at: -1 }) // Optional: newest first
-                .skip(skip)
-                .limit(limit)
+        const matchStage = {};
+
+        if (vendor_id) {
+            matchStage.vendor_id = new mongoose.Types.ObjectId(vendor_id);
+        }
+
+        if (status) {
+            matchStage.status = status;
+        }
+
+        if (product_type_design) {
+            matchStage.product_type_design = product_type_design;
+        }
+
+        if (search) {
+            matchStage.product_name = { $regex: search, $options: 'i' };
+        }
+
+        const aggregatePipeline = [
+            { $match: matchStage },
+            {
+                $lookup: {
+                    from: 'vendors',
+                    localField: 'vendor_id',
+                    foreignField: '_id',
+                    as: 'vendor'
+                }
+            },
+            { $unwind: '$vendor' }
+        ];
+
+        if (vendor_name) {
+            aggregatePipeline.push({
+                $match: {
+                    'vendor.name': { $regex: vendor_name, $options: 'i' }
+                }
+            });
+        }
+
+        // Clone pipeline for counting total documents
+        const countPipeline = [...aggregatePipeline, { $count: 'total' }];
+
+        aggregatePipeline.push({ $sort: { created_at: -1 } });
+        aggregatePipeline.push({ $skip: skip });
+        aggregatePipeline.push({ $limit: limit });
+
+        const [countResult, items] = await Promise.all([
+            VendorProduct.aggregate(countPipeline),
+            VendorProduct.aggregate(aggregatePipeline)
         ]);
+
+        const total = countResult[0]?.total || 0;
 
         res.json({
             total,
