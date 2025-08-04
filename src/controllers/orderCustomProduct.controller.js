@@ -124,6 +124,7 @@ const updateOrdersFromXlsx = async (req, res) => {
         const ext = path.extname(req.file.originalname).toLowerCase();
         let rows = [];
         const shopId = req.body.shopId;
+        const type = req.body.type; // 👈 lấy giá trị type truyền vào
 
         if (ext === '.txt') {
             const raw = fs.readFileSync(filePath, 'utf8');
@@ -144,6 +145,39 @@ const updateOrdersFromXlsx = async (req, res) => {
 
         const results = [];
 
+        if (type === 'Latest ship date') {
+            for (const row of rows) {
+                const orderId = row.amazon_order_id;
+                const newStatus = row.order_status?.trim();
+                if (!orderId || !newStatus) continue;
+
+                let existingOrder = await OrderCustomProduct.findOne({ orderId });
+
+                if (existingOrder) {
+                    // ❌ Nếu status là Pending → bỏ qua
+                    if (newStatus === 'Pending') {
+                        results.push({ orderId, status: 'skipped - pending' });
+                        continue;
+                    }
+
+                    // ✅ Nếu khác nhau → cập nhật
+                    if (existingOrder.status !== newStatus) {
+                        const oldStatus = existingOrder.status;
+                        existingOrder.status = newStatus;
+                        await existingOrder.save();
+                        results.push({ orderId, status: 'status updated', from: oldStatus, to: newStatus });
+                    } else {
+                        results.push({ orderId, status: 'skipped - same status' });
+                    }
+
+                    continue; // xử lý xong đơn cũ
+                }
+            }
+
+            return res.json({ message: 'Update by latest ship date completed', results });
+        }
+
+        // ✅ Flow mặc định (type === 'New' hoặc không truyền type)
         for (const row of rows) {
             const orderId = row.order_id;
             if (!orderId) continue;
@@ -177,7 +211,6 @@ const updateOrdersFromXlsx = async (req, res) => {
             };
 
             const existing = await OrderCustomProduct.findOne({ orderId });
-
             let skipProcessingZip = false;
 
             if (existing) {
@@ -195,7 +228,6 @@ const updateOrdersFromXlsx = async (req, res) => {
                 results.push({ orderId, status: 'new order created' });
             }
 
-            // ❌ Nếu item đã tồn tại, bỏ qua toàn bộ ZIP handling
             if (skipProcessingZip) continue;
 
             try {
@@ -251,6 +283,7 @@ const updateOrdersFromXlsx = async (req, res) => {
         res.status(500).json({ message: 'Batch import failed', error: error.message });
     }
 };
+
 
 
 const uploadToCloudinary = (buffer, filename) => {
@@ -672,14 +705,23 @@ const openCaseInOrder = async (req, res) => {
             return res.status(404).json({ message: 'Order not found' });
         }
 
-        order.case = caseIds;
+        // Khởi tạo nếu chưa có
+        if (!Array.isArray(order.case)) {
+            order.case = [];
+        }
+        // Lọc bỏ các case đã có trong mảng
+        const newCaseIds = caseIds.filter(id => !order.case.includes(id));
+        // Append vào mảng
+        order.case.push(...newCaseIds);
+
         await order.save();
 
-        res.status(200).json({ message: 'Case field updated successfully', orderId, case: order.case });
+        res.status(200).json({ message: 'Case field appended successfully', orderId, case: order.case });
     } catch (error) {
-        res.status(500).json({ message: 'Failed to update case field', error: error.message });
+        res.status(500).json({ message: 'Failed to append case field', error: error.message });
     }
 };
+
 
 
 module.exports = {
