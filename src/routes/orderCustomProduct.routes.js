@@ -29,6 +29,4 @@ router.put('/open-case', controller.openCaseInOrder);
 
 router.put('/remove-case', controller.removeCaseFromOrder);
 
-
-
 module.exports = router;

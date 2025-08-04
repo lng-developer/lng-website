@@ -1,5 +1,50 @@
 const db = require('../models');
 const VendorProduct = db.vendorProduct;
+const XLSX = require('xlsx');
+const multer = require('multer');
+const path = require('path');
+const fs = require('fs');
+
+const upload = multer({ dest: 'uploads/' }); // Tạm thời lưu file Excel
+
+const importVendorProductFromExcel = async (req, res) => {
+    try {
+        const vendorId = req.body.vendor_id;
+        if (!vendorId) {
+            return res.status(400).json({ message: 'Missing vendor_id in query' });
+        }
+
+        if (!req.file) {
+            return res.status(400).json({ message: 'No file uploaded' });
+        }
+
+        const filePath = path.resolve(req.file.path);
+        const workbook = XLSX.readFile(filePath);
+        const sheetName = workbook.SheetNames[0];
+        const rawData = XLSX.utils.sheet_to_json(workbook.Sheets[sheetName]);
+
+        if (rawData.length === 0) {
+            fs.unlinkSync(filePath);
+            return res.status(400).json({ message: 'Excel file is empty' });
+        }
+
+        const dataToInsert = rawData.map(row => ({
+            vendor_id: vendorId,
+            image: row.image || '',
+            product_id: row.product_id || '',
+            product_name: row.product_name || '',
+            status: row.status || 'Active',
+            product_type_design: row.product_type_design || ''
+        }));
+
+        const inserted = await VendorProduct.insertMany(dataToInsert);
+
+        fs.unlinkSync(filePath); // Xoá file sau khi xử lý
+        res.status(201).json({ message: 'Import successful', insertedCount: inserted.length });
+    } catch (error) {
+        res.status(500).json({ message: 'Failed to import vendor products', error: error.message });
+    }
+};
 
 const getAllVendorProducts = async (req, res) => {
     try {
@@ -142,5 +187,6 @@ module.exports = {
     createVendorProduct,
     updateVendorProduct,
     deleteVendorProduct,
-    getVendorProductsByVendorId
+    getVendorProductsByVendorId,
+    importVendorProductFromExcel
 };
