@@ -10,17 +10,14 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout source code
-        uses: actions/checkout@v3
-
-      - name: Deploy to VPS
-        uses: appleboy/ssh-action@v0.1.6
-        with:
-          host: 157.245.198.212
-          username: root
-          key: ${{ secrets.VPS_SSH_KEY }}
-          script: |
-            cd ~/lng-website
-            git pull origin main
-            npm install
-            pm2 restart lng-be
+    - name: Deploy to VPS
+      uses: appleboy/ssh-action@v0.1.6
+      with:
+        host: 157.245.198.212
+        username: root
+        key: ${{ secrets.VPS_SSH_KEY }}
+        script: |
+          cd ~/lng-website
+          git pull origin main
+          npm install
+          pm2 restart lng-be
