@@ -327,6 +327,7 @@ const getOrderById = async (req, res) => {
 };
 
 // ✅ Updated getFrontendOrders to group multiple items under one orderId
+
 const getFrontendOrders = async (req, res) => {
     try {
         const {
@@ -342,9 +343,7 @@ const getFrontendOrders = async (req, res) => {
             search,
             userNull,
             noPsd,
-            shippingType,
-            shopName,
-            openCase
+            shippingType
         } = req.query;
 
         const filter = {};
@@ -431,26 +430,12 @@ const getFrontendOrders = async (req, res) => {
             query = query.skip(skip).limit(limit);
         }
 
-        const [ordersRaw, totalRaw] = await Promise.all([
+        const [orders, totalCount] = await Promise.all([
             query,
             OrderCustomProduct.countDocuments(filter)
         ]);
 
-        // Lọc thêm theo shopName và openCase sau khi đã populate
-        let orders = ordersRaw;
-        if (shopName && shopName.trim() !== '') {
-            const regex = new RegExp(shopName.trim(), 'i');
-            orders = orders.filter(o => o.shopId?.name && regex.test(o.shopId.name));
-        }
-
-        if (openCase === 'true') {
-            orders = orders.filter(o => Array.isArray(o.case) && o.case.length > 0);
-        }
-
-        const totalCount = orders.length;
-        const pagedOrders = isAll ? orders : orders.slice(0, limit); // sau lọc mới tính limit
-
-        const result = pagedOrders.map(order => {
+        const result = orders.map(order => {
             const items = order.items.map(item => {
                 const areas = item.version3Data?.customizationInfo?.surfaces?.[0]?.areas || [];
                 const version3Data = areas.map(area => {
@@ -506,6 +491,7 @@ const getFrontendOrders = async (req, res) => {
 };
 
 
+
 const getOrderStatistics = async (req, res) => {
     try {
         const {
@@ -522,7 +508,6 @@ const getOrderStatistics = async (req, res) => {
 
         const baseFilter = {};
 
-        // Ngày tạo
         if (from && to) {
             if (isNaN(Date.parse(from)) || isNaN(Date.parse(to))) {
                 return res.status(400).json({ message: 'Invalid date format in from or to' });
@@ -533,7 +518,6 @@ const getOrderStatistics = async (req, res) => {
             };
         }
 
-        // Từ khoá tìm kiếm
         if (search) {
             const keyword = new RegExp(search, 'i');
             baseFilter.$or = [
@@ -568,16 +552,23 @@ const getOrderStatistics = async (req, res) => {
             }
         }
 
-        // Lọc theo shop name nếu có
         if (shopName && shopName.trim() !== '') {
-            const Shop = require('../models/shop.model'); // cập nhật đúng path model
             const matchedShops = await Shop.find({ name: { $regex: new RegExp(shopName.trim(), 'i') } }).select('_id');
             const matchedShopIds = matchedShops.map(s => s._id);
             baseFilter.shopId = { $in: matchedShopIds };
         }
 
-        // Đếm
-        const [all, newCount, noCostCenter, paymentPending, fulfillment, shipped, cancelled, refund, openCaseCount] = await Promise.all([
+        const [
+            all,
+            newCount,
+            noCostCenter,
+            paymentPending,
+            fulfillment,
+            shipped,
+            cancelled,
+            refund,
+            openCaseCount
+        ] = await Promise.all([
             OrderCustomProduct.countDocuments(baseFilter),
             OrderCustomProduct.countDocuments({ ...baseFilter, status: 'New' }),
             OrderCustomProduct.countDocuments({ ...baseFilter, base_cost: { $in: [null, 0] } }),
@@ -586,9 +577,8 @@ const getOrderStatistics = async (req, res) => {
             OrderCustomProduct.countDocuments({ ...baseFilter, status: 'Shipped' }),
             OrderCustomProduct.countDocuments({ ...baseFilter, status: 'Cancelled' }),
             OrderCustomProduct.countDocuments({ ...baseFilter, status: 'Refund' }),
-            OrderCustomProduct.countDocuments({ ...baseFilter, case: { $exists: true, $not: { $size: 0 } } }) // 👈 đếm open case thật sự
+            OrderCustomProduct.countDocuments({ ...baseFilter, case: { $exists: true, $not: { $size: 0 } } })
         ]);
-
 
         res.json({
             all,
