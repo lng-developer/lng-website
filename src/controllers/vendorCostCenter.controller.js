@@ -162,71 +162,75 @@ const getCostCentersByVendorProduct = async (req, res) => {
     }
 };
 
-// POST import cost centers from Excel
 const importVendorCostCenterFromExcel = async (req, res) => {
     try {
         const file = req.file;
         const { vendor_product } = req.body;
 
         if (!file || !vendor_product) {
-            return res.status(400).json({ message: 'Missing file, vendor_product, or user info' });
+            return res.status(400).json({ message: 'Missing file or vendor_product' });
         }
 
         const workbook = XLSX.readFile(file.path);
-        const sheet = workbook.Sheets['Dreamship'];
-        if (!sheet) return res.status(400).json({ message: 'Sheet Dreamship not found' });
-
+        const sheetName = workbook.SheetNames[0];
+        const sheet = workbook.Sheets[sheetName];
         const jsonData = XLSX.utils.sheet_to_json(sheet, { header: 1 });
+
         if (jsonData.length < 2) {
             return res.status(400).json({ message: 'Excel sheet is empty or missing data' });
         }
 
-        const rows = jsonData.slice(2);
+        const rows = jsonData.slice(1); // bỏ dòng tiêu đề
+
         const inserted = [];
 
         for (const row of rows) {
-            const [
-                , // product_name
-                product_code,
-                vendor_size,
-                vendor_color,
-                , // variant
-                status,
-                base_cost,
-                domestic_economy,
-                domestic_additional,
-                , // domestic_express
-                intl_economy,
-                intl_additional
-            ] = row;
+            if (!row || row.length < 7) {
+                console.log('⚠️ Skipped row (not enough basic columns):', row);
+                continue;
+            }
 
-            if (!vendor_size || !vendor_color) continue;
+            const product_code = row[1]?.toString() || '';
+            const vendor_size = row[2]?.toString() || '';
+            const vendor_color = row[3]?.toString() || '';
+            const status = row[5]?.toString().trim().toLowerCase() || 'active';
+            const base_cost = Number(row[6]) || 0;
+            const domestic_economy = Number(row[7]) || 0;
+            const domestic_additional = Number(row[8]) || 0;
+            const intl_economy = Number(row[9]) || 0;
+            const intl_additional = Number(row[10]) || 0;
+
+            if (!vendor_size || !vendor_color) {
+                console.log('⚠️ Skipped row (missing size/color):', row);
+                continue;
+            }
+
+            console.log(`✔️ Importing SKU=${product_code} | IntEco=${intl_economy} | IntAdd=${intl_additional}`);
 
             const doc = new VendorCostCenter({
                 vendor_product,
-                vendor_size: vendor_size.toString(),
-                vendor_color: vendor_color.toString(),
-                standard_size: vendor_size.toString(),
-                standard_color: vendor_color.toString(),
-                sku: product_code?.toString() || '',
-                base_cost: Number(base_cost) || 0,
+                vendor_size,
+                vendor_color,
+                standard_size: vendor_size,
+                standard_color: vendor_color,
+                sku: product_code,
+                base_cost,
                 dosmetic: {
-                    economy: Number(domestic_economy) || 0,
-                    additional: Number(domestic_additional) || 0
+                    economy: domestic_economy,
+                    additional: domestic_additional
                 },
                 international: {
-                    economy: Number(intl_economy) || 0,
-                    additional: Number(intl_additional) || 0
+                    economy: intl_economy,
+                    additional: intl_additional
                 },
                 product_type_design: '',
-                status: ['Active', 'Inactive'].includes((status || '').trim()) ? status.trim() : 'Active'
+                status: ['active', 'inactive'].includes(status) ? status.charAt(0).toUpperCase() + status.slice(1) : 'Active'
             });
 
             await doc.save();
             inserted.push(doc);
         }
 
-        // Xóa file sau khi dùng
         fs.unlink(file.path, () => { });
 
         res.status(201).json({
@@ -234,10 +238,12 @@ const importVendorCostCenterFromExcel = async (req, res) => {
             data: inserted
         });
     } catch (error) {
-        console.error('Import Error:', error);
+        console.error('❌ Import Error:', error);
         res.status(500).json({ message: 'Failed to import Excel data', error: error.message });
     }
 };
+
+
 
 module.exports = {
     getAllVendorCostCenters,
