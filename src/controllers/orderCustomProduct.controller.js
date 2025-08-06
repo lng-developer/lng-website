@@ -9,6 +9,7 @@ const axios = require('axios');
 const AdmZip = require('adm-zip');
 const streamifier = require('streamifier');
 const cloudinary = require('../utils/cloudinary');
+const Shop = db.shop;
 
 const importOrderJson = async (req, res) => {
     try {
@@ -341,7 +342,9 @@ const getFrontendOrders = async (req, res) => {
             search,
             userNull,
             noPsd,
-            shippingType
+            shippingType,
+            shopName,
+            openCase
         } = req.query;
 
         const filter = {};
@@ -428,12 +431,26 @@ const getFrontendOrders = async (req, res) => {
             query = query.skip(skip).limit(limit);
         }
 
-        const [orders, totalCount] = await Promise.all([
+        const [ordersRaw, totalRaw] = await Promise.all([
             query,
             OrderCustomProduct.countDocuments(filter)
         ]);
 
-        const result = orders.map(order => {
+        // Lọc thêm theo shopName và openCase sau khi đã populate
+        let orders = ordersRaw;
+        if (shopName && shopName.trim() !== '') {
+            const regex = new RegExp(shopName.trim(), 'i');
+            orders = orders.filter(o => o.shopId?.name && regex.test(o.shopId.name));
+        }
+
+        if (openCase === 'true') {
+            orders = orders.filter(o => Array.isArray(o.case) && o.case.length > 0);
+        }
+
+        const totalCount = orders.length;
+        const pagedOrders = isAll ? orders : orders.slice(0, limit); // sau lọc mới tính limit
+
+        const result = pagedOrders.map(order => {
             const items = order.items.map(item => {
                 const areas = item.version3Data?.customizationInfo?.surfaces?.[0]?.areas || [];
                 const version3Data = areas.map(area => {
@@ -498,12 +515,14 @@ const getOrderStatistics = async (req, res) => {
             platform,
             userNull,
             noPsd,
-            shippingType // ✅ Thêm shippingType vào query
+            shippingType,
+            shopName,
+            openCase
         } = req.query;
 
         const baseFilter = {};
 
-        // Lọc theo ngày tạo
+        // Ngày tạo
         if (from && to) {
             if (isNaN(Date.parse(from)) || isNaN(Date.parse(to))) {
                 return res.status(400).json({ message: 'Invalid date format in from or to' });
@@ -514,7 +533,7 @@ const getOrderStatistics = async (req, res) => {
             };
         }
 
-        // Lọc theo từ khoá
+        // Từ khoá tìm kiếm
         if (search) {
             const keyword = new RegExp(search, 'i');
             baseFilter.$or = [
@@ -523,22 +542,22 @@ const getOrderStatistics = async (req, res) => {
             ];
         }
 
-        // Lọc theo platform
         if (platform) {
             baseFilter.platform = platform;
         }
 
-        // Đơn không có user
         if (userNull === 'true') {
             baseFilter.userId = null;
         }
 
-        // Đơn không có PSD (ảnh snapshot)
         if (noPsd === 'true') {
             baseFilter['items.snapshotImage'] = { $in: [null, ''] };
         }
 
-        // ✅ Lọc theo shipping_type
+        if (openCase === 'true') {
+            baseFilter.case = { $exists: true, $not: { $size: 0 } };
+        }
+
         if (shippingType && shippingType.trim() !== '') {
             const validShippingTypes = ["Second Day", "Ground", "Overnight", "Economy", "Standard", "Expedited"];
             const types = shippingType.split(',').map(t => t.trim()).filter(t => validShippingTypes.includes(t));
@@ -549,8 +568,16 @@ const getOrderStatistics = async (req, res) => {
             }
         }
 
-        // Bắt đầu đếm
-        const [all, newCount, noCostCenter, paymentPending, fulfillment, shipped, cancelled, refund] = await Promise.all([
+        // Lọc theo shop name nếu có
+        if (shopName && shopName.trim() !== '') {
+            const Shop = require('../models/shop.model'); // cập nhật đúng path model
+            const matchedShops = await Shop.find({ name: { $regex: new RegExp(shopName.trim(), 'i') } }).select('_id');
+            const matchedShopIds = matchedShops.map(s => s._id);
+            baseFilter.shopId = { $in: matchedShopIds };
+        }
+
+        // Đếm
+        const [all, newCount, noCostCenter, paymentPending, fulfillment, shipped, cancelled, refund, openCaseCount] = await Promise.all([
             OrderCustomProduct.countDocuments(baseFilter),
             OrderCustomProduct.countDocuments({ ...baseFilter, status: 'New' }),
             OrderCustomProduct.countDocuments({ ...baseFilter, base_cost: { $in: [null, 0] } }),
@@ -558,7 +585,8 @@ const getOrderStatistics = async (req, res) => {
             OrderCustomProduct.countDocuments({ ...baseFilter, status: 'Fulfilled' }),
             OrderCustomProduct.countDocuments({ ...baseFilter, status: 'Shipped' }),
             OrderCustomProduct.countDocuments({ ...baseFilter, status: 'Cancelled' }),
-            OrderCustomProduct.countDocuments({ ...baseFilter, status: 'Refund' })
+            OrderCustomProduct.countDocuments({ ...baseFilter, status: 'Refund' }),
+            OrderCustomProduct.countDocuments({ ...baseFilter, case: { $exists: true, $not: { $size: 0 } } }) // 👈 đếm open case thật sự
         ]);
 
 
@@ -570,7 +598,8 @@ const getOrderStatistics = async (req, res) => {
             fulfilled: fulfillment,
             shipped,
             cancelled,
-            refund
+            refund,
+            openCase: openCaseCount
         });
 
     } catch (error) {
@@ -580,6 +609,7 @@ const getOrderStatistics = async (req, res) => {
         });
     }
 };
+
 
 
 
