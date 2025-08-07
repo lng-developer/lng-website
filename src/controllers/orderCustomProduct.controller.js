@@ -10,6 +10,7 @@ const AdmZip = require('adm-zip');
 const streamifier = require('streamifier');
 const cloudinary = require('../utils/cloudinary');
 const Shop = db.shop;
+require('dotenv').config();
 
 const importOrderJson = async (req, res) => {
     try {
