@@ -10,6 +10,8 @@ const AdmZip = require('adm-zip');
 const streamifier = require('streamifier');
 const cloudinary = require('../utils/cloudinary');
 const Shop = db.shop;
+const mongoose = require('mongoose');
+
 require('dotenv').config();
 
 const importOrderJson = async (req, res) => {
@@ -382,6 +384,7 @@ const getOrderById = async (req, res) => {
 
 // ✅ Updated getFrontendOrders to group multiple items under one orderId
 
+
 const getFrontendOrders = async (req, res) => {
     try {
         const {
@@ -397,106 +400,112 @@ const getFrontendOrders = async (req, res) => {
             search,
             userNull,
             noPsd,
-            shippingType
+            shippingType,
+            shopId,
+            openCase
         } = req.query;
 
-        const filter = {};
+        const matchStage = {};
 
-        // Trạng thái đơn
         if (statuses && statuses.trim() !== '') {
             const statusArray = statuses.split(',').filter(s => s.trim());
-            if (statusArray.length > 0) {
-                filter.status = { $in: statusArray };
-            }
+            if (statusArray.length > 0) matchStage.status = { $in: statusArray };
         }
 
-        // Tìm kiếm theo orderId hoặc customer name
         if (search) {
             const keyword = new RegExp(search, 'i');
-            filter.$or = [
+            matchStage.$or = [
                 { orderId: keyword },
                 { 'customer_infor.name': keyword }
             ];
         }
-
-        // Khoảng thời gian tạo đơn
+        if (openCase === 'true') {
+            matchStage.case = { $exists: true, $not: { $size: 0 } };
+        }
         if (from && to) {
-            filter.createdAt = {
+            matchStage.createdAt = {
                 $gte: new Date(from),
                 $lte: new Date(to)
             };
         }
 
-        // Đơn chưa có cost center
         if (isNoCostCenter === 'true') {
-            filter.base_cost = { $in: [null, 0] };
+            matchStage.base_cost = { $in: [null, 0] };
         }
 
-        // Financial status
         if (financialStatus) {
-            filter.financialStatus = financialStatus;
+            matchStage.financialStatus = financialStatus;
         }
 
-        // Cảnh báo 7 ngày
         if (sevenDayAlert === 'true') {
             const today = new Date();
             const sevenDaysLater = new Date(today);
             sevenDaysLater.setDate(today.getDate() + 7);
-            filter.deliveryDate = { $lte: sevenDaysLater };
+            matchStage.deliveryDate = { $lte: sevenDaysLater };
         }
 
-        // Platform
         if (platform) {
-            filter.platform = platform;
+            matchStage.platform = platform;
         }
 
-        // Đơn không có user
         if (userNull === 'true') {
-            filter.userId = null;
+            matchStage.userId = null;
         }
 
-        // Đơn không có PSD
         if (noPsd === 'true') {
-            filter['items.snapshotImage'] = { $in: [null, ''] };
+            matchStage['items.snapshotImage'] = { $in: [null, ''] };
         }
 
-        // Filter theo shipping_type
         if (shippingType && shippingType.trim() !== '') {
             const validShippingTypes = ["Second Day", "Ground", "Overnight", "Economy", "Standard", "Expedited"];
             const types = shippingType.split(',').map(t => t.trim()).filter(t => validShippingTypes.includes(t));
             if (types.length === 1) {
-                filter.shipping_type = types[0];
+                matchStage.shipping_type = types[0];
             } else if (types.length > 1) {
-                filter.shipping_type = { $in: types };
+                matchStage.shipping_type = { $in: types };
             }
         }
+
+        // ✅ Nếu có shopId → filter theo ObjectId
+        if (shopId) {
+            matchStage.shopId = new mongoose.Types.ObjectId(shopId);
+        }
+
+        const pipeline = [
+            {
+                $lookup: {
+                    from: 'shops',
+                    localField: 'shopId',
+                    foreignField: '_id',
+                    as: 'shop'
+                }
+            },
+            { $unwind: '$shop' },
+            { $match: matchStage }
+        ];
+
+        const countPipeline = [...pipeline, { $count: 'total' }];
+        const countResult = await OrderCustomProduct.aggregate(countPipeline);
+        const totalCount = countResult[0]?.total || 0;
 
         const isAll = perPage === 'All';
         const skip = (parseInt(page) - 1) * parseInt(perPage);
         const limit = parseInt(perPage);
 
-        let query = OrderCustomProduct.find(filter)
-            .populate('shopId', 'name')
-            .populate('case', 'name')
-            .sort({ createdAt: -1 });
-
-        if (!isAll && !isNaN(skip) && !isNaN(limit)) {
-            query = query.skip(skip).limit(limit);
+        pipeline.push({ $sort: { createdAt: -1 } });
+        if (!isAll) {
+            pipeline.push({ $skip: skip }, { $limit: limit });
         }
 
-        const [orders, totalCount] = await Promise.all([
-            query,
-            OrderCustomProduct.countDocuments(filter)
-        ]);
+        const orders = await OrderCustomProduct.aggregate(pipeline);
 
         const result = orders.map(order => {
             const items = order.items.map(item => {
                 const areas = item.version3Data?.customizationInfo?.surfaces?.[0]?.areas || [];
-                const version3Data = areas.map(area => {
-                    const label = area.label || area.name || '';
-                    const value = area.optionValue || area.text || '';
-                    return { label, value };
-                });
+                const version3Data = areas.map(area => ({
+                    label: area.label || area.name || '',
+                    value: area.optionValue || area.text || ''
+                }));
 
                 return {
                     orderItemId: item.orderItemId || null,
@@ -521,12 +530,12 @@ const getFrontendOrders = async (req, res) => {
                 customized_url: order.customized_url,
                 purchase_date: order.purchase_date,
                 createdAt: order.createdAt,
-                shopName: order.shopId?.name || null,
+                shopName: order.shop?.name || null,
                 shipping_type: order.shipping_type || null,
                 items,
                 base_cost: order.base_cost,
                 case: order.case,
-                address_validation: order.address_validation.isValid
+                address_validation: order.address_validation?.isValid
             };
         });
 
@@ -538,12 +547,14 @@ const getFrontendOrders = async (req, res) => {
         });
 
     } catch (error) {
+        console.error('❌ getFrontendOrders error:', error);
         res.status(500).json({
             message: 'Failed to retrieve frontend orders',
             error: error.message
         });
     }
 };
+
 
 
 
@@ -557,7 +568,7 @@ const getOrderStatistics = async (req, res) => {
             userNull,
             noPsd,
             shippingType,
-            shopName,
+            shopId,
             openCase
         } = req.query;
 
@@ -607,10 +618,8 @@ const getOrderStatistics = async (req, res) => {
             }
         }
 
-        if (shopName && shopName.trim() !== '') {
-            const matchedShops = await Shop.find({ name: { $regex: new RegExp(shopName.trim(), 'i') } }).select('_id');
-            const matchedShopIds = matchedShops.map(s => s._id);
-            baseFilter.shopId = { $in: matchedShopIds };
+        if (shopId) {
+            baseFilter.shopId = new mongoose.Types.ObjectId(shopId);
         }
 
         const [
