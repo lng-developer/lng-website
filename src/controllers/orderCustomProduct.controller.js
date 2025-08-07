@@ -119,6 +119,32 @@ const importOrderFromFile = async (req, res) => {
     }
 };
 
+const validateAddressWithSmarty = async (address) => {
+    try {
+        const response = await axios.get('https://international-street.api.smarty.com/verify', {
+            params: {
+                'auth-id': process.env.SMARTY_AUTH_ID,
+                'auth-token': process.env.SMARTY_AUTH_TOKEN,
+                address1: address.address,
+                address2: address.address_2,
+                locality: address.city,
+                administrative_area: address.state,
+                postal_code: address.zip_code,
+                country: address.country || 'us'
+            }
+        });
+        const data = response.data;
+        if (Array.isArray(data) && data.length > 0) {
+            return { isValid: true, smartyResponse: data[0] };
+        }
+
+        return { isValid: false, smartyResponse: null };
+    } catch (err) {
+        return { isValid: false, smartyResponse: { error: err.message } };
+    }
+};
+
+
 const updateOrdersFromXlsx = async (req, res) => {
     try {
         const filePath = req.file.path;
@@ -224,9 +250,21 @@ const updateOrdersFromXlsx = async (req, res) => {
                     results.push({ orderId, status: 'item exists' });
                     skipProcessingZip = true;
                 }
-            } else {
-                await new OrderCustomProduct({ ...basicData, items: [itemData] }).save();
-                results.push({ orderId, status: 'new order created' });
+            }
+            else {
+                const newOrder = new OrderCustomProduct({ ...basicData, items: [itemData] });
+                await newOrder.save();
+
+                // ✅ Check địa chỉ sau khi tạo đơn
+                const validationResult = await validateAddressWithSmarty(basicData.customer_infor);
+                newOrder.address_validation = validationResult;
+                await newOrder.save();
+
+                results.push({
+                    orderId,
+                    status: 'New order created with address check',
+                    addressValid: validationResult.isValid
+                });
             }
 
             if (skipProcessingZip) continue;
@@ -471,7 +509,8 @@ const getFrontendOrders = async (req, res) => {
                 shipping_type: order.shipping_type || null,
                 items,
                 base_cost: order.base_cost,
-                case: order.case
+                case: order.case,
+                address_validation: order.address_validation.isValid
             };
         });
 

@@ -91,7 +91,12 @@ const orderCustomProductSchema = new mongoose.Schema({
     },
     case: [
         { type: mongoose.Schema.Types.ObjectId, ref: 'Case', required: true }
-    ]
+    ],
+    address_validation: {
+        isValid: { type: Boolean, default: null },
+        smartyResponse: { type: Object, default: null } // lưu kết quả chi tiết từ Smarty
+    },
+
 });
 
 module.exports = mongoose.model('OrderCustomProduct', orderCustomProductSchema);
