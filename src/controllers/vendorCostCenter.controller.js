@@ -180,13 +180,12 @@ const importVendorCostCenterFromExcel = async (req, res) => {
             return res.status(400).json({ message: 'Excel sheet is empty or missing data' });
         }
 
-        const rows = jsonData.slice(1); // bỏ dòng tiêu đề
+        const rows = jsonData.slice(2); // bỏ dòng tiêu đề
 
         const inserted = [];
 
         for (const row of rows) {
             if (!row || row.length < 7) {
-                console.log('⚠️ Skipped row (not enough basic columns):', row);
                 continue;
             }
 
@@ -199,13 +198,6 @@ const importVendorCostCenterFromExcel = async (req, res) => {
             const domestic_additional = Number(row[8]) || 0;
             const intl_economy = Number(row[9]) || 0;
             const intl_additional = Number(row[10]) || 0;
-
-            if (!vendor_size || !vendor_color) {
-                console.log('⚠️ Skipped row (missing size/color):', row);
-                continue;
-            }
-
-            console.log(`✔️ Importing SKU=${product_code} | IntEco=${intl_economy} | IntAdd=${intl_additional}`);
 
             const doc = new VendorCostCenter({
                 vendor_product,

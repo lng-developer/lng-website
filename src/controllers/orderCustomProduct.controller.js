@@ -196,15 +196,11 @@ const updateOrdersFromXlsx = async (req, res) => {
                     } else {
                         results.push({ orderId, status: 'skipped - same status' });
                     }
-                    console.log("Đã chạy đến đây");
-
                     // ✅ Kiểm tra địa chỉ nếu chưa có
                     if (
                         existingOrder.address_validation?.isValid === null &&
                         existingOrder.address_validation?.smartyResponse === null
                     ) {
-                        console.log("Đã chạy đến đây 2");
-
                         const validationResult = await validateAddressWithSmarty(existingOrder.customer_infor);
                         existingOrder.address_validation = validationResult;
                         await existingOrder.save();
