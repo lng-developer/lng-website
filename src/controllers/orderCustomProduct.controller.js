@@ -481,6 +481,17 @@ const getFrontendOrders = async (req, res) => {
                 }
             },
             { $unwind: '$shop' },
+
+            // ✅ Join case[] → lấy được case.name
+            {
+                $lookup: {
+                    from: 'cases',
+                    localField: 'case',
+                    foreignField: '_id',
+                    as: 'case'
+                }
+            },
+
             { $match: matchStage }
         ];
 
