@@ -401,7 +401,7 @@ const getFrontendOrders = async (req, res) => {
             userNull,
             noPsd,
             shippingType,
-            shopId,
+            shopName,
             openCase
         } = req.query;
 
@@ -466,11 +466,6 @@ const getFrontendOrders = async (req, res) => {
             }
         }
 
-        // ✅ Nếu có shopId → filter theo ObjectId
-        if (shopId) {
-            matchStage.shopId = new mongoose.Types.ObjectId(shopId);
-        }
-
         const pipeline = [
             {
                 $lookup: {
@@ -482,7 +477,11 @@ const getFrontendOrders = async (req, res) => {
             },
             { $unwind: '$shop' },
 
-            // ✅ Join case[] → lấy được case.name
+            // 🔍 Filter theo tên shop
+            ...(shopName && shopName.trim() !== ''
+                ? [{ $match: { 'shop.name': { $regex: new RegExp(shopName.trim(), 'i') } } }]
+                : []),
+
             {
                 $lookup: {
                     from: 'cases',
@@ -494,6 +493,7 @@ const getFrontendOrders = async (req, res) => {
 
             { $match: matchStage }
         ];
+
 
         const countPipeline = [...pipeline, { $count: 'total' }];
         const countResult = await OrderCustomProduct.aggregate(countPipeline);
