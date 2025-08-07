@@ -151,7 +151,7 @@ const updateOrdersFromXlsx = async (req, res) => {
         const ext = path.extname(req.file.originalname).toLowerCase();
         let rows = [];
         const shopId = req.body.shopId;
-        const type = req.body.type; // 👈 lấy giá trị type truyền vào
+        const type = req.body.type;
 
         if (ext === '.txt') {
             const raw = fs.readFileSync(filePath, 'utf8');
@@ -181,13 +181,11 @@ const updateOrdersFromXlsx = async (req, res) => {
                 let existingOrder = await OrderCustomProduct.findOne({ orderId });
 
                 if (existingOrder) {
-                    // ❌ Nếu status là Pending → bỏ qua
                     if (newStatus === 'Pending') {
                         results.push({ orderId, status: 'skipped - pending' });
                         continue;
                     }
 
-                    // ✅ Nếu khác nhau → cập nhật
                     if (existingOrder.status !== newStatus) {
                         const oldStatus = existingOrder.status;
                         existingOrder.status = newStatus;
@@ -197,14 +195,25 @@ const updateOrdersFromXlsx = async (req, res) => {
                         results.push({ orderId, status: 'skipped - same status' });
                     }
 
-                    continue; // xử lý xong đơn cũ
+                    // ✅ Kiểm tra địa chỉ nếu chưa có
+                    if (!existingOrder.address_validation) {
+                        const validationResult = await validateAddressWithSmarty(existingOrder.customer_infor);
+                        existingOrder.address_validation = validationResult;
+                        await existingOrder.save();
+                        results.push({
+                            orderId,
+                            addressChecked: true,
+                            addressValid: validationResult.isValid
+                        });
+                    }
+                    continue;
                 }
             }
 
             return res.json({ message: 'Update by latest ship date completed', results });
         }
 
-        // ✅ Flow mặc định (type === 'New' hoặc không truyền type)
+        // ✅ Flow mặc định
         for (const row of rows) {
             const orderId = row.order_id;
             if (!orderId) continue;
@@ -250,12 +259,10 @@ const updateOrdersFromXlsx = async (req, res) => {
                     results.push({ orderId, status: 'item exists' });
                     skipProcessingZip = true;
                 }
-            }
-            else {
+            } else {
                 const newOrder = new OrderCustomProduct({ ...basicData, items: [itemData] });
                 await newOrder.save();
 
-                // ✅ Check địa chỉ sau khi tạo đơn
                 const validationResult = await validateAddressWithSmarty(basicData.customer_infor);
                 newOrder.address_validation = validationResult;
                 await newOrder.save();
