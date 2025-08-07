@@ -122,16 +122,15 @@ const importOrderFromFile = async (req, res) => {
 
 const validateAddressWithSmarty = async (address) => {
     try {
-        const response = await axios.get('https://international-street.api.smarty.com/verify', {
+        const response = await axios.get('https://us-street.api.smarty.com/street-address', {
             params: {
                 'auth-id': process.env.SMARTY_AUTH_ID,
                 'auth-token': process.env.SMARTY_AUTH_TOKEN,
-                address1: address.address,
-                address2: address.address_2,
-                locality: address.city,
-                administrative_area: address.state,
-                postal_code: address.zip_code,
-                country: address.country || 'us'
+                street: address.address,
+                street2: address.address_2,
+                city: address.city,
+                state: address.state,
+                zipcode: address.zip_code
             }
         });
         const data = response.data;
