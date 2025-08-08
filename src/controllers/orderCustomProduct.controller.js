@@ -508,11 +508,14 @@ const getFrontendOrders = async (req, res) => {
 
         const result = orders.map(order => {
             const items = order.items.map(item => {
-                const areas = item.version3Data?.customizationInfo?.surfaces?.[0]?.areas || [];
-                const version3Data = areas.map(area => ({
-                    label: area.label || area.name || '',
-                    value: area.optionValue || area.text || ''
-                }));
+                const surfaces = item.version3Data?.customizationInfo?.surfaces || [];
+
+                const version3Data = surfaces.flatMap(surface =>
+                    (surface.areas || []).map(area => ({
+                        label: area.label || area.name || '',
+                        value: area.optionValue || area.text || ''
+                    }))
+                );
 
                 return {
                     orderItemId: item.orderItemId || null,
