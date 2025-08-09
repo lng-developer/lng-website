@@ -8,6 +8,8 @@ const vendorController = require('./vendor.controller')
 const vendorProductController = require('./vendorProduct.controller')
 const vendorCostCenterController = require('./vendorCostCenter.controller')
 const caseController = require('./case.controller');
+const listingController = require('./listing.controller');
+
 
 module.exports = {
     roleController,
@@ -19,5 +21,6 @@ module.exports = {
     vendorController,
     vendorProductController,
     vendorCostCenterController,
-    caseController
+    caseController,
+    listingController
 };

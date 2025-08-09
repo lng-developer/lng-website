@@ -8,6 +8,8 @@ const vendorRoutes = require('./vendor.routes')
 const vendorProductRoutes = require('./vendorProduct.routes')
 const vendorCostCenterRoutes = require('./vendorCostCenter.routes')
 const caseRoutes = require('./case.routes');
+const listingRoutes = require('./listing.routes');
+
 
 module.exports = {
     roleRoutes,
@@ -19,5 +21,6 @@ module.exports = {
     vendorRoutes,
     vendorProductRoutes,
     vendorCostCenterRoutes,
-    caseRoutes
+    caseRoutes,
+    listingRoutes
 };
