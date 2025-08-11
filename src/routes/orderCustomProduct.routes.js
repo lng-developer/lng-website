@@ -29,4 +29,7 @@ router.put('/open-case', controller.openCaseInOrder);
 
 router.put('/remove-case', controller.removeCaseFromOrder);
 
+router.put('/update-base-image', controller.updateBaseImageUrl);
+
+
 module.exports = router;

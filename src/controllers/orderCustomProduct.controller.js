@@ -839,7 +839,55 @@ const removeCaseFromOrder = async (req, res) => {
         res.status(500).json({ message: 'Failed to remove case(s)', error: error.message });
     }
 };
+const updateBaseImageUrl = async (req, res) => {
+    try {
+        const { orderId, orderItemId, imageUrl } = req.body;
 
+        // Validate input
+        if (!orderId || !orderItemId || !imageUrl) {
+            return res.status(400).json({ message: 'Missing orderId, orderItemId, or imageUrl' });
+        }
+
+        // Validate imageUrl format (basic URL validation)
+        const urlRegex = /^(https?:\/\/[^\s$.?#].[^\s]*)$/;
+        if (!urlRegex.test(imageUrl)) {
+            return res.status(400).json({ message: 'Invalid imageUrl format' });
+        }
+
+        // Find the order
+        const order = await OrderCustomProduct.findOne({ orderId });
+        if (!order) {
+            return res.status(404).json({ message: 'Order not found' });
+        }
+
+        // Find the item within the order
+        const item = order.items.find(i => i.orderItemId === orderItemId);
+        if (!item) {
+            return res.status(404).json({ message: 'OrderItem ID not found in Order' });
+        }
+
+        // Update baseImage.imageUrl
+        if (!item.baseImage) {
+            item.baseImage = {};
+        }
+        item.baseImage.imageUrl = imageUrl;
+
+        // Save the updated order
+        await order.save();
+
+        res.status(200).json({
+            message: 'Base image URL updated successfully',
+            orderId,
+            orderItemId,
+            newImageUrl: imageUrl
+        });
+    } catch (error) {
+        res.status(500).json({
+            message: 'Failed to update base image URL',
+            error: error.message
+        });
+    }
+};
 
 
 module.exports = {
@@ -855,5 +903,6 @@ module.exports = {
     updateCustomerInfo,
     openCaseInOrder,
     getOrderStatistics,
-    removeCaseFromOrder
+    removeCaseFromOrder,
+    updateBaseImageUrl
 };
