@@ -14,7 +14,6 @@ exports.getGroups = async (req, res) => {
             search = '',
             page = 1,
             perPage = 10,
-            include = 'summary' // 'summary' | 'details'
         } = req.query;
 
         const match = {};
@@ -22,20 +21,6 @@ exports.getGroups = async (req, res) => {
 
         const skip = (parseInt(page) - 1) * parseInt(perPage);
         const limit = parseInt(perPage);
-
-        // Summary nhanh: không join nặng
-        if (include !== 'details') {
-            const [total, items] = await Promise.all([
-                ProductTypeGroup.countDocuments(match),
-                ProductTypeGroup.find(match)
-                    .sort({ order: 1, created_at: -1 })
-                    .skip(skip).limit(limit)
-                    .select('name order items created_at updated_at')
-            ]);
-            return res.json({ total, items, page: +page, perPage: +perPage });
-        }
-
-        // Details: aggregate để trả cả cost centers
         const pipeline = [
             { $match: match },
             { $sort: { order: 1, created_at: -1 } },
