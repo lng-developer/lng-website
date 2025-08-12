@@ -16,7 +16,8 @@ const { roleRoutes,
     vendorCostCenterRoutes,
     caseRoutes,
     listingRoutes,
-    productTypeRoutes
+    productTypeRoutes,
+    configCostCenterRoutes
 } = require('./src/routes');
 
 const app = express();
@@ -42,6 +43,7 @@ app.use('/api/vendor-cost-center', vendorCostCenterRoutes);
 app.use('/api/case', caseRoutes);
 app.use('/api/listing', listingRoutes);
 app.use('/api/product-type', productTypeRoutes);
+app.use('/api/config-cost-center', configCostCenterRoutes);
 
 // Error Handler
 app.use((err, req, res, next) => {

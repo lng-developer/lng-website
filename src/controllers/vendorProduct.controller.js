@@ -53,45 +53,49 @@ const getAllVendorProducts = async (req, res) => {
             status,
             product_type_design,
             search,
-            vendor_name, // <-- thêm trường này
+            vendor_name,    // filter theo tên vendor
             page = 1,
             perPage = 10
         } = req.query;
 
-        const skip = (parseInt(page) - 1) * parseInt(perPage);
-        const limit = parseInt(perPage);
+        const pageNum = parseInt(page, 10) || 1;
+        const limit = parseInt(perPage, 10) || 10;
+        const skip = (pageNum - 1) * limit;
 
+        // Match chính trên product
         const matchStage = {};
 
+        // filter theo vendor_id nếu hợp lệ
         if (vendor_id) {
+            if (!mongoose.isValidObjectId(vendor_id)) {
+                return res.status(400).json({ message: 'Invalid vendor_id' });
+            }
             matchStage.vendor_id = new mongoose.Types.ObjectId(vendor_id);
         }
 
-        if (status) {
-            matchStage.status = status;
-        }
-
-        if (product_type_design) {
-            matchStage.product_type_design = product_type_design;
-        }
+        if (status) matchStage.status = status;
+        if (product_type_design) matchStage.product_type_design = product_type_design;
 
         if (search) {
             matchStage.product_name = { $regex: search, $options: 'i' };
         }
 
+        // Pipeline tổng quát
         const aggregatePipeline = [
             { $match: matchStage },
             {
                 $lookup: {
-                    from: 'vendors',
+                    from: 'vendors',          // tên collection
                     localField: 'vendor_id',
                     foreignField: '_id',
                     as: 'vendor'
                 }
             },
-            { $unwind: '$vendor' }
+            // Không làm rớt record thiếu vendor (nếu có)
+            { $unwind: { path: '$vendor', preserveNullAndEmptyArrays: true } }
         ];
 
+        // Filter theo vendor_name (nếu cần)
         if (vendor_name) {
             aggregatePipeline.push({
                 $match: {
@@ -100,9 +104,29 @@ const getAllVendorProducts = async (req, res) => {
             });
         }
 
-        // Clone pipeline for counting total documents
+        // Project để chuẩn hóa output (giữ cả vendor_id lẫn vendor object)
+        aggregatePipeline.push({
+            $project: {
+                image: 1,
+                product_id: 1,
+                product_name: 1,
+                status: 1,
+                product_type_design: 1,
+                created_at: 1,
+                vendor_id: 1,
+                vendor: {
+                    _id: '$vendor._id',
+                    name: '$vendor.name',
+                    status: '$vendor.status',
+                    fulfillment_type: '$vendor.fulfillment_type'
+                }
+            }
+        });
+
+        // Pipeline đếm tổng sau khi áp mọi filter
         const countPipeline = [...aggregatePipeline, { $count: 'total' }];
 
+        // Phân trang + sort
         aggregatePipeline.push({ $sort: { created_at: -1 } });
         aggregatePipeline.push({ $skip: skip });
         aggregatePipeline.push({ $limit: limit });
@@ -114,17 +138,16 @@ const getAllVendorProducts = async (req, res) => {
 
         const total = countResult[0]?.total || 0;
 
-        res.json({
+        return res.json({
             total,
-            page: parseInt(page),
-            perPage: parseInt(perPage),
+            page: pageNum,
+            perPage: limit,
             data: items
         });
     } catch (error) {
-        res.status(500).json({ message: 'Failed to fetch vendor products', error: error.message });
+        return res.status(500).json({ message: 'Failed to fetch vendor products', error: error.message });
     }
 };
-
 
 const getVendorProductById = async (req, res) => {
     const item = await VendorProduct.findById(req.params.id);
@@ -166,19 +189,30 @@ const deleteVendorProduct = async (req, res) => {
 const getVendorProductsByVendorId = async (req, res) => {
     try {
         const { vendorId } = req.params;
-
         if (!vendorId) {
             return res.status(400).json({ message: 'Missing vendorId in params' });
         }
 
         const products = await VendorProduct.find({ vendor_id: vendorId })
-            .populate('vendor_id')
+            .populate({
+                path: 'vendor_id',
+                select: 'name status fulfillment_type'
+            })
+            .sort({ created_at: -1 });
 
-        res.status(200).json(products);
+        // Chuẩn hóa: thêm field vendor
+        const data = products.map(p => {
+            const obj = p.toObject();
+            obj.vendor = obj.vendor_id;
+            return obj;
+        });
+
+        res.status(200).json(data);
     } catch (error) {
         res.status(500).json({ message: 'Failed to fetch vendor products', error: error.message });
     }
 };
+
 
 
 module.exports = {
