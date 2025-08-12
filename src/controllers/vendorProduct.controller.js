@@ -46,6 +46,8 @@ const importVendorProductFromExcel = async (req, res) => {
     }
 };
 
+const mongoose = require('mongoose');
+
 const getAllVendorProducts = async (req, res) => {
     try {
         const {
@@ -53,19 +55,22 @@ const getAllVendorProducts = async (req, res) => {
             status,
             product_type_design,
             search,
-            vendor_name,    // filter theo tên vendor
+            vendor_name,     // filter theo tên vendor
             page = 1,
-            perPage = 10
+            perPage = 10,
+            all              // all=true -> bỏ phân trang
         } = req.query;
 
         const pageNum = parseInt(page, 10) || 1;
-        const limit = parseInt(perPage, 10) || 10;
-        const skip = (pageNum - 1) * limit;
+        const perPageRaw = (typeof perPage === 'string') ? perPage.toLowerCase() : perPage;
+        const loadAll =
+            all === 'true' || perPageRaw === 'all' || Number(perPageRaw) === 0;
 
-        // Match chính trên product
+        const limit = loadAll ? undefined : (parseInt(perPage, 10) || 10);
+        const skip = loadAll ? undefined : (pageNum - 1) * limit;
+
         const matchStage = {};
 
-        // filter theo vendor_id nếu hợp lệ
         if (vendor_id) {
             if (!mongoose.isValidObjectId(vendor_id)) {
                 return res.status(400).json({ message: 'Invalid vendor_id' });
@@ -80,56 +85,37 @@ const getAllVendorProducts = async (req, res) => {
             matchStage.product_name = { $regex: search, $options: 'i' };
         }
 
-        // Pipeline tổng quát
         const aggregatePipeline = [
             { $match: matchStage },
             {
                 $lookup: {
-                    from: 'vendors',          // tên collection
+                    from: 'vendors',
                     localField: 'vendor_id',
                     foreignField: '_id',
                     as: 'vendor'
                 }
             },
-            // Không làm rớt record thiếu vendor (nếu có)
-            { $unwind: { path: '$vendor', preserveNullAndEmptyArrays: true } }
+            // Nếu muốn KHÔNG làm rớt bản ghi thiếu vendor, dùng preserveNullAndEmptyArrays: true
+            { $unwind: '$vendor' }
         ];
 
-        // Filter theo vendor_name (nếu cần)
         if (vendor_name) {
             aggregatePipeline.push({
-                $match: {
-                    'vendor.name': { $regex: vendor_name, $options: 'i' }
-                }
+                $match: { 'vendor.name': { $regex: vendor_name, $options: 'i' } }
             });
         }
 
-        // Project để chuẩn hóa output (giữ cả vendor_id lẫn vendor object)
-        aggregatePipeline.push({
-            $project: {
-                image: 1,
-                product_id: 1,
-                product_name: 1,
-                status: 1,
-                product_type_design: 1,
-                created_at: 1,
-                vendor_id: 1,
-                vendor: {
-                    _id: '$vendor._id',
-                    name: '$vendor.name',
-                    status: '$vendor.status',
-                    fulfillment_type: '$vendor.fulfillment_type'
-                }
-            }
-        });
-
-        // Pipeline đếm tổng sau khi áp mọi filter
+        // Đếm tổng sau khi áp tất cả filter (kể cả vendor_name)
         const countPipeline = [...aggregatePipeline, { $count: 'total' }];
 
-        // Phân trang + sort
+        // Sort luôn áp dụng
         aggregatePipeline.push({ $sort: { created_at: -1 } });
-        aggregatePipeline.push({ $skip: skip });
-        aggregatePipeline.push({ $limit: limit });
+
+        // Chỉ áp dụng skip/limit khi KHÔNG loadAll
+        if (!loadAll) {
+            aggregatePipeline.push({ $skip: skip });
+            aggregatePipeline.push({ $limit: limit });
+        }
 
         const [countResult, items] = await Promise.all([
             VendorProduct.aggregate(countPipeline),
@@ -140,8 +126,8 @@ const getAllVendorProducts = async (req, res) => {
 
         return res.json({
             total,
-            page: pageNum,
-            perPage: limit,
+            page: loadAll ? 1 : pageNum,
+            perPage: loadAll ? total : limit,
             data: items
         });
     } catch (error) {
