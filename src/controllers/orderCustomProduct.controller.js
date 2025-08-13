@@ -10,6 +10,9 @@ const AdmZip = require('adm-zip');
 const streamifier = require('streamifier');
 const cloudinary = require('../utils/cloudinary');
 const Shop = db.shop;
+const ConfigCostCenter = db.configCostCenter;
+const VendorCostCenter = db.vendorCostCenter;
+
 const mongoose = require('mongoose');
 
 require('dotenv').config();
@@ -888,6 +891,278 @@ const updateBaseImageUrl = async (req, res) => {
         });
     }
 };
+// ================== BASE COST HELPERS & APIS ==================
+function parseConfigCodeFromSKU(sku = '') {
+    // SKU dạng <manhanvien>-<configcode>-<date>-<stt>
+    // ví dụ: J2504-NK-1507-18  => NK
+    const parts = String(sku).split('-').map(s => s.trim()).filter(Boolean);
+    return parts.length >= 2 ? parts[1] : '';
+}
+
+function toArray(val) {
+    if (Array.isArray(val)) return val;
+    if (val == null) return [];
+    return [val];
+}
+
+function normalize(s) {
+    return String(s || '')
+        .toLowerCase()
+        .replace(/\s+/g, ' ')
+        .trim();
+}
+
+// Alias hỗ trợ match thực tế (an toàn, chỉ áp dụng khi đúng pattern)
+function normalizeSizeAlias(val) {
+    const s = String(val || '');
+    const m = s.match(/\(([^)]+)\)/); // lấy phần trong ngoặc nếu có, ví dụ: Beverage (4.8" x 4.8") -> 4.8" x 4.8"
+    return m ? m[1] : s;
+}
+function normalizePackAlias(val) {
+    const s = String(val || '').trim();
+    // "Pack 30pcs" -> "30 pcs"
+    const m = s.match(/pack\s*(\d+)\s*pcs?/i);
+    if (m) return `${m[1]} pcs`;
+    return s;
+}
+
+// Trích { label => value } từ item.version3Data (ưu tiên) hoặc item.customizationData
+function extractLabelValueMapFromItem(item) {
+    const map = new Map();
+
+    // ƯU TIÊN: version3Data.customizationInfo.surfaces[].areas[]
+    const surfacesV3 = item?.version3Data?.customizationInfo?.surfaces || [];
+    for (const sf of surfacesV3) {
+        for (const area of (sf?.areas || [])) {
+            const label = area?.label || area?.name || '';
+            const value = (area?.optionValue ?? area?.text ?? '');
+            if (label) map.set(normalize(label), String(value));
+        }
+    }
+
+    // FALLBACK: customizationData.children[0].children[0].children (OptionCustomization / TextCustomization)
+    if (map.size === 0) {
+        const opts = item?.customizationData?.children?.[0]?.children?.[0]?.children || [];
+        for (const opt of opts) {
+            const label = opt?.label || opt?.name || '';
+            let value = '';
+            if (opt?.optionSelection) value = opt.optionSelection?.label || opt.optionSelection?.name || '';
+            else if (typeof opt?.inputValue === 'string') value = opt.inputValue;
+            else if (opt?.displayValue) value = opt.displayValue;
+            if (label) map.set(normalize(label), String(value || ''));
+        }
+    }
+
+    return map;
+}
+
+function pickValueByKeys(labelValueMap, keys = []) {
+    for (const k of toArray(keys)) {
+        const v = labelValueMap.get(normalize(k));
+        if (v != null && v !== '') return v;
+    }
+    return '';
+}
+
+// Tìm best match theo vendor_size / vendor_color hoặc standard_size / standard_color
+function findBestCostCenter(candidates, sizeVal, colorVal) {
+    const sizeN = normalize(sizeVal);
+    const colorN = normalize(colorVal);
+
+    // 1) Match đủ cả 2 (vendor_*)
+    let best = candidates.find(c =>
+        normalize(c.vendor_size) === sizeN &&
+        normalize(c.vendor_color) === colorN
+    );
+    if (best) return best;
+
+    // 2) Chỉ size
+    if (sizeN && !best) {
+        best = candidates.find(c => normalize(c.vendor_size) === sizeN);
+        if (best) return best;
+    }
+    // 3) Chỉ color
+    if (colorN && !best) {
+        best = candidates.find(c => normalize(c.vendor_color) === colorN);
+        if (best) return best;
+    }
+
+    // 4) Thử standard_* như fallback
+    best = candidates.find(c =>
+        (sizeN && normalize(c.standard_size) === sizeN) ||
+        (colorN && normalize(c.standard_color) === colorN)
+    );
+    return best || null;
+}
+
+/**
+ * POST body: { orderId: string }
+ * Tính base_cost ở cấp ĐƠN HÀNG theo công thức:
+ * - 1 sp: base + international.economy
+ * - N sp: (base * qty) + international.economy + international.additional * (qty - 1)
+ * => Tổng đơn = tổng các itemCost
+ */
+const computeBaseCostForOrder = async (req, res) => {
+    try {
+        const { orderId } = req.body;
+        if (!orderId) return res.status(400).json({ message: 'Missing orderId' });
+
+        const order = await OrderCustomProduct.findOne({ orderId }).lean(false);
+        if (!order) return res.status(404).json({ message: 'Order not found' });
+        if (!Array.isArray(order.items) || order.items.length === 0) {
+            return res.status(400).json({ message: 'Order has no items' });
+        }
+
+        let orderTotalBaseCost = 0;
+        const perItemResults = [];
+
+        for (const item of order.items) {
+            const sku = item?.sku || '';
+            const configCode = parseConfigCodeFromSKU(sku);
+            if (!configCode) {
+                perItemResults.push({
+                    orderItemId: item.orderItemId, sku,
+                    status: 'failed', reason: 'Cannot parse config code from SKU'
+                });
+                continue;
+            }
+
+            // Tìm Config Cost Center
+            const cfg = await ConfigCostCenter.findOne({
+                config_code: configCode,
+                is_deleted: { $in: [false, null] }
+            }).populate('product_for_seller').lean();
+
+            if (!cfg) {
+                perItemResults.push({
+                    orderItemId: item.orderItemId, sku, configCode,
+                    status: 'failed', reason: 'Config cost center not found'
+                });
+                continue;
+            }
+
+            // Lấy Size/Color value từ dữ liệu tuỳ chỉnh
+            const labelValueMap = extractLabelValueMapFromItem(item);
+            let sizeValue = pickValueByKeys(labelValueMap, cfg.customize_size_key || []);
+            let colorValue = pickValueByKeys(labelValueMap, cfg.customize_color_key || []);
+
+            // Alias để tăng tỉ lệ match (đảm bảo không phá các case khác)
+            sizeValue = normalizeSizeAlias(sizeValue);
+            colorValue = normalizePackAlias(colorValue);
+
+            // Lấy vendor_product từ product_for_seller.items
+            const pfItems = toArray(cfg?.product_for_seller?.items).filter(Boolean);
+            if (!pfItems.length) {
+                perItemResults.push({
+                    orderItemId: item.orderItemId, sku, configCode, sizeValue, colorValue,
+                    status: 'failed', reason: 'product_for_seller has no items'
+                });
+                continue;
+            }
+            const chosenItem = pfItems.find(it => (it.status || '').toLowerCase() === 'active') || pfItems[0];
+            const vendorProductId = chosenItem?.vendor_product;
+            if (!vendorProductId) {
+                perItemResults.push({
+                    orderItemId: item.orderItemId, sku, configCode, sizeValue, colorValue,
+                    status: 'failed', reason: 'Missing vendor_product in product_for_seller item'
+                });
+                continue;
+            }
+
+            // Tất cả cost centers cho vendor_product (kèm phí international)
+            const candidates = await VendorCostCenter.find({
+                vendor_product: vendorProductId,
+                status: { $in: ['Active', null] }
+            })
+                .select('vendor_size vendor_color standard_size standard_color base_cost sku international.economy international.additional')
+                .lean();
+
+            if (!candidates.length) {
+                perItemResults.push({
+                    orderItemId: item.orderItemId, sku, configCode, sizeValue, colorValue,
+                    status: 'failed', reason: 'No vendor cost centers for this vendor_product'
+                });
+                continue;
+            }
+
+            const matched = findBestCostCenter(candidates, sizeValue, colorValue);
+            const baseEach = Number(matched?.base_cost || 0);
+            if (!matched || !baseEach) {
+                perItemResults.push({
+                    orderItemId: item.orderItemId, sku, configCode, sizeValue, colorValue,
+                    status: 'failed', reason: 'No matching size/color or base_cost missing'
+                });
+                continue;
+            }
+
+            const qty = Math.max(1, Number(item.quantity || 1));
+            const intlEconomy = Number(matched?.international?.economy || 0);
+            const intlAdditional = Number(matched?.international?.additional || 0);
+
+            // Công thức:
+            // 1 sp: base + economy
+            // N sp: (base * qty) + economy + additional * (qty - 1)
+            const itemCost = baseEach * qty + intlEconomy + (intlAdditional * Math.max(0, qty - 1));
+            orderTotalBaseCost += itemCost;
+
+            perItemResults.push({
+                orderItemId: item.orderItemId,
+                sku,
+                configCode,
+                sizeValue,
+                colorValue,
+                matchedSku: matched.sku || null,
+                base_cost_each: baseEach,
+                quantity: qty,
+                shipping_international_economy: intlEconomy,
+                shipping_international_additional: intlAdditional,
+                base_cost_total_for_item_including_shipping: itemCost,
+                formula: `(base ${baseEach} * qty ${qty}) + eco ${intlEconomy} + add ${intlAdditional} * ${Math.max(0, qty - 1)}`,
+                status: 'ok'
+            });
+        }
+
+        order.base_cost = Number(orderTotalBaseCost.toFixed(2));
+        await order.save();
+
+        return res.json({
+            message: 'Computed base cost',
+            orderId,
+            base_cost: order.base_cost,
+            detail: perItemResults
+        });
+    } catch (err) {
+        return res.status(500).json({ message: 'Compute failed', error: err.message });
+    }
+};
+
+/**
+ * POST body: { limit?: number }
+ * Tính cho nhiều đơn còn thiếu base_cost (0/null), giới hạn tối đa 200
+ */
+const computeBaseCostForMany = async (req, res) => {
+    try {
+        const limit = Math.max(1, Math.min(200, Number(req.body?.limit || 50)));
+        const orders = await OrderCustomProduct.find({
+            $or: [{ base_cost: { $exists: false } }, { base_cost: { $in: [0, null] } }]
+        }).sort({ createdAt: -1 }).limit(limit);
+
+        const results = [];
+        for (const o of orders) {
+            const fakeReq = { body: { orderId: o.orderId } };
+            const fakeRes = {
+                json: (r) => results.push({ orderId: o.orderId, ...r }),
+                status: (code) => ({ json: (r) => results.push({ orderId: o.orderId, code, ...r }) })
+            };
+            // eslint-disable-next-line no-await-in-loop
+            await computeBaseCostForOrder(fakeReq, fakeRes);
+        }
+        return res.json({ message: 'Batch computed', count: results.length, results });
+    } catch (err) {
+        return res.status(500).json({ message: 'Batch compute failed', error: err.message });
+    }
+};
+// ================== END BASE COST ==================
 
 
 module.exports = {
@@ -904,5 +1179,7 @@ module.exports = {
     openCaseInOrder,
     getOrderStatistics,
     removeCaseFromOrder,
-    updateBaseImageUrl
+    updateBaseImageUrl,
+    computeBaseCostForOrder,
+    computeBaseCostForMany
 };

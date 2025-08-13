@@ -12,6 +12,14 @@ router.get('/', controller.getAllOrders);
 router.get('/fe', controller.getFrontendOrders);
 
 router.get('/statistic', controller.getOrderStatistics);
+
+// ⬇️ TÍNH BASE COST
+// Tính cho 1 đơn: body { orderId: "..." }
+router.post('/compute-base-cost', controller.computeBaseCostForOrder);
+
+// Tính batch cho các đơn thiếu base_cost: body { limit: 50 } (tối đa 200)
+router.post('/compute-base-cost/batch', controller.computeBaseCostForMany);
+
 // API xem chi tiết đơn hàng
 router.get('/:id', controller.getOrderById);
 
@@ -30,6 +38,5 @@ router.put('/open-case', controller.openCaseInOrder);
 router.put('/remove-case', controller.removeCaseFromOrder);
 
 router.put('/update-base-image', controller.updateBaseImageUrl);
-
 
 module.exports = router;
