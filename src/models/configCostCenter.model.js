@@ -15,8 +15,8 @@ function normalizeKeyInput(v) {
 
 const configCostCenterSchema = new mongoose.Schema({
     platform: { type: String, required: true, enum: ['Amazon', 'Ebay', 'Etsy', 'Facebook', 'Shopbase', 'Shopify', 'Tiktok', 'Woocommerce'], default: 'Amazon' },
-    config_code: { type: String, required: true, trim: true, unique: true, index: true },
-
+    config_code: { type: String, required: true, trim: true, index: true },
+    
     // Đổi sang mảng
     customize_size_key: { type: [String], default: [] },
     customize_color_key: { type: [String], default: [] },
