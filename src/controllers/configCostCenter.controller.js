@@ -11,10 +11,6 @@ const createConfig = async (req, res) => {
             return res.status(400).json({ message: 'platform, config_code, country are required' });
         }
 
-        // Kiểm tra dup code
-        const dup = await ConfigCostCenter.findOne({ config_code: payload.config_code, is_deleted: false });
-        if (dup) return res.status(409).json({ message: 'Config code already exists' });
-
         // Validate product_for_seller nếu có
         if (payload.product_for_seller && !mongoose.isValidObjectId(payload.product_for_seller)) {
             return res.status(400).json({ message: 'product_for_seller is not a valid ObjectId' });
@@ -146,11 +142,6 @@ const updateConfig = async (req, res) => {
         const id = req.params.id;
         const before = await ConfigCostCenter.findOne({ _id: id, is_deleted: false });
         if (!before) return res.status(404).json({ message: 'Not found' });
-
-        if (req.body.config_code && req.body.config_code !== before.config_code) {
-            const dup = await ConfigCostCenter.findOne({ config_code: req.body.config_code, is_deleted: false });
-            if (dup) return res.status(409).json({ message: 'Config code already exists' });
-        }
         if (req.body.product_for_seller && !mongoose.isValidObjectId(req.body.product_for_seller)) {
             return res.status(400).json({ message: 'product_for_seller is not a valid ObjectId' });
         }

@@ -107,8 +107,6 @@ const importOrderJson = async (req, res) => {
     }
 };
 
-
-
 const importOrderFromFile = async (req, res) => {
     try {
         const filePath = req.file.path;
@@ -148,7 +146,6 @@ const validateAddressWithSmarty = async (address) => {
         return { isValid: false, smartyResponse: { error: err.message } };
     }
 };
-
 
 const updateOrdersFromXlsx = async (req, res) => {
     try {
@@ -340,8 +337,6 @@ const updateOrdersFromXlsx = async (req, res) => {
     }
 };
 
-
-
 const uploadToCloudinary = (buffer, filename) => {
     return new Promise((resolve, reject) => {
         const stream = cloudinary.uploader.upload_stream(
@@ -358,7 +353,6 @@ const uploadToCloudinary = (buffer, filename) => {
         streamifier.createReadStream(buffer).pipe(stream);
     });
 };
-
 
 const getAllOrders = async (req, res) => {
     try {
@@ -382,8 +376,6 @@ const getOrderById = async (req, res) => {
 };
 
 // ✅ Updated getFrontendOrders to group multiple items under one orderId
-
-
 const getFrontendOrders = async (req, res) => {
     try {
         const {
@@ -568,9 +560,6 @@ const getFrontendOrders = async (req, res) => {
     }
 };
 
-
-
-
 const getOrderStatistics = async (req, res) => {
     try {
         const {
@@ -677,9 +666,6 @@ const getOrderStatistics = async (req, res) => {
     }
 };
 
-
-
-
 const updateOrderStatus = async (req, res) => {
     try {
         const { orderId, status } = req.body;
@@ -707,7 +693,6 @@ const updateOrderStatus = async (req, res) => {
     }
 };
 
-
 const updateShippingType = async (req, res) => {
     try {
         const { orderId, shipping_type } = req.body;
@@ -734,6 +719,7 @@ const updateShippingType = async (req, res) => {
         res.status(500).json({ message: 'Failed to update order shipping type', error: error.message });
     }
 };
+
 const updateBaseCost = async (req, res) => {
     try {
         const { orderId, base_cost } = req.body;
@@ -842,6 +828,7 @@ const removeCaseFromOrder = async (req, res) => {
         res.status(500).json({ message: 'Failed to remove case(s)', error: error.message });
     }
 };
+
 const updateBaseImageUrl = async (req, res) => {
     try {
         const { orderId, orderItemId, imageUrl } = req.body;
@@ -891,6 +878,7 @@ const updateBaseImageUrl = async (req, res) => {
         });
     }
 };
+
 // ================== BASE COST HELPERS & APIS ==================
 function parseConfigCodeFromSKU(sku = '') {
     // SKU dạng <manhanvien>-<configcode>-<date>-<stt>
@@ -918,12 +906,14 @@ function normalizeSizeAlias(val) {
     const m = s.match(/\(([^)]+)\)/); // lấy phần trong ngoặc nếu có, ví dụ: Beverage (4.8" x 4.8") -> 4.8" x 4.8"
     return m ? m[1] : s;
 }
-function normalizePackAlias(v) {
-    // chỉ chuẩn hoá định dạng, KHÔNG đổi 30 -> 50
-    const n = String(v || '').toLowerCase().replace(/\s+/g, ' ').trim();
-    return n.replace(/(\d+)\s*pcs?/, '$1 pcs'); // "30pcs" -> "30 pcs"
-}
 
+function normalizePackAlias(val) {
+    const s = String(val || '').trim();
+    // "Pack 30pcs" -> "30 pcs"
+    const m = s.match(/pack\s*(\d+)\s*pcs?/i);
+    if (m) return `${m[1]} pcs`;
+    return s;
+}
 
 // Trích { label => value } từ item.version3Data (ưu tiên) hoặc item.customizationData
 function extractLabelValueMapFromItem(item) {
@@ -976,7 +966,6 @@ function findBestCostCenter(candidates, sizeValue, colorValue, { strict = true }
     if (strict) return null; // KHÔNG fallback
     // (nếu muốn nới lỏng thì đặt strict=false và viết fallback ở dưới)
 }
-
 
 /**
  * POST body: { orderId: string }
@@ -1184,7 +1173,6 @@ const computeBaseCostForOrder = async (req, res) => {
     }
 };
 
-
 /**
  * POST body: { limit?: number }
  * Tính cho nhiều đơn còn thiếu base_cost (0/null), giới hạn tối đa 200
@@ -1212,7 +1200,6 @@ const computeBaseCostForMany = async (req, res) => {
     }
 };
 // ================== END BASE COST ==================
-
 
 module.exports = {
     importOrderFromFile,
