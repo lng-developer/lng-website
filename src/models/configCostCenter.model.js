@@ -39,7 +39,6 @@ const configCostCenterSchema = new mongoose.Schema({
 }, { timestamps: { createdAt: 'created_at', updatedAt: 'updated_at' } });
 
 configCostCenterSchema.index({ platform: 1, status: 1, is_deleted: 1 });
-configCostCenterSchema.index({ config_code: 1 }, { unique: true });
 
 // Nhận cả string/array khi ghi
 const KEY_FIELDS = [
