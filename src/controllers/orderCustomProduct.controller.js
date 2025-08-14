@@ -563,12 +563,12 @@ const getFrontendOrders = async (req, res) => {
                     totalCustomizationPrice: item.totalCustomizationPrice || 0,
                     asin: item.asin,
                     customized_url: item.customized_url,
-
-                    // ⬇️ Trả thêm
-                    vendorProductId,
-                    vendorProductDisplayName,      // "Vendor Name + Product Name"
-                    sizeValue: item?.cost_breakdown?.sizeValue || null,
-                    colorValue: item?.cost_breakdown?.colorValue || null
+                   cost_center: {
+                        vendorProductId,
+                        vendorProductDisplayName,      // "Vendor Name + Product Name"
+                        sizeValue: item?.cost_breakdown?.sizeValue || null,
+                        colorValue: item?.cost_breakdown?.colorValue || null
+                    }
                 };
             });
 
