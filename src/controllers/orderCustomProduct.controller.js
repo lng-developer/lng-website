@@ -12,6 +12,8 @@ const cloudinary = require('../utils/cloudinary');
 const Shop = db.shop;
 const ConfigCostCenter = db.configCostCenter;
 const VendorCostCenter = db.vendorCostCenter;
+const VendorProduct = db.vendorProduct;
+
 
 const mongoose = require('mongoose');
 
@@ -468,7 +470,6 @@ const getFrontendOrders = async (req, res) => {
             },
             { $unwind: '$shop' },
 
-            // 🔍 Filter theo tên shop
             ...(shopName && shopName.trim() !== ''
                 ? [{ $match: { 'shop.name': { $regex: new RegExp(shopName.trim(), 'i') } } }]
                 : []),
@@ -485,7 +486,6 @@ const getFrontendOrders = async (req, res) => {
             { $match: matchStage }
         ];
 
-
         const countPipeline = [...pipeline, { $count: 'total' }];
         const countResult = await OrderCustomProduct.aggregate(countPipeline);
         const totalCount = countResult[0]?.total || 0;
@@ -501,16 +501,56 @@ const getFrontendOrders = async (req, res) => {
 
         const orders = await OrderCustomProduct.aggregate(pipeline);
 
-        const result = orders.map(order => {
-            const items = order.items.map(item => {
-                const surfaces = item.version3Data?.customizationInfo?.surfaces || [];
+        // === Thu thập tất cả vendorProductId từ cost_breakdown của items ===
+        const vendorIdSet = new Set();
+        for (const o of orders) {
+            for (const it of (o.items || [])) {
+                const vId = it?.cost_breakdown?.vendorProductId;
+                if (vId) vendorIdSet.add(String(vId));
+            }
+        }
 
+        // === Lấy map: vendorProductId -> "Vendor Name + Product Name" ===
+        let vendorFullNameMap = new Map();
+        if (vendorIdSet.size > 0) {
+            const idObjs = [];
+            for (const id of vendorIdSet) {
+                if (mongoose.Types.ObjectId.isValid(id)) {
+                    idObjs.push(new mongoose.Types.ObjectId(id));
+                }
+            }
+
+            if (idObjs.length > 0) {
+                const vps = await VendorProduct.find({ _id: { $in: idObjs } })
+                    .select('product_name vendor_id')
+                    .populate({ path: 'vendor_id', select: 'name' })
+                    .lean();
+
+                vendorFullNameMap = new Map(
+                    (vps || []).map(vp => {
+                        const vendorName = vp?.vendor_id?.name || '';
+                        const productName = vp?.product_name || '';
+                        const full = `${vendorName} - ${productName}`.trim();
+                        return [String(vp._id), full];
+                    })
+                );
+            }
+        }
+
+        const result = orders.map(order => {
+            const items = (order.items || []).map(item => {
+                const surfaces = item.version3Data?.customizationInfo?.surfaces || [];
                 const version3Data = surfaces.flatMap(surface =>
                     (surface.areas || []).map(area => ({
                         label: area.label || area.name || '',
                         value: area.optionValue || area.text || ''
                     }))
                 );
+
+                const vendorProductId = item?.cost_breakdown?.vendorProductId || null;
+                const vendorProductDisplayName = vendorProductId
+                    ? (vendorFullNameMap.get(String(vendorProductId)) || null)
+                    : null;
 
                 return {
                     orderItemId: item.orderItemId || null,
@@ -522,7 +562,13 @@ const getFrontendOrders = async (req, res) => {
                     snapshotImage: item.snapshotImage,
                     totalCustomizationPrice: item.totalCustomizationPrice || 0,
                     asin: item.asin,
-                    customized_url: item.customized_url
+                    customized_url: item.customized_url,
+
+                    // ⬇️ Trả thêm
+                    vendorProductId,
+                    vendorProductDisplayName,      // "Vendor Name + Product Name"
+                    sizeValue: item?.cost_breakdown?.sizeValue || null,
+                    colorValue: item?.cost_breakdown?.colorValue || null
                 };
             });
 
@@ -559,6 +605,8 @@ const getFrontendOrders = async (req, res) => {
         });
     }
 };
+
+
 
 const getOrderStatistics = async (req, res) => {
     try {
@@ -903,10 +951,9 @@ function normalize(s) {
 // Alias hỗ trợ match thực tế (an toàn, chỉ áp dụng khi đúng pattern)
 function normalizeSizeAlias(val) {
     const s = String(val || '');
-    const m = s.match(/\(([^)]+)\)/); // lấy phần trong ngoặc nếu có, ví dụ: Beverage (4.8" x 4.8") -> 4.8" x 4.8"
+    const m = s.match(/\(([^)]+)\)/); // ví dụ: Beverage (4.8" x 4.8") -> 4.8" x 4.8"
     return m ? m[1] : s;
 }
-
 function normalizePackAlias(val) {
     const s = String(val || '').trim();
     // "Pack 30pcs" -> "30 pcs"
@@ -929,7 +976,7 @@ function extractLabelValueMapFromItem(item) {
         }
     }
 
-    // FALLBACK: customizationData.children[0].children[0].children (OptionCustomization / TextCustomization)
+    // FALLBACK: customizationData.children[0].children[0].children
     if (map.size === 0) {
         const opts = item?.customizationData?.children?.[0]?.children?.[0]?.children || [];
         for (const opt of opts) {
@@ -941,7 +988,6 @@ function extractLabelValueMapFromItem(item) {
             if (label) map.set(normalize(label), String(value || ''));
         }
     }
-
     return map;
 }
 
@@ -953,26 +999,61 @@ function pickValueByKeys(labelValueMap, keys = []) {
     return '';
 }
 
-// Tìm best match theo vendor_size / vendor_color hoặc standard_size / standard_color
+// B3.1: chọn đúng ConfigCostCenter theo product type
+async function selectConfigByProductType(configCode, labelValueMap) {
+    // Lấy tất cả config trùng config_code
+    const cfgCandidates = await ConfigCostCenter.find({
+        config_code: configCode,
+        is_deleted: { $in: [false, null] }
+    }).populate('product_for_seller').lean();
+
+    if (!cfgCandidates.length) return { cfg: null, reason: 'No config cost center found by config_code' };
+
+    // Thử khớp exact theo customize_product_type_key -> product_for_seller.name
+    for (const c of cfgCandidates) {
+        const typeValRaw = pickValueByKeys(labelValueMap, c.customize_product_type_key || []);
+        const typeVal = normalize(typeValRaw);
+        const sellerName = normalize(c?.product_for_seller?.name || '');
+        if (typeVal && sellerName && typeVal === sellerName) {
+            return { cfg: c, productTypeValue: typeValRaw, matchedBy: 'product_type_exact' };
+        }
+    }
+
+    // Nếu chỉ có 1 config thì dùng luôn (fallback an toàn)
+    if (cfgCandidates.length === 1) {
+        const only = cfgCandidates[0];
+        const typeValRaw = pickValueByKeys(labelValueMap, only.customize_product_type_key || []);
+        return { cfg: only, productTypeValue: typeValRaw, matchedBy: 'single_candidate_fallback' };
+    }
+
+    // Không xác định được
+    return { cfg: null, reason: 'Multiple configs; cannot determine by product type key/value' };
+}
+
+// B3.2: Tìm best match theo vendor_size / vendor_color (strict)
 function findBestCostCenter(candidates, sizeValue, colorValue, { strict = true } = {}) {
     const norm = s => String(s || '').toLowerCase().trim();
     const sizeN = norm(sizeValue);
     const colorN = norm(colorValue);
 
-    // 1) Khớp tuyệt đối cả size & color
-    let hit = candidates.find(c => norm(c.vendor_size) === sizeN && norm(c.vendor_color) === colorN);
+    // Khớp tuyệt đối cả size & color
+    const hit = candidates.find(c => norm(c.vendor_size) === sizeN && norm(c.vendor_color) === colorN);
     if (hit) return hit;
 
-    if (strict) return null; // KHÔNG fallback
-    // (nếu muốn nới lỏng thì đặt strict=false và viết fallback ở dưới)
+    if (strict) return null; // KHÔNG fallback khi yêu cầu trùng khít
+    return null;
 }
 
 /**
  * POST body: { orderId: string }
- * Tính base_cost ở cấp ĐƠN HÀNG theo công thức:
- * - 1 sp: base + international.economy
- * - N sp: (base * qty) + international.economy + international.additional * (qty - 1)
- * => Tổng đơn = tổng các itemCost
+ * Flow:
+ * B1: Parse SKU -> config_code
+ * B2: Tìm Config Cost Center theo config_code
+ * B3: Dùng customize_product_type_key để chọn đúng config (product_for_seller.name == value),
+ *     sau đó lấy customize_size_key, customize_color_key và đọc giá trị từ version3Data
+ * B3.2: Match với vendor_size/vendor_color
+ * B4: Lấy base_cost + tính phí shipping quốc tế theo nhóm vendor_product
+ * B5: LƯU breakdown vào model order & items
  */
 const computeBaseCostForOrder = async (req, res) => {
     try {
@@ -987,9 +1068,7 @@ const computeBaseCostForOrder = async (req, res) => {
 
         // Gom item theo nhóm vận chuyển (vendor_product)
         const groups = new Map(); // key: vendor_productId, val: { items: [...], economy, additional }
-
-        // Tạm giữ kết quả từng item để còn phân bổ phí ship sau
-        const stagedItems = []; // [{orderItemId, sku, configCode, sizeValue, colorValue, vendorProductId, baseEach, qty, eco, add, matchedSku}]
+        const stagedItems = [];   // tạm giữ kết quả từng item trước khi phân bổ ship
 
         for (const item of order.items) {
             const sku = item?.sku || '';
@@ -999,32 +1078,48 @@ const computeBaseCostForOrder = async (req, res) => {
                 continue;
             }
 
-            const cfg = await ConfigCostCenter.findOne({
-                config_code: configCode,
-                is_deleted: { $in: [false, null] }
-            }).populate('product_for_seller').lean();
+            // Chuẩn bị map label->value từ order
+            const labelValueMap = extractLabelValueMapFromItem(item);
 
+            // B2 + B3.1: chọn đúng config theo product type
+            const { cfg, productTypeValue, matchedBy, reason: cfgReason } = await selectConfigByProductType(configCode, labelValueMap);
             if (!cfg) {
-                stagedItems.push({ orderItemId: item.orderItemId, sku, configCode, status: 'failed', reason: 'Config cost center not found' });
+                stagedItems.push({
+                    orderItemId: item.orderItemId, sku, configCode,
+                    status: 'failed',
+                    reason: cfgReason || 'Config cost center not found by product type'
+                });
                 continue;
             }
 
-            const labelValueMap = extractLabelValueMapFromItem(item);
-            let sizeValue = normalizeSizeAlias(pickValueByKeys(labelValueMap, cfg.customize_size_key || []));
-            let colorValue = normalizePackAlias(pickValueByKeys(labelValueMap, cfg.customize_color_key || []));
+            // B3: lấy Size/Color values theo key từ config đã chọn
+            let sizeValue = pickValueByKeys(labelValueMap, cfg.customize_size_key || []);
+            let colorValue = pickValueByKeys(labelValueMap, cfg.customize_color_key || []);
 
+            // Alias để tăng tỉ lệ match thực tế
+            sizeValue = normalizeSizeAlias(sizeValue);
+            colorValue = normalizePackAlias(colorValue);
+
+            // Lấy vendor_product từ product_for_seller.items của config đã chọn
             const pfItems = toArray(cfg?.product_for_seller?.items).filter(Boolean);
             if (!pfItems.length) {
-                stagedItems.push({ orderItemId: item.orderItemId, sku, configCode, sizeValue, colorValue, status: 'failed', reason: 'product_for_seller has no items' });
+                stagedItems.push({
+                    orderItemId: item.orderItemId, sku, configCode, sizeValue, colorValue,
+                    status: 'failed', reason: 'product_for_seller has no items'
+                });
                 continue;
             }
             const chosenItem = pfItems.find(it => (it.status || '').toLowerCase() === 'active') || pfItems[0];
             const vendorProductId = chosenItem?.vendor_product;
             if (!vendorProductId) {
-                stagedItems.push({ orderItemId: item.orderItemId, sku, configCode, sizeValue, colorValue, status: 'failed', reason: 'Missing vendor_product in product_for_seller item' });
+                stagedItems.push({
+                    orderItemId: item.orderItemId, sku, configCode, sizeValue, colorValue,
+                    status: 'failed', reason: 'Missing vendor_product in product_for_seller item'
+                });
                 continue;
             }
 
+            // B3.2: lấy các cost centers của vendor_product và match size/color
             const candidates = await VendorCostCenter.find({
                 vendor_product: vendorProductId,
                 status: { $in: ['Active', null] }
@@ -1033,14 +1128,20 @@ const computeBaseCostForOrder = async (req, res) => {
                 .lean();
 
             if (!candidates.length) {
-                stagedItems.push({ orderItemId: item.orderItemId, sku, configCode, sizeValue, colorValue, status: 'failed', reason: 'No vendor cost centers for this vendor_product' });
+                stagedItems.push({
+                    orderItemId: item.orderItemId, sku, configCode, sizeValue, colorValue,
+                    status: 'failed', reason: 'No vendor cost centers for this vendor_product'
+                });
                 continue;
             }
 
-            const matched = findBestCostCenter(candidates, sizeValue, colorValue);
+            const matched = findBestCostCenter(candidates, sizeValue, colorValue, { strict: true });
             const baseEach = Number(matched?.base_cost || 0);
             if (!matched || !baseEach) {
-                stagedItems.push({ orderItemId: item.orderItemId, sku, configCode, sizeValue, colorValue, status: 'failed', reason: 'No matching size/color or base_cost missing' });
+                stagedItems.push({
+                    orderItemId: item.orderItemId, sku, configCode, sizeValue, colorValue,
+                    status: 'failed', reason: 'No matching size/color or base_cost missing'
+                });
                 continue;
             }
 
@@ -1050,17 +1151,22 @@ const computeBaseCostForOrder = async (req, res) => {
 
             const rec = {
                 orderItemId: item.orderItemId,
-                sku, configCode, sizeValue, colorValue,
+                sku,
+                configCode,
+                productTypeValue: productTypeValue || null,
+                selectedConfigBy: matchedBy || 'unknown',
+                sizeValue,
+                colorValue,
                 vendorProductId: String(vendorProductId),
                 baseEach, qty, eco, add, matchedSku: matched.sku || null,
                 status: 'ok'
             };
             stagedItems.push(rec);
 
-            // cập nhật nhóm
+            // Cập nhật nhóm ship theo vendor_product
             const g = groups.get(rec.vendorProductId) || { items: [], economy: 0, additional: 0 };
             g.items.push(rec);
-            // nếu nhiều bản ghi có eco/add khác nhau, lấy MAX để an toàn và flag mismatch
+            // nếu nhiều bản ghi có eco/add khác nhau, lấy MAX để an toàn
             g.economy = Math.max(g.economy, eco);
             g.additional = Math.max(g.additional, add);
             groups.set(rec.vendorProductId, g);
@@ -1071,7 +1177,7 @@ const computeBaseCostForOrder = async (req, res) => {
         const perItemResults = [];
         const groupBreakdowns = [];
 
-        // đầu tiên cộng phần base từng item (không ship)
+        // 1) cộng phần base item (chưa ship)
         for (const rec of stagedItems) {
             if (rec.status !== 'ok') {
                 perItemResults.push(rec);
@@ -1079,28 +1185,30 @@ const computeBaseCostForOrder = async (req, res) => {
             }
             const basePart = rec.baseEach * rec.qty;
             orderTotalBaseCost += basePart;
-            // sẽ cộng phí ship sau khi phân bổ
+
             perItemResults.push({
                 orderItemId: rec.orderItemId,
                 sku: rec.sku,
                 configCode: rec.configCode,
+                productTypeValue: rec.productTypeValue,
+                selectedConfigBy: rec.selectedConfigBy,
                 sizeValue: rec.sizeValue,
                 colorValue: rec.colorValue,
+                vendorProductId: rec.vendorProductId, // <- để lưu vào item
                 matchedSku: rec.matchedSku,
                 base_cost_each: rec.baseEach,
                 quantity: rec.qty,
-                // tạm để 0, lát nữa update theo phân bổ
+                // tạm 0, lát update bởi phân bổ ship
                 shipping_international_economy: 0,
                 shipping_international_additional_units: 0,
                 shipping_international_additional_rate: 0,
-                base_cost_total_for_item_including_shipping: basePart, // sẽ + ship sau
+                base_cost_total_for_item_including_shipping: basePart,
                 status: 'ok'
             });
         }
 
-        // phân bổ phí ship theo từng nhóm
+        // 2) phân bổ phí ship theo nhóm vendor_product
         for (const [groupKey, g] of groups.entries()) {
-            // tổng qty trong nhóm
             const totalQty = g.items.reduce((s, it) => s + it.qty, 0);
             if (totalQty <= 0) continue;
 
@@ -1111,27 +1219,21 @@ const computeBaseCostForOrder = async (req, res) => {
             const shippingTotal = eco + add * addUnits;
             orderTotalBaseCost += shippingTotal;
 
-            // phân bổ: item đầu nhóm nhận economy 1 lần, rồi phân phát additional cho (totalQty-1) "chiếc" còn lại
             let economyAssigned = false;
             let remainingAdditionalUnits = addUnits;
 
-            // để ổn định: sắp xếp theo orderItemId
             const sorted = [...g.items].sort((a, b) => String(a.orderItemId).localeCompare(String(b.orderItemId)));
 
             for (const it of sorted) {
-                // tìm bản ghi output tương ứng để update
                 const out = perItemResults.find(r => r.orderItemId === it.orderItemId);
                 if (!out || out.status !== 'ok') continue;
 
-                // gán economy cho "chiếc" đầu tiên của cả nhóm
                 let ecoForThisItem = 0;
                 if (!economyAssigned && it.qty > 0) {
                     ecoForThisItem = eco;
                     economyAssigned = true;
                 }
 
-                // số “chiếc” còn lại của item này nhận additional
-                // nếu item được hưởng economy, thì số chiếc còn lại = qty - 1; nếu không, = qty
                 let addUnitsForThisItem = it.qty - (ecoForThisItem > 0 ? 1 : 0);
                 addUnitsForThisItem = Math.max(0, Math.min(addUnitsForThisItem, remainingAdditionalUnits));
                 remainingAdditionalUnits -= addUnitsForThisItem;
@@ -1157,9 +1259,40 @@ const computeBaseCostForOrder = async (req, res) => {
             });
         }
 
+        // ================== BƯỚC 5: LƯU BREAKDOWN VÀO MODEL ==================
+        // Ghi breakdown từng item vào order.items[].cost_breakdown
+        for (const out of perItemResults) {
+            if (out.status !== 'ok') continue; // chỉ lưu khi match thành công
+            const itemRef = order.items.find(i => String(i.orderItemId) === String(out.orderItemId));
+            if (!itemRef) continue;
+
+            itemRef.cost_breakdown = {
+                configCode: out.configCode,
+                productTypeValue: out.productTypeValue || null,
+                selectedConfigBy: out.selectedConfigBy || null,
+                sizeValue: out.sizeValue,
+                colorValue: out.colorValue,
+                vendorProductId: out.vendorProductId || null,
+                matchedSku: out.matchedSku || null,
+                base_cost_each: out.base_cost_each,
+                quantity: out.quantity,
+                shipping_international_economy: out.shipping_international_economy,
+                shipping_international_additional_units: out.shipping_international_additional_units,
+                shipping_international_additional_rate: out.shipping_international_additional_rate,
+                base_cost_total_for_item_including_shipping: out.base_cost_total_for_item_including_shipping,
+                formula: out.formula
+            };
+        }
+
+        // Lưu breakdown nhóm ship ở cấp order
+        order.base_cost_shipping_groups = groupBreakdowns;
+
+        // Tổng tiền và thời điểm tính
         order.base_cost = Number(orderTotalBaseCost.toFixed(2));
         order.base_cost_computed_at = new Date();
+
         await order.save();
+        // ================== HẾT BƯỚC 5 ==================
 
         return res.json({
             message: 'Computed base cost',
@@ -1200,6 +1333,8 @@ const computeBaseCostForMany = async (req, res) => {
     }
 };
 // ================== END BASE COST ==================
+
+
 
 module.exports = {
     importOrderFromFile,
