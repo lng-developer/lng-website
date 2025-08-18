@@ -563,7 +563,7 @@ const getFrontendOrders = async (req, res) => {
                     totalCustomizationPrice: item.totalCustomizationPrice || 0,
                     asin: item.asin,
                     customized_url: item.customized_url,
-                   cost_center: {
+                    cost_center: {
                         vendorProductId,
                         vendorProductDisplayName,      // "Vendor Name + Product Name"
                         sizeValue: item?.cost_breakdown?.sizeValue || null,
@@ -948,16 +948,52 @@ function normalize(s) {
         .trim();
 }
 
-// Alias hỗ trợ match thực tế (an toàn, chỉ áp dụng khi đúng pattern)
+// Alias hỗ trợ match thực tế (kết hợp cho clothing + dimension trong ngoặc)
 function normalizeSizeAlias(val) {
-    const s = String(val || '');
-    const m = s.match(/\(([^)]+)\)/); // ví dụ: Beverage (4.8" x 4.8") -> 4.8" x 4.8"
-    return m ? m[1] : s;
+    let s = String(val || '').trim();
+
+    // Nếu là dạng có kích thước trong ngoặc: Beverage (4.8" x 4.8") -> "4.8" x 4.8""
+    const paren = s.match(/\(([^)]+)\)/);
+    if (paren) s = paren[1];
+
+    const raw = s;
+    const lower = s.toLowerCase().trim();
+
+    // NB / Newborn
+    if (/\b(nb|new\s?born|newborn)\b/i.test(lower)) return 'NB';
+
+    // 0-3 months / 0 - 3 months / 0 to 3 months -> 0-3M
+    let m = lower.match(/^(\d+)\s*(?:-|–|to)\s*(\d+)\s*(?:months?|mos?|mo)\b/);
+    if (m) return `${m[1]}-${m[2]}M`;
+
+    // 12 months / 12 mos / 12 mo -> 12M
+    m = lower.match(/^(\d+)\s*(?:months?|mos?|mo)\b/);
+    if (m) return `${m[1]}M`;
+
+    // 12m / 12 m -> 12M
+    m = lower.match(/^(\d+)\s*m\b/);
+    if (m) return `${m[1]}M`;
+
+    // 2T / 2 toddler / 2 t -> 2T
+    m = lower.match(/^(\d+)\s*(?:t|toddler)\b/);
+    if (m) return `${m[1]}T`;
+
+    // 0-3m / 0 - 3 m -> 0-3M
+    m = lower.match(/^(\d+)\s*(?:-|–)\s*(\d+)\s*m\b/);
+    if (m) return `${m[1]}-${m[2]}M`;
+
+    // Không khớp alias nào: trả về nguyên bản (đã cắt ngoặc nếu có)
+    return raw;
 }
+
 function normalizePackAlias(val) {
     const s = String(val || '').trim();
-    // "Pack 30pcs" -> "30 pcs"
-    const m = s.match(/pack\s*(\d+)\s*pcs?/i);
+    // "Pack 30pcs" | "Pack 30 pcs" | "30pcs" -> "30 pcs"
+    let m = s.match(/(?:^|\s)pack\s*(\d+)\s*pcs?/i);
+    if (m) return `${m[1]} pcs`;
+    m = s.match(/^(\d+)\s*pcs?$/i);
+    if (m) return `${m[1]} pcs`;
+    m = s.match(/^(\d+)\s*pack$/i);
     if (m) return `${m[1]} pcs`;
     return s;
 }
@@ -1173,7 +1209,6 @@ const computeBaseCostForOrder = async (req, res) => {
         }
 
         // Tính tổng: base (theo item) + phí ship phân bổ theo nhóm
-        let orderTotalBaseCost = 0;
         const perItemResults = [];
         const groupBreakdowns = [];
 
@@ -1184,7 +1219,6 @@ const computeBaseCostForOrder = async (req, res) => {
                 continue;
             }
             const basePart = rec.baseEach * rec.qty;
-            orderTotalBaseCost += basePart;
 
             perItemResults.push({
                 orderItemId: rec.orderItemId,
@@ -1217,7 +1251,6 @@ const computeBaseCostForOrder = async (req, res) => {
             const addUnits = Math.max(0, totalQty - 1);
 
             const shippingTotal = eco + add * addUnits;
-            orderTotalBaseCost += shippingTotal;
 
             let economyAssigned = false;
             let remainingAdditionalUnits = addUnits;
@@ -1287,7 +1320,13 @@ const computeBaseCostForOrder = async (req, res) => {
         // Lưu breakdown nhóm ship ở cấp order
         order.base_cost_shipping_groups = groupBreakdowns;
 
-        // Tổng tiền và thời điểm tính
+        // Tổng tiền từ sum của base_cost_total_for_item_including_shipping từng item và thời điểm tính
+        let orderTotalBaseCost = 0;
+        for (const item of order.items) {
+            if (item.cost_breakdown && typeof item.cost_breakdown.base_cost_total_for_item_including_shipping === 'number') {
+                orderTotalBaseCost += item.cost_breakdown.base_cost_total_for_item_including_shipping;
+            }
+        }
         order.base_cost = Number(orderTotalBaseCost.toFixed(2));
         order.base_cost_computed_at = new Date();
 
