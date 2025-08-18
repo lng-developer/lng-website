@@ -19,6 +19,9 @@ const mongoose = require('mongoose');
 
 require('dotenv').config();
 
+const ALLOWED = ["New", "Fulfilled", "Shipped", "Cancelled"];
+const norm = (s) => (ALLOWED.includes(s) ? s : "New");
+
 const importOrderJson = async (req, res) => {
     try {
         const jsonData = req.body;
@@ -568,6 +571,12 @@ const getFrontendOrders = async (req, res) => {
                         vendorProductDisplayName,      // "Vendor Name + Product Name"
                         sizeValue: item?.cost_breakdown?.sizeValue || null,
                         colorValue: item?.cost_breakdown?.colorValue || null
+                    },
+                    tracking_info: {
+                        fulfillment: item?.tracking_info?.fulfillment,
+                        status: item?.tracking_info?.status,
+                        tracking: item?.tracking_info?.tracking,
+                        note: item?.tracking_info?.note
                     }
                 };
             });
@@ -1373,7 +1382,90 @@ const computeBaseCostForMany = async (req, res) => {
 };
 // ================== END BASE COST ==================
 
+function computeOrderStatusFromItems(items = []) {
+    const itemStatuses = items.map(i => norm(i?.tracking_info?.status));
+    const active = itemStatuses.filter(s => s !== "Cancelled");
+    if (active.length === 0) return "Cancelled";
+    if (active.every(s => s === "Shipped")) return "Shipped";
+    const hasNew = active.includes("New");
+    const hasFulfilled = active.includes("Fulfilled");
+    const allFulfilledOrShipped = active.every(s => s === "Fulfilled" || s === "Shipped");
+    if (!hasNew && hasFulfilled && allFulfilledOrShipped) return "Fulfilled";
+    return "New";
+}
 
+/**
+ * PATCH /orders/:orderId/items/:orderItemId/tracking
+ * Body: { fulfillment?, tracking?, status?, note? }
+ * Rule thêm: nếu tracking có giá trị -> ép item.status = 'Shipped'
+ */
+const updateItemTracking = async (req, res) => {
+    try {
+        const { orderId, orderItemId } = req.params;
+        let { fulfillment, tracking, status, note } = req.body;
+
+        // Chuẩn hoá chuỗi
+        const tFulfillment = fulfillment !== undefined ? String(fulfillment).trim() : undefined;
+        const tTracking = tracking !== undefined ? String(tracking).trim() : undefined;
+
+        // Validate status nếu có
+        if (status && !ALLOWED.includes(status)) {
+            return res.status(400).json({ message: "Invalid status", allowed: ALLOWED });
+        }
+
+        // NEW RULE: nếu có tracking (khác rỗng) -> ép status = 'Shipped'
+        if (tTracking !== undefined && tTracking.length > 0) {
+            status = "Shipped";
+        }
+
+        // Build $set động
+        const $set = {};
+        if (tFulfillment !== undefined) $set["items.$[it].tracking_info.fulfillment"] = tFulfillment;
+        if (tTracking !== undefined) $set["items.$[it].tracking_info.tracking"] = tTracking;
+        if (status !== undefined) $set["items.$[it].tracking_info.status"] = status;
+        if (note !== undefined) $set["items.$[it].tracking_info.note"] = String(note);
+        $set["items.$[it].tracking_info.updated_at"] = new Date();
+
+        if (Object.keys($set).length === 0) {
+            return res.status(400).json({ message: "No updatable fields provided" });
+        }
+
+        // Cập nhật item
+        const docAfterItemUpdate = await OrderCustomProduct.findOneAndUpdate(
+            { orderId },
+            { $set },
+            {
+                arrayFilters: [{ "it.orderItemId": orderItemId }],
+                new: true
+            }
+        );
+
+        if (!docAfterItemUpdate) {
+            return res.status(404).json({ message: "Order not found" });
+        }
+
+        // Đồng bộ trạng thái đơn
+        const newOrderStatus = computeOrderStatusFromItems(docAfterItemUpdate.items);
+        if (newOrderStatus !== docAfterItemUpdate.status) {
+            await OrderCustomProduct.updateOne(
+                { _id: docAfterItemUpdate._id },
+                { $set: { status: newOrderStatus } }
+            );
+        }
+
+        const updatedItem = (docAfterItemUpdate.items || []).find(i => i.orderItemId === orderItemId);
+
+        return res.json({
+            message: "Tracking updated (auto Shipped on tracking) & order status synced",
+            orderId: docAfterItemUpdate.orderId,
+            orderStatus: newOrderStatus,
+            item: updatedItem
+        });
+    } catch (err) {
+        console.error(err);
+        return res.status(500).json({ message: "Update failed", error: err.message });
+    }
+};
 
 module.exports = {
     importOrderFromFile,
@@ -1391,5 +1483,6 @@ module.exports = {
     removeCaseFromOrder,
     updateBaseImageUrl,
     computeBaseCostForOrder,
-    computeBaseCostForMany
+    computeBaseCostForMany,
+    updateItemTracking
 };

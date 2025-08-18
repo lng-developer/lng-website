@@ -20,7 +20,7 @@ router.post('/compute-base-cost', controller.computeBaseCostForOrder);
 // Tính batch cho các đơn thiếu base_cost: body { limit: 50 } (tối đa 200)
 router.post('/compute-base-cost/batch', controller.computeBaseCostForMany);
 
-// API xem chi tiết đơn hàng
+// API xem chi tiết đơn hàng113-2352267-7335428
 router.get('/:id', controller.getOrderById);
 
 router.post('/update-from-xlsx', controller.upload.single('file'), controller.updateOrdersFromXlsx);
@@ -38,5 +38,7 @@ router.put('/open-case', controller.openCaseInOrder);
 router.put('/remove-case', controller.removeCaseFromOrder);
 
 router.put('/update-base-image', controller.updateBaseImageUrl);
+
+router.put('/:orderId/items/:orderItemId/tracking', controller.updateItemTracking);
 
 module.exports = router;

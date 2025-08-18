@@ -70,9 +70,20 @@ const shippingGroupSchema = new mongoose.Schema({
     shipping_total_for_group: Number
 }, { _id: false });
 
-/**
- * Order item schema
- */
+// ⬇️ Tracking & Note per item
+const itemTrackingSchema = new mongoose.Schema({
+    fulfillment: { type: String, trim: true, default: '' }, // mã/đơn fulfill hoặc tên nhà fulfill
+    tracking: { type: String, trim: true, default: '' }, // mã tracking
+    status: {
+        type: String,
+        enum: ["New", "Fulfilled", "Shipped", "Cancelled"],   // giữ đồng bộ với Order.status
+        default: "New"
+    },
+    note: { type: String, trim: true, default: '' },
+    updated_at: { type: Date, default: Date.now }
+}, { _id: false });
+
+/** Order item schema */
 const orderItemSchema = new mongoose.Schema({
     orderItemId: String,
     sku: String,
@@ -96,8 +107,12 @@ const orderItemSchema = new mongoose.Schema({
     asin: String,
 
     // ⬇️ Saved result of base cost computation per item
-    cost_breakdown: itemCostBreakdownSchema
+    cost_breakdown: itemCostBreakdownSchema,
+
+    // ⬇️ NEW: Tracking & Note
+    tracking_info: itemTrackingSchema
 }, { _id: false });
+
 
 /**
  * Order schema
@@ -157,5 +172,8 @@ const orderCustomProductSchema = new mongoose.Schema({
         smartyResponse: { type: Object, default: null }
     }
 });
+
+// Tối ưu truy vấn theo orderId + orderItemId
+orderCustomProductSchema.index({ orderId: 1, "items.orderItemId": 1 });
 
 module.exports = mongoose.model('OrderCustomProduct', orderCustomProductSchema);
