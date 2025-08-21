@@ -412,7 +412,8 @@ const getFrontendOrders = async (req, res) => {
             const keyword = new RegExp(search, 'i');
             matchStage.$or = [
                 { orderId: keyword },
-                { 'customer_infor.name': keyword }
+                { 'customer_infor.name': keyword },
+                {"items.sku": keyword}
             ];
         }
         if (openCase === 'true') {
@@ -991,9 +992,13 @@ function normalizeSizeAlias(val) {
     m = lower.match(/^(\d+)\s*(?:-|–)\s*(\d+)\s*m\b/);
     if (m) return `${m[1]}-${m[2]}M`;
 
-    // Không khớp alias nào: trả về nguyên bản (đã cắt ngoặc nếu có)
-    return raw;
+    // ✅ Chuẩn hóa spacing giữa số đo (thêm space quanh "x")
+    s = raw.replace(/\s*x\s*/gi, ' x ').replace(/\s{2,}/g, ' ').trim();
+
+    // Không khớp alias nào: trả về đã normalize spacing
+    return s;
 }
+
 
 function normalizePackAlias(val) {
     const s = String(val || '').trim();
