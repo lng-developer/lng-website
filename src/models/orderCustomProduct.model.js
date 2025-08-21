@@ -43,19 +43,35 @@ const customizationSchema = new mongoose.Schema({
  */
 const itemCostBreakdownSchema = new mongoose.Schema({
     configCode: String,
-    productTypeValue: String,                 // value from customize_product_type_key
-    selectedConfigBy: String,                 // 'product_type_exact' | 'single_candidate_fallback' | ...
-    sizeValue: String,                        // normalized value used to match
-    colorValue: String,                       // normalized value used to match
+    productTypeValue: String,
+    selectedConfigBy: String,
+    sizeValue: String,
+    colorValue: String,
     vendorProductId: String,
     matchedSku: String,
+
+    // ✅ NEW: Priority selection info
+    selectedOrder: { type: Number, default: null }, // Order priority (1, 2, 3...) của item được chọn
+    itemDisplayName: String,                         // Display name của item được chọn
+
     base_cost_each: Number,
     quantity: Number,
-    shipping_international_economy: Number,   // economy applied to this item (0 or >0 for first item in group)
-    shipping_international_additional_units: Number, // how many "additional" units this item accounts for
-    shipping_international_additional_rate: Number,  // rate used for additional units
+
+    // Additional costs breakdown
+    additional_costs_breakdown: {
+        embroidery: { type: Number, default: 0 },
+        two_sided_print: { type: Number, default: 0 },
+        two_position_print: { type: Number, default: 0 }
+    },
+    total_additional_cost_per_item: { type: Number, default: 0 },
+
+    // Shipping fields
+    shipping_international_economy: Number,
+    shipping_international_additional_units: Number,
+    shipping_international_additional_rate: Number,
+
     base_cost_total_for_item_including_shipping: Number,
-    formula: String                           // human-readable formula used
+    formula: String  // Bao gồm thông tin về selection priority                        
 }, { _id: false });
 
 /**

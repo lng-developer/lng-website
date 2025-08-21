@@ -1,7 +1,7 @@
 const mongoose = require('mongoose');
 
 const vendorCostCenterSchema = new mongoose.Schema({
-    vendor_product: { type: mongoose.Schema.Types.ObjectId, ref: 'VendorProduct', required: true }, // added
+    vendor_product: { type: mongoose.Schema.Types.ObjectId, ref: 'VendorProduct', required: true },
     vendor_size: { type: String, require: true },
     vendor_color: { type: String, require: true },
     standard_size: { type: String, require: true },
@@ -16,6 +16,12 @@ const vendorCostCenterSchema = new mongoose.Schema({
     international: {
         economy: { type: Number, require: true },
         additional: { type: Number, require: true }
+    },
+    // ✅ NEW: Additional costs cho thêu và in
+    additional_costs: {
+        embroidery: { type: Number, default: 0 },           // Phí thêu additional
+        two_sided_print: { type: Number, default: 0 },      // Phí in 2 mặt
+        two_position_print: { type: Number, default: 0 }    // Phí in 2 vị trí
     },
     product_type_design: String,
     history: [

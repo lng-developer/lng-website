@@ -198,6 +198,9 @@ const importVendorCostCenterFromExcel = async (req, res) => {
             const domestic_additional = Number(row[8]) || 0;
             const intl_economy = Number(row[9]) || 0;
             const intl_additional = Number(row[10]) || 0;
+            const embroidery_cost = Number(row[11]) || 0;
+            const two_sided_print_cost = Number(row[12]) || 0;
+            const two_position_print_cost = Number(row[13]) || 0;
 
             const doc = new VendorCostCenter({
                 vendor_product,
@@ -215,6 +218,12 @@ const importVendorCostCenterFromExcel = async (req, res) => {
                     economy: intl_economy,
                     additional: intl_additional
                 },
+                // ✅ NEW: Additional costs
+                additional_costs: {
+                    embroidery: embroidery_cost,
+                    two_sided_print: two_sided_print_cost,
+                    two_position_print: two_position_print_cost
+                },
                 product_type_design: '',
                 status: ['active', 'inactive'].includes(status) ? status.charAt(0).toUpperCase() + status.slice(1) : 'Active'
             });
@@ -226,7 +235,7 @@ const importVendorCostCenterFromExcel = async (req, res) => {
         fs.unlink(file.path, () => { });
 
         res.status(201).json({
-            message: `Imported ${inserted.length} records successfully`,
+            message: `Imported ${inserted.length} records successfully with additional costs`,
             data: inserted
         });
     } catch (error) {

@@ -1089,16 +1089,64 @@ function findBestCostCenter(candidates, sizeValue, colorValue, { strict = true }
     return null;
 }
 
+// ✅ NEW: Helper function để chọn vendor_product theo priority order và matching
+async function selectBestVendorProduct(pfItems, sizeValue, colorValue) {
+    // Sort theo order priority (1, 2, 3...)
+    const sortedItems = pfItems
+        .filter(it => (it.status || '').toLowerCase() === 'active')
+        .sort((a, b) => (a.order || 999) - (b.order || 999));
+
+    // Nếu không có item Active nào, fallback về tất cả items
+    const itemsToCheck = sortedItems.length > 0 ? sortedItems : pfItems.sort((a, b) => (a.order || 999) - (b.order || 999));
+
+    // Thử từng item theo thứ tự priority để tìm matching cost center
+    for (const item of itemsToCheck) {
+        const vendorProductId = item?.vendor_product;
+        if (!vendorProductId) continue;
+
+        // Kiểm tra có cost center matching cho item này không
+        const candidates = await VendorCostCenter.find({
+            vendor_product: vendorProductId,
+            status: { $in: ['Active', null] }
+        })
+            .select('vendor_size vendor_color standard_size standard_color base_cost sku international.economy international.additional additional_costs')
+            .lean();
+
+        if (!candidates.length) continue;
+
+        // Tìm exact match cho size/color
+        const matched = findBestCostCenter(candidates, sizeValue, colorValue, { strict: true });
+        if (matched && Number(matched?.base_cost || 0) > 0) {
+            return {
+                success: true,
+                vendorProductId: String(vendorProductId),
+                matched,
+                selectedOrder: item.order || 999,
+                itemDisplayName: item.display_name || 'Unknown'
+            };
+        }
+    }
+
+    return {
+        success: false,
+        reason: 'No matching vendor product with valid cost center found',
+        checkedItems: itemsToCheck.map(it => ({
+            order: it.order,
+            display_name: it.display_name,
+            vendor_product: String(it.vendor_product || '')
+        }))
+    };
+}
+
 /**
  * POST body: { orderId: string }
- * Flow:
+ * Updated Flow với priority order selection:
  * B1: Parse SKU -> config_code
  * B2: Tìm Config Cost Center theo config_code
- * B3: Dùng customize_product_type_key để chọn đúng config (product_for_seller.name == value),
- *     sau đó lấy customize_size_key, customize_color_key và đọc giá trị từ version3Data
- * B3.2: Match với vendor_size/vendor_color
- * B4: Lấy base_cost + tính phí shipping quốc tế theo nhóm vendor_product
- * B5: LƯU breakdown vào model order & items
+ * B3: Dùng customize_product_type_key để chọn đúng config
+ * B3.2: Chọn vendor_product theo priority order (1, 2, 3...) và matching cost center
+ * B4: Tính base_cost + additional costs + shipping
+ * B5: Lưu breakdown vào model
  */
 const computeBaseCostForOrder = async (req, res) => {
     try {
@@ -1145,7 +1193,7 @@ const computeBaseCostForOrder = async (req, res) => {
             sizeValue = normalizeSizeAlias(sizeValue);
             colorValue = normalizePackAlias(colorValue);
 
-            // Lấy vendor_product từ product_for_seller.items của config đã chọn
+            // ✅ NEW: Chọn vendor_product theo priority order
             const pfItems = toArray(cfg?.product_for_seller?.items).filter(Boolean);
             if (!pfItems.length) {
                 stagedItems.push({
@@ -1154,45 +1202,45 @@ const computeBaseCostForOrder = async (req, res) => {
                 });
                 continue;
             }
-            const chosenItem = pfItems.find(it => (it.status || '').toLowerCase() === 'active') || pfItems[0];
-            const vendorProductId = chosenItem?.vendor_product;
-            if (!vendorProductId) {
+
+            const vendorSelection = await selectBestVendorProduct(pfItems, sizeValue, colorValue);
+            if (!vendorSelection.success) {
                 stagedItems.push({
                     orderItemId: item.orderItemId, sku, configCode, sizeValue, colorValue,
-                    status: 'failed', reason: 'Missing vendor_product in product_for_seller item'
+                    status: 'failed',
+                    reason: vendorSelection.reason,
+                    checkedItems: vendorSelection.checkedItems
                 });
                 continue;
             }
 
-            // B3.2: lấy các cost centers của vendor_product và match size/color
-            const candidates = await VendorCostCenter.find({
-                vendor_product: vendorProductId,
-                status: { $in: ['Active', null] }
-            })
-                .select('vendor_size vendor_color standard_size standard_color base_cost sku international.economy international.additional')
-                .lean();
-
-            if (!candidates.length) {
-                stagedItems.push({
-                    orderItemId: item.orderItemId, sku, configCode, sizeValue, colorValue,
-                    status: 'failed', reason: 'No vendor cost centers for this vendor_product'
-                });
-                continue;
-            }
-
-            const matched = findBestCostCenter(candidates, sizeValue, colorValue, { strict: true });
+            const { vendorProductId, matched, selectedOrder, itemDisplayName } = vendorSelection;
             const baseEach = Number(matched?.base_cost || 0);
-            if (!matched || !baseEach) {
-                stagedItems.push({
-                    orderItemId: item.orderItemId, sku, configCode, sizeValue, colorValue,
-                    status: 'failed', reason: 'No matching size/color or base_cost missing'
-                });
-                continue;
-            }
-
             const qty = Math.max(1, Number(item.quantity || 1));
             const eco = Number(matched?.international?.economy || 0);
             const add = Number(matched?.international?.additional || 0);
+
+            // ✅ Tính additional costs dựa trên config_code
+            let additionalCosts = {
+                embroidery: 0,
+                two_sided_print: 0,
+                two_position_print: 0
+            };
+
+            // Logic áp dụng phí additional theo config code
+            if (['TSB'].includes(configCode.toUpperCase())) {
+                additionalCosts.two_sided_print = Number(matched?.additional_costs?.two_sided_print || 0);
+            }
+
+            if (['TS2S'].includes(configCode.toUpperCase())) {
+                additionalCosts.two_position_print = Number(matched?.additional_costs?.two_position_print || 0);
+            }
+
+            if (['EBM', 'EBMA'].includes(configCode.toUpperCase())) {
+                additionalCosts.embroidery = Number(matched?.additional_costs?.embroidery || 0);
+            }
+
+            const totalAdditionalCost = additionalCosts.embroidery + additionalCosts.two_sided_print + additionalCosts.two_position_print;
 
             const rec = {
                 orderItemId: item.orderItemId,
@@ -1202,8 +1250,17 @@ const computeBaseCostForOrder = async (req, res) => {
                 selectedConfigBy: matchedBy || 'unknown',
                 sizeValue,
                 colorValue,
-                vendorProductId: String(vendorProductId),
-                baseEach, qty, eco, add, matchedSku: matched.sku || null,
+                vendorProductId,
+                // ✅ NEW: Thông tin về selection priority
+                selectedOrder,
+                itemDisplayName,
+                baseEach,
+                qty,
+                eco,
+                add,
+                matchedSku: matched.sku || null,
+                additionalCosts,
+                totalAdditionalCost,
                 status: 'ok'
             };
             stagedItems.push(rec);
@@ -1211,23 +1268,23 @@ const computeBaseCostForOrder = async (req, res) => {
             // Cập nhật nhóm ship theo vendor_product
             const g = groups.get(rec.vendorProductId) || { items: [], economy: 0, additional: 0 };
             g.items.push(rec);
-            // nếu nhiều bản ghi có eco/add khác nhau, lấy MAX để an toàn
             g.economy = Math.max(g.economy, eco);
             g.additional = Math.max(g.additional, add);
             groups.set(rec.vendorProductId, g);
         }
 
-        // Tính tổng: base (theo item) + phí ship phân bổ theo nhóm
+        // Tính tổng: base + additional + shipping
         const perItemResults = [];
         const groupBreakdowns = [];
 
-        // 1) cộng phần base item (chưa ship)
+        // 1) Cộng phần base item + additional costs (chưa shipping)
         for (const rec of stagedItems) {
             if (rec.status !== 'ok') {
                 perItemResults.push(rec);
                 continue;
             }
             const basePart = rec.baseEach * rec.qty;
+            const additionalPart = rec.totalAdditionalCost * rec.qty;
 
             perItemResults.push({
                 orderItemId: rec.orderItemId,
@@ -1237,20 +1294,25 @@ const computeBaseCostForOrder = async (req, res) => {
                 selectedConfigBy: rec.selectedConfigBy,
                 sizeValue: rec.sizeValue,
                 colorValue: rec.colorValue,
-                vendorProductId: rec.vendorProductId, // <- để lưu vào item
+                vendorProductId: rec.vendorProductId,
                 matchedSku: rec.matchedSku,
+                // ✅ NEW: Selection info
+                selectedOrder: rec.selectedOrder,
+                itemDisplayName: rec.itemDisplayName,
                 base_cost_each: rec.baseEach,
                 quantity: rec.qty,
-                // tạm 0, lát update bởi phân bổ ship
+                additional_costs_breakdown: rec.additionalCosts,
+                total_additional_cost_per_item: additionalPart,
+                // Shipping fields (sẽ được update sau)
                 shipping_international_economy: 0,
                 shipping_international_additional_units: 0,
                 shipping_international_additional_rate: 0,
-                base_cost_total_for_item_including_shipping: basePart,
+                base_cost_total_for_item_including_shipping: basePart + additionalPart,
                 status: 'ok'
             });
         }
 
-        // 2) phân bổ phí ship theo nhóm vendor_product
+        // 2) Phân bổ phí shipping theo nhóm vendor_product
         for (const [groupKey, g] of groups.entries()) {
             const totalQty = g.items.reduce((s, it) => s + it.qty, 0);
             if (totalQty <= 0) continue;
@@ -1258,7 +1320,6 @@ const computeBaseCostForOrder = async (req, res) => {
             const eco = g.economy;
             const add = g.additional;
             const addUnits = Math.max(0, totalQty - 1);
-
             const shippingTotal = eco + add * addUnits;
 
             let economyAssigned = false;
@@ -1288,7 +1349,7 @@ const computeBaseCostForOrder = async (req, res) => {
                 out.base_cost_total_for_item_including_shipping = Number(
                     (out.base_cost_total_for_item_including_shipping + ecoForThisItem + addCostForThisItem).toFixed(2)
                 );
-                out.formula = `(base ${it.baseEach} * qty ${it.qty}) + eco ${ecoForThisItem} + add ${add} * ${addUnitsForThisItem}`;
+                out.formula = `(base ${it.baseEach} * qty ${it.qty}) + additional ${it.totalAdditionalCost} * qty ${it.qty} + eco ${ecoForThisItem} + add ${add} * ${addUnitsForThisItem} | Selected: Order ${out.selectedOrder} - ${out.itemDisplayName}`;
             }
 
             groupBreakdowns.push({
@@ -1302,9 +1363,8 @@ const computeBaseCostForOrder = async (req, res) => {
         }
 
         // ================== BƯỚC 5: LƯU BREAKDOWN VÀO MODEL ==================
-        // Ghi breakdown từng item vào order.items[].cost_breakdown
         for (const out of perItemResults) {
-            if (out.status !== 'ok') continue; // chỉ lưu khi match thành công
+            if (out.status !== 'ok') continue;
             const itemRef = order.items.find(i => String(i.orderItemId) === String(out.orderItemId));
             if (!itemRef) continue;
 
@@ -1316,8 +1376,13 @@ const computeBaseCostForOrder = async (req, res) => {
                 colorValue: out.colorValue,
                 vendorProductId: out.vendorProductId || null,
                 matchedSku: out.matchedSku || null,
+                // ✅ NEW: Priority selection info
+                selectedOrder: out.selectedOrder,
+                itemDisplayName: out.itemDisplayName,
                 base_cost_each: out.base_cost_each,
                 quantity: out.quantity,
+                additional_costs_breakdown: out.additional_costs_breakdown,
+                total_additional_cost_per_item: out.total_additional_cost_per_item,
                 shipping_international_economy: out.shipping_international_economy,
                 shipping_international_additional_units: out.shipping_international_additional_units,
                 shipping_international_additional_rate: out.shipping_international_additional_rate,
@@ -1326,10 +1391,9 @@ const computeBaseCostForOrder = async (req, res) => {
             };
         }
 
-        // Lưu breakdown nhóm ship ở cấp order
+        // Lưu breakdown nhóm shipping và tổng order cost
         order.base_cost_shipping_groups = groupBreakdowns;
 
-        // Tổng tiền từ sum của base_cost_total_for_item_including_shipping từng item và thời điểm tính
         let orderTotalBaseCost = 0;
         for (const item of order.items) {
             if (item.cost_breakdown && typeof item.cost_breakdown.base_cost_total_for_item_including_shipping === 'number') {
@@ -1340,10 +1404,9 @@ const computeBaseCostForOrder = async (req, res) => {
         order.base_cost_computed_at = new Date();
 
         await order.save();
-        // ================== HẾT BƯỚC 5 ==================
 
         return res.json({
-            message: 'Computed base cost',
+            message: 'Computed base cost with priority order selection',
             orderId,
             base_cost: order.base_cost,
             shipping_group_breakdowns: groupBreakdowns,
