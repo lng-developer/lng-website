@@ -648,7 +648,8 @@ const getOrderStatistics = async (req, res) => {
             const keyword = new RegExp(search, 'i');
             baseFilter.$or = [
                 { orderId: keyword },
-                { 'customer_infor.name': keyword }
+                { 'customer_infor.name': keyword },
+                {"items.sku": keyword}
             ];
         }
 
