@@ -413,7 +413,7 @@ const getFrontendOrders = async (req, res) => {
             matchStage.$or = [
                 { orderId: keyword },
                 { 'customer_infor.name': keyword },
-                {"items.sku": keyword}
+                { "items.sku": keyword }
             ];
         }
         if (openCase === 'true') {
@@ -649,7 +649,7 @@ const getOrderStatistics = async (req, res) => {
             baseFilter.$or = [
                 { orderId: keyword },
                 { 'customer_infor.name': keyword },
-                {"items.sku": keyword}
+                { "items.sku": keyword }
             ];
         }
 
@@ -963,7 +963,7 @@ function normalize(s) {
 function normalizeSizeAlias(val) {
     let s = String(val || '').trim();
 
-    // Nếu là dạng có kích thước trong ngoặc: Beverage (4.8" x 4.8") -> "4.8" x 4.8""
+    // Nếu là dạng có kích thước trong ngoặc: Beverage (4.8" x 4.8") -> 4.8" x 4.8"
     const paren = s.match(/\(([^)]+)\)/);
     if (paren) s = paren[1];
 
@@ -993,10 +993,13 @@ function normalizeSizeAlias(val) {
     m = lower.match(/^(\d+)\s*(?:-|–)\s*(\d+)\s*m\b/);
     if (m) return `${m[1]}-${m[2]}M`;
 
-    // ✅ Chuẩn hóa spacing giữa số đo (thêm space quanh "x")
-    s = raw.replace(/\s*x\s*/gi, ' x ').replace(/\s{2,}/g, ' ').trim();
+    // ✅ Chỉ normalize khi là mẫu số-x-số (không đụng 'XL', '2T', 'L', ...)
+    // Hỗ trợ: 4.8x4.8, 4.8"x4.8", 5 x7, 5x 7, 5×7
+    s = raw.replace(
+        /(\d+(?:\.\d+)?\s*"?)(?:\s*[x×]\s*)(\d+(?:\.\d+)?\s*"?)/gi,
+        (_, a, b) => `${a.trim()} x ${b.trim()}`
+    );
 
-    // Không khớp alias nào: trả về đã normalize spacing
     return s;
 }
 
@@ -1200,13 +1203,17 @@ const computeBaseCostForOrder = async (req, res) => {
             colorValue = normalizePackAlias(colorValue);
 
             // ✅ NEW: Chọn vendor_product theo priority order
-            const pfItems = toArray(cfg?.product_for_seller?.items).filter(Boolean);
+            let pfItems = toArray(cfg?.product_for_seller?.items).filter(Boolean);
             if (!pfItems.length) {
                 stagedItems.push({
                     orderItemId: item.orderItemId, sku, configCode, sizeValue, colorValue,
                     status: 'failed', reason: 'product_for_seller has no items'
                 });
                 continue;
+            }
+
+            if (['EBM', 'EBMA'].includes(configCode.toUpperCase()) && pfItems.length > 1) {
+                pfItems = pfItems.slice(1); // bỏ qua item đầu tiên
             }
 
             const vendorSelection = await selectBestVendorProduct(pfItems, sizeValue, colorValue);
