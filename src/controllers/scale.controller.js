@@ -68,13 +68,13 @@ function buildGrabinkOrderPayload(order) {
     line_items: completedItems.map(item => ({
       // TODO: map đúng numeric variant_id nếu bạn có bảng mapping; tạm để null
       variant_id: null, // hoặc Number(item.cost_breakdown?.variant_id) nếu có
-      sku: item.sku,
+      sku: item.cost_breakdown.matchedSku,
       product_name: item.cost_breakdown?.itemDisplayName || item.title,
       quantity: item.quantity,
 
       // mockup / mockup_back
       mockup: item.baseImage?.imageUrl || null,
-      mockup_back: item.baseImage?.imageUrl || null,
+      mockup_back: null,
 
       // print_files: dùng file scale (fulfillment_file) là chủ đạo
       print_files: [
