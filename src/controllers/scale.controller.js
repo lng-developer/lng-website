@@ -74,7 +74,7 @@ function buildGrabinkOrderPayload(order) {
 
       // mockup / mockup_back
       mockup: item.baseImage?.imageUrl || null,
-      mockup_back: null,
+      mockup_back: "",
 
       // print_files: dùng file scale (fulfillment_file) là chủ đạo
       print_files: [
