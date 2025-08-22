@@ -11,7 +11,7 @@ const caseController = require('./case.controller');
 const listingController = require('./listing.controller');
 const productTypeController = require('./productType.controller')
 const configCostCenterController = require('./configCostCenter.controller')
-
+const scaleController = require('./scale.controller')
 module.exports = {
     roleController,
     userController,
@@ -25,5 +25,6 @@ module.exports = {
     caseController,
     listingController,
     productTypeController,
-    configCostCenterController
+    configCostCenterController,
+    scaleController
 };

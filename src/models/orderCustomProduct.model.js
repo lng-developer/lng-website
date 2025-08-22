@@ -118,17 +118,16 @@ const orderItemSchema = new mongoose.Schema({
     snapshotImage: String,
     svgFile: String,
 
+    // ⬇️ NEW: chỉ lưu URL
+    fulfillment_file: { type: String, default: '' },
+
     totalCustomizationPrice: { type: Number, default: 0 },
     customized_url: String,
     asin: String,
 
-    // ⬇️ Saved result of base cost computation per item
     cost_breakdown: itemCostBreakdownSchema,
-
-    // ⬇️ NEW: Tracking & Note
     tracking_info: itemTrackingSchema
 }, { _id: false });
-
 
 /**
  * Order schema
