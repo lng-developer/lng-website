@@ -412,8 +412,7 @@ const getFrontendOrders = async (req, res) => {
             const keyword = new RegExp(search, 'i');
             matchStage.$or = [
                 { orderId: keyword },
-                { 'customer_infor.name': keyword },
-                { "items.sku": keyword }
+                { 'customer_infor.name': keyword }
             ];
         }
         if (openCase === 'true') {
@@ -648,8 +647,7 @@ const getOrderStatistics = async (req, res) => {
             const keyword = new RegExp(search, 'i');
             baseFilter.$or = [
                 { orderId: keyword },
-                { 'customer_infor.name': keyword },
-                { "items.sku": keyword }
+                { 'customer_infor.name': keyword }
             ];
         }
 
