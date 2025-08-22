@@ -579,7 +579,8 @@ const getFrontendOrders = async (req, res) => {
                         tracking: item?.tracking_info?.tracking,
                         note: item?.tracking_info?.note
                     },
-                    fulfillment_file: item.fulfillment_file
+                    fulfillment_file: item.fulfillment_file,
+                    scale_status: item.scale_status
                 };
             });
 
@@ -597,7 +598,8 @@ const getFrontendOrders = async (req, res) => {
                 items,
                 base_cost: order.base_cost,
                 case: order.case,
-                address_validation: order.address_validation?.isValid
+                address_validation: order.address_validation?.isValid,
+                scale_overall_status: order.scale_overall_status
             };
         });
 
