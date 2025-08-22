@@ -11,6 +11,7 @@ const caseRoutes = require('./case.routes');
 const listingRoutes = require('./listing.routes');
 const productTypeRoutes = require('./productType.routes');
 const configCostCenterRoutes = require('./configCostCenter.routes');
+const scaleRoutes = require('./scale.routes');
 
 
 module.exports = {
@@ -26,5 +27,6 @@ module.exports = {
     caseRoutes,
     listingRoutes,
     productTypeRoutes,
-    configCostCenterRoutes
+    configCostCenterRoutes,
+    scaleRoutes
 };

@@ -577,7 +577,8 @@ const getFrontendOrders = async (req, res) => {
                         status: item?.tracking_info?.status,
                         tracking: item?.tracking_info?.tracking,
                         note: item?.tracking_info?.note
-                    }
+                    },
+                    fulfillment_file: item.fulfillment_file
                 };
             });
 
