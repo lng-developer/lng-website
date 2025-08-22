@@ -12,6 +12,8 @@ const Case = require('./case.model')
 const Listing = require('./listing.model')
 const ProductTypeGroup = require('./productTypeGroup.model')
 const ConfigCostCenter = require('./configCostCenter.model')
+const ConfigOptionMapping = require('./configOptionMapping')
+
 
 
 // Cau hinh mongoose dang global
@@ -33,6 +35,7 @@ db.case = Case
 db.listing = Listing
 db.productTypeGroup = ProductTypeGroup
 db.configCostCenter = ConfigCostCenter
+db.configOptionMapping = ConfigOptionMapping
 db.connectDB = async () => {
     await mongoose.connect(process.env.MONGO_URI, {
         dbName: process.env.DB_NAME
