@@ -13,6 +13,7 @@ const Shop = db.shop;
 const ConfigCostCenter = db.configCostCenter;
 const VendorCostCenter = db.vendorCostCenter;
 const VendorProduct = db.vendorProduct;
+const ConfigOptionMapping = db.configOptionMapping;
 
 
 const mongoose = require('mongoose');
@@ -958,62 +959,97 @@ function normalize(s) {
         .trim();
 }
 
-// Alias hỗ trợ match thực tế (kết hợp cho clothing + dimension trong ngoặc)
-function normalizeSizeAlias(val) {
-    let s = String(val || '').trim();
+function toArray(val) { if (Array.isArray(val)) return val; if (val == null) return []; return [val]; }
+function normalize(s) { return String(s || '').toLowerCase().replace(/\s+/g, ' ').trim(); }
 
-    // Nếu là dạng có kích thước trong ngoặc: Beverage (4.8" x 4.8") -> 4.8" x 4.8"
-    const paren = s.match(/\(([^)]+)\)/);
-    if (paren) s = paren[1];
-
-    const raw = s;
-    const lower = s.toLowerCase().trim();
-
-    // NB / Newborn
-    if (/\b(nb|new\s?born|newborn)\b/i.test(lower)) return 'NB';
-
-    // 0-3 months / 0 - 3 months / 0 to 3 months -> 0-3M
-    let m = lower.match(/^(\d+)\s*(?:-|–|to)\s*(\d+)\s*(?:months?|mos?|mo)\b/);
-    if (m) return `${m[1]}-${m[2]}M`;
-
-    // 12 months / 12 mos / 12 mo -> 12M
-    m = lower.match(/^(\d+)\s*(?:months?|mos?|mo)\b/);
-    if (m) return `${m[1]}M`;
-
-    // 12m / 12 m -> 12M
-    m = lower.match(/^(\d+)\s*m\b/);
-    if (m) return `${m[1]}M`;
-
-    // 2T / 2 toddler / 2 t -> 2T
-    m = lower.match(/^(\d+)\s*(?:t|toddler)\b/);
-    if (m) return `${m[1]}T`;
-
-    // 0-3m / 0 - 3 m -> 0-3M
-    m = lower.match(/^(\d+)\s*(?:-|–)\s*(\d+)\s*m\b/);
-    if (m) return `${m[1]}-${m[2]}M`;
-
-    // ✅ Chỉ normalize khi là mẫu số-x-số (không đụng 'XL', '2T', 'L', ...)
-    // Hỗ trợ: 4.8x4.8, 4.8"x4.8", 5 x7, 5x 7, 5×7
-    s = raw.replace(
-        /(\d+(?:\.\d+)?\s*"?)(?:\s*[x×]\s*)(\d+(?:\.\d+)?\s*"?)/gi,
-        (_, a, b) => `${a.trim()} x ${b.trim()}`
-    );
-
-    return s;
+function pickValueByKeys(labelValueMap, keys = []) {
+    for (const k of toArray(keys)) {
+        const v = labelValueMap.get(normalize(k));
+        if (v != null && v !== '') return v;
+    }
+    return '';
 }
 
-
-function normalizePackAlias(val) {
-    const s = String(val || '').trim();
-    // "Pack 30pcs" | "Pack 30 pcs" | "30pcs" -> "30 pcs"
-    let m = s.match(/(?:^|\s)pack\s*(\d+)\s*pcs?/i);
-    if (m) return `${m[1]} pcs`;
-    m = s.match(/^(\d+)\s*pcs?$/i);
-    if (m) return `${m[1]} pcs`;
-    m = s.match(/^(\d+)\s*pack$/i);
-    if (m) return `${m[1]} pcs`;
-    return s;
+// Lấy map label->value từ version3 (ưu tiên) rồi fallback customizationData
+function extractLabelValueMapFromItem(item) {
+    const map = new Map();
+    const surfacesV3 = item?.version3Data?.customizationInfo?.surfaces || [];
+    for (const sf of surfacesV3) {
+        for (const area of (sf?.areas || [])) {
+            const label = area?.label || area?.name || '';
+            const value = (area?.optionValue ?? area?.text ?? '');
+            if (label) map.set(normalize(label), String(value));
+        }
+    }
+    if (map.size === 0) {
+        const opts = item?.customizationData?.children?.[0]?.children?.[0]?.children || [];
+        for (const opt of opts) {
+            const label = opt?.label || opt?.name || '';
+            let value = '';
+            if (opt?.optionSelection) value = opt.optionSelection?.label || opt.optionSelection?.name || '';
+            else if (typeof opt?.inputValue === 'string') value = opt.inputValue;
+            else if (opt?.displayValue) value = opt.displayValue;
+            if (label) map.set(normalize(label), String(value || ''));
+        }
+    }
+    return map;
 }
+
+/**
+ * Mapping-only:
+ * - match_type: 'equals' | 'contains' | 'regex' | 'regex_replace'
+ *   + equals/contains: so sánh không phân biệt hoa thường (trừ khi rule.case_sensitive = true)
+ *   + regex: test bằng RegExp(match_value, flags)
+ *   + regex_replace: value = value.replace(RegExp(match_value, flags), mapped_value)
+ * - priority: số nhỏ ưu tiên trước
+ */
+async function mapOptionValue({ configCode, key, rawValue }) {
+    let val = String(rawValue ?? '');
+    if (!val) return { value: val, ruleId: null, matchType: null };
+
+    if (!ConfigOptionMapping) return { value: val, ruleId: null, matchType: null };
+
+    const rules = await ConfigOptionMapping.find({
+        config_code: configCode,
+        key,                         // 'size' | 'color'
+        active: { $ne: false }
+    }).sort({ priority: 1, created_at: 1 }).lean();
+
+    const n = (x) => String(x || '').trim();
+    const nl = (x) => normalize(x);
+
+    for (const r of rules || []) {
+        const mt = String(r.match_type || 'equals').toLowerCase();
+        const flags = r.regex_flags || 'i';
+        const cs = !!r.case_sensitive;
+        const mval = String(r.match_value ?? '');
+        const mapped = String(r.mapped_value ?? '');
+
+        try {
+            if (mt === 'equals') {
+                const ok = cs ? n(val) === n(mval) : nl(val) === nl(mval);
+                if (ok) return { value: mapped, ruleId: String(r._id), matchType: mt };
+            }
+            if (mt === 'contains') {
+                const ok = cs ? n(val).includes(n(mval)) : nl(val).includes(nl(mval));
+                if (ok) return { value: mapped, ruleId: String(r._id), matchType: mt };
+            }
+            if (mt === 'regex') {
+                const re = new RegExp(mval, flags);
+                if (re.test(val)) return { value: mapped, ruleId: String(r._id), matchType: mt };
+            }
+            if (mt === 'regex_replace') {
+                const re = new RegExp(mval, flags);
+                const replaced = val.replace(re, mapped);
+                if (replaced !== val) return { value: replaced, ruleId: String(r._id), matchType: mt };
+            }
+        } catch (_e) { /* ignore malformed rule */ }
+    }
+
+    // Không map -> trả thẳng raw
+    return { value: val, ruleId: null, matchType: null };
+}
+
 
 // Trích { label => value } từ item.version3Data (ưu tiên) hoặc item.customizationData
 function extractLabelValueMapFromItem(item) {
@@ -1193,13 +1229,16 @@ const computeBaseCostForOrder = async (req, res) => {
                 continue;
             }
 
-            // B3: lấy Size/Color values theo key từ config đã chọn
-            let sizeValue = pickValueByKeys(labelValueMap, cfg.customize_size_key || []);
-            let colorValue = pickValueByKeys(labelValueMap, cfg.customize_color_key || []);
+            // B3: lấy raw từ order theo key của config
+            const sizeRaw = pickValueByKeys(labelValueMap, cfg.customize_size_key || []);
+            const colorRaw = pickValueByKeys(labelValueMap, cfg.customize_color_key || []);
 
-            // Alias để tăng tỉ lệ match thực tế
-            sizeValue = normalizeSizeAlias(sizeValue);
-            colorValue = normalizePackAlias(colorValue);
+            // 🔁 Mapping-only (không alias)
+            const sizeMap = await mapOptionValue({ configCode, key: 'size', rawValue: sizeRaw });
+            const colorMap = await mapOptionValue({ configCode, key: 'color', rawValue: colorRaw });
+
+            const sizeValue = sizeMap.value;
+            const colorValue = colorMap.value;
 
             // ✅ NEW: Chọn vendor_product theo priority order
             let pfItems = toArray(cfg?.product_for_seller?.items).filter(Boolean);

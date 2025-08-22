@@ -100,6 +100,7 @@ const itemTrackingSchema = new mongoose.Schema({
 }, { _id: false });
 
 /** Order item schema */
+// ✅ orderCustomProduct.model.js (bổ sung trong orderItemSchema)
 const orderItemSchema = new mongoose.Schema({
     orderItemId: String,
     sku: String,
@@ -118,8 +119,17 @@ const orderItemSchema = new mongoose.Schema({
     snapshotImage: String,
     svgFile: String,
 
-    // ⬇️ NEW: chỉ lưu URL
+    // chỉ lưu URL
     fulfillment_file: { type: String, default: '' },
+
+    // ⬇️ NEW: trạng thái scale
+    scale_status: {
+        type: String,
+        enum: ["Need Scale", "Pending", "Complete"],
+        default: "Need Scale"
+    },
+    // (tuỳ chọn) ghi chú/nhật ký nếu cần mở rộng sau
+    // scale_note: { type: String, default: '' },
 
     totalCustomizationPrice: { type: Number, default: 0 },
     customized_url: String,
@@ -128,6 +138,7 @@ const orderItemSchema = new mongoose.Schema({
     cost_breakdown: itemCostBreakdownSchema,
     tracking_info: itemTrackingSchema
 }, { _id: false });
+
 
 /**
  * Order schema
@@ -185,6 +196,21 @@ const orderCustomProductSchema = new mongoose.Schema({
     address_validation: {
         isValid: { type: Boolean, default: null },
         smartyResponse: { type: Object, default: null }
+    },
+    scale_overall_status: {
+        type: String,
+        enum: ["Need Scale", "Pending", "Ready", "Sent", "Failed"],
+        default: "Need Scale",
+        index: true
+    },
+
+    // Theo dõi việc gửi đi Grabink để idempotent/trace
+    grabink_submission: {
+        sent: { type: Boolean, default: false },
+        sent_at: { type: Date, default: null },
+        attempt_count: { type: Number, default: 0 },
+        last_response: { type: Object, default: null },
+        external_id: { type: String, default: null } // [Chưa xác minh]: nếu Grabink trả ID
     }
 });
 
