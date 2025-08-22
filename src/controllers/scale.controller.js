@@ -42,77 +42,98 @@ function computeOverallScaleStatus(orderDoc) {
 }
 
 /**
- * Build payload toàn bộ đơn gửi Grabink
- * [Chưa xác minh]: Map lại field theo spec thật của Grabink nếu khác.
+ * Map shipping_type nội bộ -> shipping_method của Grablink
+ */
+function mapShippingMethod(shipping_type = 'Standard') {
+  const t = String(shipping_type).toLowerCase();
+  if (t.includes('overnight')) return 'overnight';
+  if (t.includes('second')) return 'second_day';
+  if (t.includes('expedited')) return 'expedited';
+  if (t.includes('economy')) return 'economy';
+  // chuẩn mẫu: "standard"
+  return 'standard';
+}
+
+/**
+ * Build payload 1 ĐƠN duy nhất gửi Grablink
+ * - Theo mẫu bạn cung cấp
+ * - line_items chỉ lấy các item đã Complete để an toàn
+ * - variant_id: hiện chưa có numeric mapping -> để null (bạn có thể map từ VendorProduct → variant_id số nếu có bảng mapping)
  */
 function buildGrabinkOrderPayload(order) {
+  const completedItems = (order.items || []).filter(i => i.scale_status === 'Complete');
+
   return {
-    api_key: process.env.GRABINK_API_KEY, // Lấy từ .env
-    line_items: order.items.map(item => {
-      return {
-        // Nếu đã có mapping vendor_product → variant_id thì map, còn không thì để null hoặc 0
-        variant_id: item.cost_breakdown?.vendorProductId || null, // [Chưa xác minh]
-        sku: item.sku,
-        product_name: item.cost_breakdown?.itemDisplayName || item.title,
-        quantity: item.quantity,
+    api_key: process.env.GRABINK_API_KEY, // bắt buộc có trong .env
+    line_items: completedItems.map(item => ({
+      // TODO: map đúng numeric variant_id nếu bạn có bảng mapping; tạm để null
+      variant_id: null, // hoặc Number(item.cost_breakdown?.variant_id) nếu có
+      sku: item.sku,
+      product_name: item.cost_breakdown?.itemDisplayName || item.title,
+      quantity: item.quantity,
 
-        // mockup hình ảnh front/back
-        mockup: item.snapshotImage || item.baseImage?.imageUrl,
-        mockup_back: item.baseImage?.imageUrl || null,
+      // mockup / mockup_back
+      mockup: item.baseImage?.imageUrl || null,
+      mockup_back: item.baseImage?.imageUrl || null,
 
-        // print_files: file fulfillment (scale đã upload) + svg nếu cần
-        print_files: [
-          ...(item.fulfillment_file ? [{ key: "front", url: item.fulfillment_file }] : []),
-          ...(item.svgFile ? [{ key: "svg", url: item.svgFile }] : [])
-        ]
-      };
-    }),
+      // print_files: dùng file scale (fulfillment_file) là chủ đạo
+      print_files: [
+        ...(item.fulfillment_file ? [{ key: 'front', url: item.fulfillment_file }] : []),
+        // Nếu Grablink không nhận svg, có thể bỏ dòng sau:
+        ...(item.svgFile ? [{ key: 'svg', url: item.svgFile }] : [])
+      ]
+    })),
+
     is_scan_label: false,
-    order_status: "new",
+    order_status: 'new',
     ref_id: order.orderId,
-    shipping_label: null, // chưa có label => để null
-    shipping_method: (order.shipping_type || "Standard").toLowerCase(),
+    shipping_label: null, // nếu có url label thì set, còn không để null
+    shipping_method: mapShippingMethod(order.shipping_type),
+
     address: {
-      name: order.customer_infor?.name,
-      email: order.customer_infor?.email,
-      phone: order.customer_infor?.phone_number,
-      country: order.customer_infor?.country,
-      state: order.customer_infor?.state,
-      city: order.customer_infor?.city,
-      street1: order.customer_infor?.address,
+      name: order.customer_infor?.name || '',
+      email: order.customer_infor?.email || '',
+      phone: order.customer_infor?.phone_number || '',
+      // Lưu ý: mẫu của bạn ghi country là tên quốc gia (vd "United States")
+      // Dữ liệu đang là mã "US" -> có thể cần map theo yêu cầu Grablink
+      country: order.customer_infor?.country === 'US' ? 'United States' : (order.customer_infor?.country || ''),
+      state: order.customer_infor?.state || '',
+      city: order.customer_infor?.city || '',
+      street1: order.customer_infor?.address || '',
       street2: order.customer_infor?.address_2 || null,
-      zip: order.customer_infor?.zip_code
+      zip: order.customer_infor?.zip_code || ''
     }
   };
 }
 
-
 /**
- * Gửi toàn bộ order sang Grabink (idempotent)
+ * Gửi 1 ĐƠN (duy nhất) sang Grablink (idempotent)
+ * - KHÔNG lặp qua nhiều đơn; chỉ nhận đúng 1 order object
  * - Không gửi lại nếu order.grabink_submission.sent = true
  * - Thành công: set sent=true, scale_overall_status='Sent'
  * - Thất bại: ném lỗi để caller xử lý (thường set 'Failed')
- *
- * [Chưa xác minh] tiêu chí thành công và trường external_id.
  */
-async function sendWholeOrderToGrabink(order) {
+async function sendOrderToGrablink(order) {
   if (order.grabink_submission?.sent) {
     return { alreadySent: true, response: order.grabink_submission?.last_response };
   }
 
   const payload = buildGrabinkOrderPayload(order);
+
+  // Chặn case line_items rỗng (không có item Complete)
+  if (!payload.line_items || payload.line_items.length === 0) {
+    const err = new Error('No completed items to send.');
+    err.code = 'NO_LINE_ITEMS';
+    throw err;
+  }
+
   const endpoint = process.env.GRABINK_ENDPOINT || 'https://be.grabink.co/api/external/order';
-  const headers = {
-    'Content-Type': 'application/json',
-    ...(process.env.GRABINK_API_KEY && { 'Authorization': `Bearer ${process.env.GRABINK_API_KEY}` })
-  };
+  const headers = { 'Content-Type': 'application/json' };
 
   const resp = await axios.post(endpoint, payload, { headers });
 
-  // [Chưa xác minh]: cập nhật điều kiện thành công theo response Grabink
-  if (resp.status >= 300) {
-    throw new Error(`Grabink responded with status ${resp.status}`);
-  }
+  // Tiêu chí thành công: 2xx
+  if (resp.status >= 300) throw new Error(`Grablink responded with status ${resp.status}`);
 
   const externalId = resp.data?.id || resp.data?.orderId || null;
 
@@ -179,7 +200,7 @@ const uploadFulfillmentFileForItem = [
  * - approve:
  *   - yêu cầu item đã có fulfillment_file
  *   - đặt item.scale_status = 'Complete'
- *   - nếu tất cả items Complete => gửi cả Order sang Grabink
+ *   - nếu tất cả items Complete => GỬI 1 ĐƠN duy nhất sang Grablink
  * - reject:
  *   - đặt item.scale_status = 'Need Scale'
  *   - (tuỳ chọn) xoá fulfillment_file
@@ -200,15 +221,10 @@ const confirmScaleForItem = async (req, res) => {
     const item = order.items.find(i => i.orderItemId === orderItemId);
     if (!item) return res.status(404).json({ message: 'Order item not found' });
 
-    // if (item.scale_status !== 'Pending') {
-    //   return res.status(409).json({ message: `Only Pending can be confirmed/rejected. Current: ${item.scale_status}` });
-    // }
-
     if (d === 'reject') {
       item.scale_status = 'Need Scale';
-      // (tuỳ chọn) clear file khi reject:
+      // tuỳ chọn: clear file khi reject
       item.fulfillment_file = '';
-      // (tuỳ chọn) lưu note vào item nếu bạn thêm field scale_note trong model
       order.scale_overall_status = computeOverallScaleStatus(order);
       await order.save();
       return res.json({
@@ -226,12 +242,12 @@ const confirmScaleForItem = async (req, res) => {
     item.scale_status = 'Complete';
     order.scale_overall_status = computeOverallScaleStatus(order);
 
-    // Nếu tất cả items đã Complete & chưa gửi thì gửi cả đơn
+    // Nếu tất cả items đã Complete & chưa gửi thì GỬI 1 ĐƠN duy nhất
     if (order.scale_overall_status === 'Ready' && !(order.grabink_submission?.sent)) {
       try {
-        const result = await sendWholeOrderToGrabink(order);
+        const result = await sendOrderToGrablink(order);
         return res.json({
-          message: result.alreadySent ? 'Order already sent to Grabink.' : 'Approved and order sent to Grabink.',
+          message: result.alreadySent ? 'Order already sent to Grablink.' : 'Approved and order sent to Grablink.',
           item_scale_status: item.scale_status,
           order_scale_overall_status: order.scale_overall_status,
           grabink_response: result.response
@@ -247,7 +263,7 @@ const confirmScaleForItem = async (req, res) => {
         order.scale_overall_status = 'Failed';
         await order.save();
         return res.status(502).json({
-          message: 'Approved but sending order to Grabink failed. Overall status set to Failed.',
+          message: 'Approved but sending order to Grablink failed. Overall status set to Failed.',
           error: e.message
         });
       }
@@ -266,7 +282,7 @@ const confirmScaleForItem = async (req, res) => {
 };
 
 /**
- * Retry gửi toàn bộ order sang Grabink khi Ready/Failed
+ * Retry gửi lại 1 ĐƠN duy nhất sang Grablink khi Ready/Failed
  */
 const retrySendGrabink = async (req, res) => {
   try {
@@ -284,9 +300,9 @@ const retrySendGrabink = async (req, res) => {
       });
     }
 
-    const result = await sendWholeOrderToGrabink(order);
+    const result = await sendOrderToGrablink(order);
     return res.json({
-      message: result.alreadySent ? 'Order already sent to Grabink.' : 'Order sent to Grabink.',
+      message: result.alreadySent ? 'Order already sent to Grablink.' : 'Order sent to Grablink.',
       grabink_response: result.response
     });
   } catch (err) {
