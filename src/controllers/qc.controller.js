@@ -229,7 +229,7 @@ const getQCList = async (req, res) => {
     }
 };
 
-const getQCStatistics= async (req, res) => {
+const getQCStatistics = async (req, res) => {
     try {
         const {
             from,
@@ -437,5 +437,33 @@ const getQCStatistics= async (req, res) => {
         });
     }
 };
+const updateQCNoteForItem = async (req, res) => {
+    try {
+        const { orderId, orderItemId } = req.params;
+        let { qc_note } = req.body || {};
 
-module.exports = { getQCList, getQCStatistics };
+        qc_note = typeof qc_note === 'string' ? qc_note.trim() : '';
+        if (qc_note.length > 2000) {
+            return res.status(400).json({ message: 'qc_note vượt quá 2000 ký tự.' });
+        }
+
+        const order = await OrderCustomProduct.findOne({ orderId });
+        if (!order) return res.status(404).json({ message: 'Order not found' });
+
+        const item = order.items.find(i => i.orderItemId === orderItemId);
+        if (!item) return res.status(404).json({ message: 'Order item not found' });
+
+        item.qc_note = qc_note;
+        await order.save();
+
+        return res.json({
+            message: 'QC note updated.',
+            orderId,
+            orderItemId,
+            qc_note: item.qc_note
+        });
+    } catch (err) {
+        return res.status(500).json({ message: 'Update QC note failed', error: err.message });
+    }
+};
+module.exports = { getQCList, getQCStatistics, updateQCNoteForItem };

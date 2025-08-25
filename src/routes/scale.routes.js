@@ -19,4 +19,6 @@ router.post(
     scaleController.retrySendGrabink
 );
 
+router.put('/orders/:orderId/items/:orderItemId/cs-note', scaleController.updateCSNoteForItem);
+
 module.exports = router;

@@ -100,7 +100,6 @@ const itemTrackingSchema = new mongoose.Schema({
 }, { _id: false });
 
 /** Order item schema */
-// ✅ orderCustomProduct.model.js (bổ sung trong orderItemSchema)
 const orderItemSchema = new mongoose.Schema({
     orderItemId: String,
     sku: String,
@@ -119,17 +118,16 @@ const orderItemSchema = new mongoose.Schema({
     snapshotImage: String,
     svgFile: String,
 
-    // chỉ lưu URL
     fulfillment_file: { type: String, default: '' },
 
-    // ⬇️ NEW: trạng thái scale
     scale_status: {
         type: String,
         enum: ["Need Scale", "Pending", "Complete", "QC Rejected"],
         default: "Need Scale"
     },
-    // (tuỳ chọn) ghi chú/nhật ký nếu cần mở rộng sau
-    // scale_note: { type: String, default: '' },
+
+    qc_note: { type: String, trim: true, default: '' },
+    cs_note: { type: String, trim: true, default: '' },
 
     totalCustomizationPrice: { type: Number, default: 0 },
     customized_url: String,
@@ -138,6 +136,7 @@ const orderItemSchema = new mongoose.Schema({
     cost_breakdown: itemCostBreakdownSchema,
     tracking_info: itemTrackingSchema
 }, { _id: false });
+
 
 
 /**
