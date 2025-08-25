@@ -32,14 +32,18 @@ function uploadStreamToCloudinary(buffer, opts = {}) {
 function computeOverallScaleStatus(orderDoc) {
   const items = orderDoc.items || [];
   if (items.length === 0) return 'Need Scale';
+
   const statuses = items.map(i => i.scale_status || 'Need Scale');
   const allComplete = statuses.every(s => s === 'Complete');
   const anyPendingOrComplete = statuses.some(s => s === 'Pending' || s === 'Complete');
+  const anyRejected = statuses.some(s => s === 'QC Rejected');
 
+  if (anyRejected) return 'QC Rejected';
   if (allComplete) return 'Ready';
   if (anyPendingOrComplete) return 'Pending';
   return 'Need Scale';
 }
+
 
 /**
  * Map shipping_type nội bộ -> shipping_method của Grablink
@@ -222,14 +226,16 @@ const confirmScaleForItem = async (req, res) => {
     if (!item) return res.status(404).json({ message: 'Order item not found' });
 
     if (d === 'reject') {
-      item.scale_status = 'Need Scale';
-      // tuỳ chọn: clear file khi reject
-      item.fulfillment_file = '';
-      order.scale_overall_status = computeOverallScaleStatus(order);
+      item.scale_status = 'QC Rejected';
+      item.fulfillment_file = '';   // clear file khi reject
+      if (note) item.qc_note = note; // lưu note QC
+      order.scale_overall_status = 'QC Rejected'; // bất kỳ reject nào thì order cũng QC Rejected
+
       await order.save();
       return res.json({
-        message: 'Scale rejected. Item back to Need Scale.',
+        message: 'Scale rejected. Item set to QC Rejected.',
         item_scale_status: item.scale_status,
+        qc_note: item.qc_note,
         order_scale_overall_status: order.scale_overall_status
       });
     }
@@ -240,6 +246,7 @@ const confirmScaleForItem = async (req, res) => {
     }
 
     item.scale_status = 'Complete';
+    if (note) item.qc_note = note; // nếu muốn lưu note cả khi approve
     order.scale_overall_status = computeOverallScaleStatus(order);
 
     // Nếu tất cả items đã Complete & chưa gửi thì GỬI 1 ĐƠN duy nhất
@@ -310,8 +317,46 @@ const retrySendGrabink = async (req, res) => {
   }
 };
 
+/**
+ * CS cập nhật ghi chú cho 1 item
+ * PUT /api/scale/orders/:orderId/items/:orderItemId/cs-note
+ * Body: { cs_note: string }  // cho phép rỗng để xóa
+ */
+const updateCSNoteForItem = async (req, res) => {
+  try {
+    const { orderId, orderItemId } = req.params;
+    let { cs_note } = req.body || {};
+
+    // Chuẩn hóa & validate đơn giản
+    cs_note = typeof cs_note === 'string' ? cs_note.trim() : '';
+    if (cs_note.length > 2000) {
+      return res.status(400).json({ message: 'cs_note vượt quá 2000 ký tự.' });
+    }
+
+    const order = await OrderCustomProduct.findOne({ orderId });
+    if (!order) return res.status(404).json({ message: 'Order not found' });
+
+    const item = order.items.find(i => i.orderItemId === orderItemId);
+    if (!item) return res.status(404).json({ message: 'Order item not found' });
+
+    item.cs_note = cs_note; // ghi đè hoặc xóa (nếu rỗng)
+    await order.save();
+
+    return res.json({
+      message: 'CS note updated.',
+      orderId,
+      orderItemId,
+      cs_note: item.cs_note
+    });
+  } catch (err) {
+    return res.status(500).json({ message: 'Update CS note failed', error: err.message });
+  }
+};
+
+
 module.exports = {
   uploadFulfillmentFileForItem,
   confirmScaleForItem,
-  retrySendGrabink
+  retrySendGrabink,
+  updateCSNoteForItem
 };

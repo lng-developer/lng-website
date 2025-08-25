@@ -9,4 +9,6 @@ router.get(
 
 router.get('/statistics', QCController.getQCStatistics);
 
+router.put('/orders/:orderId/items/:orderItemId/qc-note', QCController.updateQCNoteForItem);
+
 module.exports = router;
