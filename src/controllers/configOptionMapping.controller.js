@@ -95,7 +95,7 @@ const listMappings = async (req, res) => {
     try {
         const {
             page = 1,
-            perPage = 20,
+            perPage = 10,
             config_code,
             key,
             match_type,
