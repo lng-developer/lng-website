@@ -125,7 +125,7 @@ const orderItemSchema = new mongoose.Schema({
     // ⬇️ NEW: trạng thái scale
     scale_status: {
         type: String,
-        enum: ["Need Scale", "Pending", "Complete"],
+        enum: ["Need Scale", "Pending", "Complete", "QC Rejected"],
         default: "Need Scale"
     },
     // (tuỳ chọn) ghi chú/nhật ký nếu cần mở rộng sau
@@ -199,7 +199,7 @@ const orderCustomProductSchema = new mongoose.Schema({
     },
     scale_overall_status: {
         type: String,
-        enum: ["Need Scale", "Pending", "Ready", "Sent", "Failed"],
+        enum: ["Need Scale", "Pending", "Ready", "Sent", "Failed", "QC Rejected"],
         default: "Need Scale",
         index: true
     },
