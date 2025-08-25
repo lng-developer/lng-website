@@ -11,7 +11,7 @@ const getQCList = async (req, res) => {
             perPage = 10,
             from,
             to,
-            statuses,          // filter theo Order.status
+            scale_status,          // filter theo Order.status
             search,            // regex theo orderId (+ mở rộng sku/orderItemId/email/name)
             shopName           // ✅ fix: trước đây biến này chưa được lấy từ query
         } = req.query;
@@ -22,9 +22,9 @@ const getQCList = async (req, res) => {
         };
 
         // --- filter theo status (Order.status) ---
-        if (statuses && statuses.trim() !== '') {
-            const statusArray = statuses.split(',').map(s => s.trim()).filter(Boolean);
-            if (statusArray.length > 0) matchStage.status = { $in: statusArray };
+        if (scale_status && scale_status.trim() !== '') {
+            const statusArray = scale_status.split(',').map(s => s.trim()).filter(Boolean);
+            if (statusArray.length > 0) matchStage.scale_overall_status = { $in: statusArray };
         }
 
         // --- filter theo createdAt trong khoảng thời gian ---
@@ -229,4 +229,213 @@ const getQCList = async (req, res) => {
     }
 };
 
-module.exports = { getQCList };
+const getQCStatistics= async (req, res) => {
+    try {
+        const {
+            from,
+            to,
+            search,
+            shopName,
+            breakdown,
+            timeseries = 'false'
+        } = req.query;
+
+        // --- Match theo Order ---
+        const matchStage = {};
+        if (from && to) {
+            matchStage.createdAt = {
+                $gte: new Date(from),
+                $lte: new Date(to)
+            };
+        }
+
+        // --- Search mở rộng ---
+        let searchOr = null;
+        if (search && search.trim() !== '') {
+            const keyword = new RegExp(search.trim(), 'i');
+            searchOr = [
+                { orderId: keyword },
+                { 'items.sku': keyword },
+                { 'items.orderItemId': keyword },
+                { 'customer_infor.email': keyword },
+                { 'customer_infor.name': keyword }
+            ];
+        }
+
+        const KNOWN = ['Need Scale', 'Pending', 'Ready', 'Sent', 'Failed', 'QC Rejected'];
+
+        // === Base pipeline (cấp Order) ===
+        const basePipeline = [
+            { $match: matchStage },
+
+            // Join Shop để filter/breakdown
+            {
+                $lookup: {
+                    from: 'shops',
+                    localField: 'shopId',
+                    foreignField: '_id',
+                    as: 'shop'
+                }
+            },
+            { $unwind: { path: '$shop', preserveNullAndEmptyArrays: true } },
+
+            ...(shopName && shopName.trim()
+                ? [{ $match: { 'shop.name': { $regex: new RegExp(shopName.trim(), 'i') } } }]
+                : []),
+
+            ...(searchOr ? [{ $match: { $or: searchOr } }] : []),
+
+            // Chuẩn hóa bucket trạng thái ở cấp Order
+            {
+                $addFields: {
+                    overall_status_bucket: {
+                        $let: {
+                            vars: {
+                                s: { $ifNull: ['$scale_overall_status', 'Need Scale'] }
+                            },
+                            in: {
+                                $cond: [{ $in: ['$$s', KNOWN] }, '$$s', 'Other']
+                            }
+                        }
+                    }
+                }
+            }
+        ];
+
+        // === OVERALL: đếm số ORDER theo trạng thái ===
+        const overallPipeline = [
+            ...basePipeline,
+            {
+                $group: {
+                    _id: '$overall_status_bucket',
+                    orders: { $sum: 1 }
+                }
+            },
+            {
+                $group: {
+                    _id: null,
+                    byStatus: { $push: { k: '$_id', v: '$orders' } },
+                    totalOrders: { $sum: '$orders' }
+                }
+            },
+            {
+                $project: {
+                    _id: 0,
+                    totalOrders: 1,
+                    counts: { $arrayToObject: '$byStatus' }
+                }
+            }
+        ];
+
+        // === BREAKDOWN THEO SHOP (nếu cần) ===
+        const breakdownPipeline = [
+            ...basePipeline,
+            {
+                $group: {
+                    _id: { shopName: '$shop.name', status: '$overall_status_bucket' },
+                    orders: { $sum: 1 }
+                }
+            },
+            {
+                $group: {
+                    _id: '$_id.shopName',
+                    byStatus: { $push: { k: '$_id.status', v: '$orders' } },
+                    totalOrders: { $sum: '$orders' }
+                }
+            },
+            {
+                $project: {
+                    _id: 0,
+                    shopName: '$_id',
+                    totalOrders: 1,
+                    counts: { $arrayToObject: '$byStatus' }
+                }
+            },
+            { $sort: { shopName: 1 } }
+        ];
+
+        // === TIME SERIES THEO NGÀY (nếu cần) ===
+        const timeseriesPipeline = [
+            ...basePipeline,
+            {
+                $addFields: {
+                    day: { $dateToString: { format: '%Y-%m-%d', date: '$createdAt' } }
+                }
+            },
+            {
+                $group: {
+                    _id: { day: '$day', status: '$overall_status_bucket' },
+                    orders: { $sum: 1 }
+                }
+            },
+            {
+                $group: {
+                    _id: '$_id.day',
+                    byStatus: { $push: { k: '$_id.status', v: '$orders' } },
+                    totalOrders: { $sum: '$orders' }
+                }
+            },
+            {
+                $project: {
+                    _id: 0,
+                    day: '$_id',
+                    totalOrders: 1,
+                    counts: { $arrayToObject: '$byStatus' }
+                }
+            },
+            { $sort: { day: 1 } }
+        ];
+
+        const [overallRaw] = await OrderCustomProduct.aggregate(overallPipeline);
+
+        // Chuẩn hóa đủ key trạng thái
+        const normalizeCounts = (c = {}) => ({
+            'Need Scale': c['Need Scale'] || 0,
+            'Pending': c['Pending'] || 0,
+            'Ready': c['Ready'] || 0,
+            'Sent': c['Sent'] || 0,
+            'Failed': c['Failed'] || 0,
+            'QC Rejected': c['QC Rejected'] || 0,
+            'Other': c['Other'] || 0
+        });
+
+        const overall = {
+            totalOrders: overallRaw?.totalOrders || 0,
+            counts: normalizeCounts(overallRaw?.counts)
+        };
+
+        let breakdownResult = [];
+        if (breakdown === 'shop') {
+            breakdownResult = await OrderCustomProduct.aggregate(breakdownPipeline);
+            breakdownResult = breakdownResult.map(r => ({
+                shopName: r.shopName || '(No shop)',
+                totalOrders: r.totalOrders || 0,
+                counts: normalizeCounts(r.counts)
+            }));
+        }
+
+        let timeseriesResult = [];
+        if (String(timeseries).toLowerCase() === 'true') {
+            timeseriesResult = await OrderCustomProduct.aggregate(timeseriesPipeline);
+            timeseriesResult = timeseriesResult.map(d => ({
+                day: d.day,
+                totalOrders: d.totalOrders || 0,
+                counts: normalizeCounts(d.counts)
+            }));
+        }
+
+        return res.json({
+            overall,
+            breakdown: breakdownResult,
+            timeseries: timeseriesResult
+        });
+    } catch (error) {
+        console.error('❌ getQCStatisticsOverall error:', error);
+        return res.status(500).json({
+            message: 'Failed to retrieve QC statistics by scale_overall_status',
+            error: error.message
+        });
+    }
+};
+
+module.exports = { getQCList, getQCStatistics };

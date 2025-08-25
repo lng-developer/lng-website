@@ -7,4 +7,6 @@ router.get(
     QCController.getQCList
 );
 
+router.get('/statistics', QCController.getQCStatistics);
+
 module.exports = router;

@@ -96,28 +96,37 @@ const listMappings = async (req, res) => {
         const {
             page = 1,
             perPage = 10,
-            config_code,
             key,
             match_type,
             active,
-            q, // text search on match_value / mapped_value
+            q, // giữ nguyên text search cũ
+            search, // 🔹 param mới
             sort = 'priority:asc,created_at:asc'
         } = req.query;
 
         const match = {};
-        if (config_code) match.config_code = config_code;
-        if (key && ALLOWED_KEYS.includes(String(key).toLowerCase())) match.key = String(key).toLowerCase();
-        if (match_type && ALLOWED_TYPES.includes(String(match_type).toLowerCase())) match.match_type = String(match_type).toLowerCase();
+        if (key && ALLOWED_KEYS.includes(String(key).toLowerCase())) {
+            match.key = String(key).toLowerCase();
+        }
+        if (match_type && ALLOWED_TYPES.includes(String(match_type).toLowerCase())) {
+            match.match_type = String(match_type).toLowerCase();
+        }
         if (active === 'true') match.active = true;
         if (active === 'false') match.active = false;
-        if (q) {
+
+        // 🔹 Global search
+        if (search) {
+            match.$or = [
+                { config_code: { $regex: search, $options: 'i' } }
+            ];
+        } else if (q) {
             match.$or = [
                 { match_value: { $regex: q, $options: 'i' } },
                 { mapped_value: { $regex: q, $options: 'i' } }
             ];
         }
 
-        // sort parser: "priority:asc,created_at:desc"
+        // Sort parser
         const sortObj = {};
         String(sort).split(',').forEach(pair => {
             const [k, dir] = pair.split(':').map(s => s.trim());
