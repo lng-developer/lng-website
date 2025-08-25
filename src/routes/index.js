@@ -13,6 +13,7 @@ const productTypeRoutes = require('./productType.routes');
 const configCostCenterRoutes = require('./configCostCenter.routes');
 const scaleRoutes = require('./scale.routes');
 const configOptionMappingRoutes = require('./configOptionMapping.routes');
+const QCRoutes = require('./qc.routes');
 
 
 
@@ -31,5 +32,6 @@ module.exports = {
     productTypeRoutes,
     configCostCenterRoutes,
     scaleRoutes,
-    configOptionMappingRoutes
+    configOptionMappingRoutes,
+    QCRoutes
 };

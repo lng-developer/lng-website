@@ -13,6 +13,7 @@ const productTypeController = require('./productType.controller')
 const configCostCenterController = require('./configCostCenter.controller')
 const scaleController = require('./scale.controller')
 const configOptionMapping = require('./configOptionMapping.controller')
+const QCController = require('./qc.controller')
 
 
 module.exports = {
@@ -30,5 +31,6 @@ module.exports = {
     productTypeController,
     configCostCenterController,
     scaleController,
-    configOptionMapping
+    configOptionMapping,
+    QCController
 };
