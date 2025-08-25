@@ -11,32 +11,54 @@ const getQCList = async (req, res) => {
             perPage = 10,
             from,
             to,
-            scale_status,          // filter theo Order.status
+            scale_status,      // filter theo scale_overall_status (order-level)
             search,            // regex theo orderId (+ mở rộng sku/orderItemId/email/name)
-            shopName           // ✅ fix: trước đây biến này chưa được lấy từ query
+            shopName
         } = req.query;
 
-        // === Điều kiện bắt buộc: chỉ đơn cần QC ===
-        const matchStage = {
-            scale_overall_status: 'Pending'
+        const KNOWN = ['Need Scale', 'Pending', 'Ready', 'Sent', 'Failed', 'QC Rejected'];
+
+        // Map alias từ query về canonical trong DB
+        const canon = s => {
+            const t = String(s || '').trim();
+            if (!t) return '';
+            if (/^complete$/i.test(t)) return 'Ready';                // alias
+            if (/^qc\s*reject(?:ed)?$/i.test(t)) return 'QC Rejected'; // alias
+            return t; // Pending, Sent, Ready, Failed, Need Scale,...
         };
 
-        // --- filter theo status (Order.status) ---
-        if (scale_status && scale_status.trim() !== '') {
-            const statusArray = scale_status.split(',').map(s => s.trim()).filter(Boolean);
-            if (statusArray.length > 0) matchStage.scale_overall_status = { $in: statusArray };
-        }
+        // ==== matchStage (Order-level) ====
+        const matchStage = {};
 
-        // --- filter theo createdAt trong khoảng thời gian ---
+        // date range
         if (from && to) {
-            matchStage.createdAt = {
-                $gte: new Date(from),
-                $lte: new Date(to)
-            };
+            matchStage.createdAt = { $gte: new Date(from), $lte: new Date(to) };
         }
 
-        // --- filter theo search ---
-        // mở rộng: orderId, items.sku, items.orderItemId, customer email/name
+        // scale_overall_status filter
+        let needFilterPendingItems = false; // chỉ lọc items Pending khi đang xem Pending
+        if (scale_status && String(scale_status).trim() !== '') {
+            if (/^all$/i.test(scale_status.trim())) {
+                matchStage.scale_overall_status = { $in: ['Pending', 'Sent', 'QC Rejected', 'Ready'] };
+            } else {
+                const wanted = scale_status.split(',').map(canon).filter(Boolean);
+                const valid = wanted.filter(v => KNOWN.includes(v));
+                if (valid.length > 0) {
+                    matchStage.scale_overall_status = { $in: valid };
+                    // nếu chỉ xem đúng Pending thì mới lọc items Pending
+                    needFilterPendingItems = (valid.length === 1 && valid[0] === 'Pending');
+                } else {
+                    // ép không có kết quả nếu tham số không hợp lệ
+                    matchStage.scale_overall_status = { $in: ['__NO_MATCH__'] };
+                }
+            }
+        } else {
+            // Mặc định: chỉ đơn cần QC
+            matchStage.scale_overall_status = 'Pending';
+            needFilterPendingItems = true;
+        }
+
+        // --- search mở rộng ---
         let searchOr = null;
         if (search && search.trim() !== '') {
             const keyword = new RegExp(search.trim(), 'i');
@@ -80,10 +102,12 @@ const getQCList = async (req, res) => {
             },
 
             // 5) Áp dụng search nếu có
-            ...(searchOr ? [{ $match: { $or: searchOr } }] : []),
+            ...(searchOr ? [{ $match: { $or: searchOr } }] : [])
+        ];
 
-            // 6) Chỉ giữ lại các items có scale_status = "Pending" để QC
-            {
+        // 6) (tùy chọn) Chỉ giữ lại các items có scale_status = "Pending" để QC (khi đang xem Pending)
+        if (needFilterPendingItems) {
+            pipeline.push({
                 $addFields: {
                     items: {
                         $filter: {
@@ -93,11 +117,10 @@ const getQCList = async (req, res) => {
                         }
                     }
                 }
-            },
-
+            });
             // 7) Đảm bảo đơn còn ít nhất 1 item Pending sau khi filter
-            { $match: { $expr: { $gt: [{ $size: '$items' }, 0] } } }
-        ];
+            pipeline.push({ $match: { $expr: { $gt: [{ $size: '$items' }, 0] } } });
+        }
 
         // --- Count ---
         const countPipeline = [...pipeline, { $count: 'total' }];
@@ -190,7 +213,7 @@ const getQCList = async (req, res) => {
                         note: item?.tracking_info?.note
                     },
                     fulfillment_file: item.fulfillment_file,
-                    scale_status: item.scale_status // luôn là "Pending" sau filter
+                    scale_status: item.scale_status // có thể khác Pending nếu đang lọc trạng thái khác
                 };
             });
 
@@ -209,7 +232,7 @@ const getQCList = async (req, res) => {
                 base_cost: order.base_cost,
                 case: order.case,
                 address_validation: order.address_validation?.isValid,
-                scale_overall_status: order.scale_overall_status // luôn là "Pending" theo matchStage
+                scale_overall_status: order.scale_overall_status
             };
         });
 
@@ -228,6 +251,7 @@ const getQCList = async (req, res) => {
         });
     }
 };
+
 
 const getQCStatistics = async (req, res) => {
     try {
@@ -389,15 +413,22 @@ const getQCStatistics = async (req, res) => {
         const [overallRaw] = await OrderCustomProduct.aggregate(overallPipeline);
 
         // Chuẩn hóa đủ key trạng thái
-        const normalizeCounts = (c = {}) => ({
-            'Need Scale': c['Need Scale'] || 0,
-            'Pending': c['Pending'] || 0,
-            'Ready': c['Ready'] || 0,
-            'Sent': c['Sent'] || 0,
-            'Failed': c['Failed'] || 0,
-            'QC Rejected': c['QC Rejected'] || 0,
-            'Other': c['Other'] || 0
-        });
+        const normalizeCounts = (c = {}) => {
+            const counts = {
+                'Need Scale': c['Need Scale'] || 0,
+                'Pending': c['Pending'] || 0,
+                'Ready': c['Ready'] || 0,         // nếu Ready = Complete thì bạn có thể rename
+                'Sent': c['Sent'] || 0,
+                'Failed': c['Failed'] || 0,
+                'QC Rejected': c['QC Rejected'] || 0,
+                'Other': c['Other'] || 0
+            };
+
+            // Thêm All = tổng Pending + Sent + QC Rejected + Ready
+            counts['All'] = counts['Pending'] + counts['Sent'] + counts['QC Rejected'] + counts['Ready'];
+
+            return counts;
+        };
 
         const overall = {
             totalOrders: overallRaw?.totalOrders || 0,

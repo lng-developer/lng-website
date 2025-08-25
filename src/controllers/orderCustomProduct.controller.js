@@ -161,6 +161,10 @@ const updateOrdersFromXlsx = async (req, res) => {
         const shopId = req.body.shopId;
         const type = req.body.type;
 
+        // ✅ NEW: cờ auto compute & tập order cần tính
+        const autoCompute = String(req.body?.autoComputeBaseCost ?? 'true') !== 'false';
+        const ordersToCompute = new Set();
+
         if (ext === '.txt') {
             const raw = fs.readFileSync(filePath, 'utf8');
             const delimiter = raw.includes('\t') ? '\t' : ',';
@@ -217,8 +221,6 @@ const updateOrdersFromXlsx = async (req, res) => {
                             addressValid: validationResult.isValid
                         });
                     }
-
-
                     continue;
                 }
             }
@@ -226,7 +228,7 @@ const updateOrdersFromXlsx = async (req, res) => {
             return res.json({ message: 'Update by latest ship date completed', results });
         }
 
-        // ✅ Flow mặc định
+        // ✅ Flow import mặc định (tạo/cập nhật đơn + import JSON + upload snapshot)
         for (const row of rows) {
             const orderId = row.order_id;
             if (!orderId) continue;
@@ -268,9 +270,17 @@ const updateOrdersFromXlsx = async (req, res) => {
                     existing.items.push(itemData);
                     await existing.save();
                     results.push({ orderId, status: 'item added' });
+
+                    // ✅ NEW: có thay đổi item -> cần tính base cost
+                    if (autoCompute) ordersToCompute.add(orderId);
                 } else {
                     results.push({ orderId, status: 'item exists' });
                     skipProcessingZip = true;
+
+                    // ✅ NEW: đơn chưa có base_cost thì tính bù
+                    if (autoCompute && (!existing.base_cost || existing.base_cost === 0)) {
+                        ordersToCompute.add(orderId);
+                    }
                 }
             } else {
                 const newOrder = new OrderCustomProduct({ ...basicData, items: [itemData] });
@@ -285,6 +295,9 @@ const updateOrdersFromXlsx = async (req, res) => {
                     status: 'New order created with address check',
                     addressValid: validationResult.isValid
                 });
+
+                // ✅ NEW: đơn mới -> chắc chắn tính base cost
+                if (autoCompute) ordersToCompute.add(orderId);
             }
 
             if (skipProcessingZip) continue;
@@ -321,12 +334,16 @@ const updateOrdersFromXlsx = async (req, res) => {
                 const fakeReq = { body: jsonData };
                 const fakeRes = {
                     status: code => ({
-                        json: msg => results.push({
-                            orderId,
-                            status: code,
-                            message: msg?.message || msg,
-                            snapshots: cloudinaryUrls
-                        })
+                        json: msg => {
+                            results.push({
+                                orderId,
+                                status: code,
+                                message: msg?.message || msg,
+                                snapshots: cloudinaryUrls
+                            });
+                            // ✅ NEW: import JSON OK -> cũng đánh dấu tính base cost
+                            if (autoCompute && code === 200) ordersToCompute.add(orderId);
+                        }
                     })
                 };
 
@@ -336,12 +353,38 @@ const updateOrdersFromXlsx = async (req, res) => {
             }
         }
 
+        // ✅ NEW: chạy tính base cost cho các order đã gom
+        let baseCostResults = [];
+        if (autoCompute && ordersToCompute.size > 0) {
+            for (const oid of ordersToCompute) {
+                // Gọi trực tiếp API nội bộ computeBaseCostForOrder và collect kết quả
+                // eslint-disable-next-line no-await-in-loop
+                const one = await new Promise(resolve => {
+                    const fakeReq = { body: { orderId: oid } };
+                    const fakeRes = {
+                        json: (obj) => resolve({ orderId: oid, ...obj }),
+                        status: (code) => ({ json: (obj) => resolve({ orderId: oid, code, ...obj }) })
+                    };
+                    computeBaseCostForOrder(fakeReq, fakeRes);
+                });
+                baseCostResults.push(one);
+            }
+        }
+
         fs.unlinkSync(filePath);
-        res.json({ message: 'Batch import completed', results });
+        return res.json({
+            message: 'Batch import completed',
+            results,
+            base_cost_auto_computed: autoCompute,
+            base_cost_results: baseCostResults
+        });
     } catch (error) {
+        // đảm bảo xoá file tạm nếu có
+        try { if (req?.file?.path) fs.unlinkSync(req.file.path); } catch (_e) { }
         res.status(500).json({ message: 'Batch import failed', error: error.message });
     }
 };
+
 
 const uploadToCloudinary = (buffer, filename) => {
     return new Promise((resolve, reject) => {
@@ -942,8 +985,6 @@ const updateBaseImageUrl = async (req, res) => {
 
 // ================== BASE COST HELPERS & APIS ==================
 function parseConfigCodeFromSKU(sku = '') {
-    // SKU dạng <manhanvien>-<configcode>-<date>-<stt>
-    // ví dụ: J2504-NK-1507-18  => NK
     const parts = String(sku).split('-').map(s => s.trim()).filter(Boolean);
     return parts.length >= 2 ? parts[1] : '';
 }
@@ -955,14 +996,8 @@ function toArray(val) {
 }
 
 function normalize(s) {
-    return String(s || '')
-        .toLowerCase()
-        .replace(/\s+/g, ' ')
-        .trim();
+    return String(s || '').toLowerCase().replace(/\s+/g, ' ').trim();
 }
-
-function toArray(val) { if (Array.isArray(val)) return val; if (val == null) return []; return [val]; }
-function normalize(s) { return String(s || '').toLowerCase().replace(/\s+/g, ' ').trim(); }
 
 function pickValueByKeys(labelValueMap, keys = []) {
     for (const k of toArray(keys)) {
@@ -1000,20 +1035,16 @@ function extractLabelValueMapFromItem(item) {
 /**
  * Mapping-only:
  * - match_type: 'equals' | 'contains' | 'regex' | 'regex_replace'
- *   + equals/contains: so sánh không phân biệt hoa thường (trừ khi rule.case_sensitive = true)
- *   + regex: test bằng RegExp(match_value, flags)
- *   + regex_replace: value = value.replace(RegExp(match_value, flags), mapped_value)
  * - priority: số nhỏ ưu tiên trước
  */
 async function mapOptionValue({ configCode, key, rawValue }) {
     let val = String(rawValue ?? '');
     if (!val) return { value: val, ruleId: null, matchType: null };
-
     if (!ConfigOptionMapping) return { value: val, ruleId: null, matchType: null };
 
     const rules = await ConfigOptionMapping.find({
         config_code: configCode,
-        key,                         // 'size' | 'color'
+        key,
         active: { $ne: false }
     }).sort({ priority: 1, created_at: 1 }).lean();
 
@@ -1045,54 +1076,13 @@ async function mapOptionValue({ configCode, key, rawValue }) {
                 const replaced = val.replace(re, mapped);
                 if (replaced !== val) return { value: replaced, ruleId: String(r._id), matchType: mt };
             }
-        } catch (_e) { /* ignore malformed rule */ }
+        } catch (_e) { /* ignore */ }
     }
-
-    // Không map -> trả thẳng raw
     return { value: val, ruleId: null, matchType: null };
 }
 
-
-// Trích { label => value } từ item.version3Data (ưu tiên) hoặc item.customizationData
-function extractLabelValueMapFromItem(item) {
-    const map = new Map();
-
-    // ƯU TIÊN: version3Data.customizationInfo.surfaces[].areas[]
-    const surfacesV3 = item?.version3Data?.customizationInfo?.surfaces || [];
-    for (const sf of surfacesV3) {
-        for (const area of (sf?.areas || [])) {
-            const label = area?.label || area?.name || '';
-            const value = (area?.optionValue ?? area?.text ?? '');
-            if (label) map.set(normalize(label), String(value));
-        }
-    }
-
-    // FALLBACK: customizationData.children[0].children[0].children
-    if (map.size === 0) {
-        const opts = item?.customizationData?.children?.[0]?.children?.[0]?.children || [];
-        for (const opt of opts) {
-            const label = opt?.label || opt?.name || '';
-            let value = '';
-            if (opt?.optionSelection) value = opt.optionSelection?.label || opt.optionSelection?.name || '';
-            else if (typeof opt?.inputValue === 'string') value = opt.inputValue;
-            else if (opt?.displayValue) value = opt.displayValue;
-            if (label) map.set(normalize(label), String(value || ''));
-        }
-    }
-    return map;
-}
-
-function pickValueByKeys(labelValueMap, keys = []) {
-    for (const k of toArray(keys)) {
-        const v = labelValueMap.get(normalize(k));
-        if (v != null && v !== '') return v;
-    }
-    return '';
-}
-
-// B3.1: chọn đúng ConfigCostCenter theo product type
+// Chọn đúng ConfigCostCenter theo product type
 async function selectConfigByProductType(configCode, labelValueMap) {
-    // Lấy tất cả config trùng config_code
     const cfgCandidates = await ConfigCostCenter.find({
         config_code: configCode,
         is_deleted: { $in: [false, null] }
@@ -1100,7 +1090,6 @@ async function selectConfigByProductType(configCode, labelValueMap) {
 
     if (!cfgCandidates.length) return { cfg: null, reason: 'No config cost center found by config_code' };
 
-    // Thử khớp exact theo customize_product_type_key -> product_for_seller.name
     for (const c of cfgCandidates) {
         const typeValRaw = pickValueByKeys(labelValueMap, c.customize_product_type_key || []);
         const typeVal = normalize(typeValRaw);
@@ -1110,47 +1099,80 @@ async function selectConfigByProductType(configCode, labelValueMap) {
         }
     }
 
-    // Nếu chỉ có 1 config thì dùng luôn (fallback an toàn)
     if (cfgCandidates.length === 1) {
         const only = cfgCandidates[0];
         const typeValRaw = pickValueByKeys(labelValueMap, only.customize_product_type_key || []);
         return { cfg: only, productTypeValue: typeValRaw, matchedBy: 'single_candidate_fallback' };
     }
 
-    // Không xác định được
     return { cfg: null, reason: 'Multiple configs; cannot determine by product type key/value' };
 }
 
-// B3.2: Tìm best match theo vendor_size / vendor_color (strict)
+// So khớp strict size/color
 function findBestCostCenter(candidates, sizeValue, colorValue, { strict = true } = {}) {
     const norm = s => String(s || '').toLowerCase().trim();
     const sizeN = norm(sizeValue);
     const colorN = norm(colorValue);
-
-    // Khớp tuyệt đối cả size & color
     const hit = candidates.find(c => norm(c.vendor_size) === sizeN && norm(c.vendor_color) === colorN);
     if (hit) return hit;
-
-    if (strict) return null; // KHÔNG fallback khi yêu cầu trùng khít
+    if (strict) return null;
     return null;
 }
 
-// ✅ NEW: Helper function để chọn vendor_product theo priority order và matching
+/** Dry-run match cho 1 pfItem */
+async function tryMatchVendorProduct(pfItem, sizeValue, colorValue) {
+    const vendorProductId = pfItem?.vendor_product;
+    if (!vendorProductId) return null;
+
+    const candidates = await VendorCostCenter.find({
+        vendor_product: vendorProductId,
+        status: { $in: ['Active', null] }
+    })
+        .select('vendor_size vendor_color standard_size standard_color base_cost sku international.economy international.additional additional_costs')
+        .lean();
+
+    if (!candidates?.length) return null;
+    return findBestCostCenter(candidates, sizeValue, colorValue, { strict: true }) || null;
+}
+
+/** Set<vendorId> có thể fulfill item */
+async function listCandidateVendors(pfItems = [], sizeValue, colorValue) {
+    const out = new Set();
+    for (const it of pfItems) {
+        const vendorId = String(it?.vendor_id || it?.vendor?._id || '');
+        if (!vendorId) continue;
+        const matched = await tryMatchVendorProduct(it, sizeValue, colorValue);
+        if (matched) out.add(vendorId);
+    }
+    return out;
+}
+
+/** Intersection vendor phủ hết order */
+function choosePreferredVendorId(candidateSetsPerItem) {
+    if (!candidateSetsPerItem.length) return null;
+    let inter = new Set(candidateSetsPerItem[0]);
+    for (let i = 1; i < candidateSetsPerItem.length; i++) {
+        const cur = candidateSetsPerItem[i];
+        inter = new Set([...inter].filter(v => cur.has(v)));
+        if (inter.size === 0) break;
+    }
+    return inter.size ? [...inter][0] : null;
+}
+
+/** Chọn vendor_product theo priority; pfItems đã được reorder sẵn nếu cần */
 async function selectBestVendorProduct(pfItems, sizeValue, colorValue) {
-    // Sort theo order priority (1, 2, 3...)
     const sortedItems = pfItems
         .filter(it => (it.status || '').toLowerCase() === 'active')
         .sort((a, b) => (a.order || 999) - (b.order || 999));
 
-    // Nếu không có item Active nào, fallback về tất cả items
-    const itemsToCheck = sortedItems.length > 0 ? sortedItems : pfItems.sort((a, b) => (a.order || 999) - (b.order || 999));
+    const itemsToCheck = sortedItems.length > 0
+        ? sortedItems
+        : pfItems.sort((a, b) => (a.order || 999) - (b.order || 999));
 
-    // Thử từng item theo thứ tự priority để tìm matching cost center
     for (const item of itemsToCheck) {
         const vendorProductId = item?.vendor_product;
         if (!vendorProductId) continue;
 
-        // Kiểm tra có cost center matching cho item này không
         const candidates = await VendorCostCenter.find({
             vendor_product: vendorProductId,
             status: { $in: ['Active', null] }
@@ -1158,9 +1180,8 @@ async function selectBestVendorProduct(pfItems, sizeValue, colorValue) {
             .select('vendor_size vendor_color standard_size standard_color base_cost sku international.economy international.additional additional_costs')
             .lean();
 
-        if (!candidates.length) continue;
+        if (!candidates?.length) continue;
 
-        // Tìm exact match cho size/color
         const matched = findBestCostCenter(candidates, sizeValue, colorValue, { strict: true });
         if (matched && Number(matched?.base_cost || 0) > 0) {
             return {
@@ -1168,7 +1189,8 @@ async function selectBestVendorProduct(pfItems, sizeValue, colorValue) {
                 vendorProductId: String(vendorProductId),
                 matched,
                 selectedOrder: item.order || 999,
-                itemDisplayName: item.display_name || 'Unknown'
+                itemDisplayName: item.display_name || 'Unknown',
+                vendorId: String(item?.vendor_id || item?.vendor?._id || '')
             };
         }
     }
@@ -1186,13 +1208,13 @@ async function selectBestVendorProduct(pfItems, sizeValue, colorValue) {
 
 /**
  * POST body: { orderId: string }
- * Updated Flow với priority order selection:
- * B1: Parse SKU -> config_code
- * B2: Tìm Config Cost Center theo config_code
- * B3: Dùng customize_product_type_key để chọn đúng config
- * B3.2: Chọn vendor_product theo priority order (1, 2, 3...) và matching cost center
- * B4: Tính base_cost + additional costs + shipping
- * B5: Lưu breakdown vào model
+ * Flow:
+ * - Pass 1: tìm preferredVendorId (vendor phủ hết items)
+ * - Pass 2: ưu tiên vendor đó; tính base + additional
+ * - Shipping:
+ *   + SPECIAL CASE: nếu 1 vendor có đúng 2 sản phẩm khác nhau và mỗi cái qty=1
+ *       => ship = eco của sản phẩm có eco cao hơn + additional (1 đơn vị) của sản phẩm còn lại
+ *   + ELSE: gom theo (vendor + profile eco/add): economy 1 lần (max eco trong profile), additional theo rate từng item
  */
 const computeBaseCostForOrder = async (req, res) => {
     try {
@@ -1205,9 +1227,10 @@ const computeBaseCostForOrder = async (req, res) => {
             return res.status(400).json({ message: 'Order has no items' });
         }
 
-        // Gom item theo nhóm vận chuyển (vendor_product)
-        const groups = new Map(); // key: vendor_productId, val: { items: [...], economy, additional }
-        const stagedItems = [];   // tạm giữ kết quả từng item trước khi phân bổ ship
+        // ============== PASS 1: Pre-scan để chọn preferredVendorId ==============
+        const stagedItems = [];
+        const preItems = [];
+        const candidateSetsPerItem = [];
 
         for (const item of order.items) {
             const sku = item?.sku || '';
@@ -1217,10 +1240,7 @@ const computeBaseCostForOrder = async (req, res) => {
                 continue;
             }
 
-            // Chuẩn bị map label->value từ order
             const labelValueMap = extractLabelValueMapFromItem(item);
-
-            // B2 + B3.1: chọn đúng config theo product type
             const { cfg, productTypeValue, matchedBy, reason: cfgReason } = await selectConfigByProductType(configCode, labelValueMap);
             if (!cfg) {
                 stagedItems.push({
@@ -1231,18 +1251,13 @@ const computeBaseCostForOrder = async (req, res) => {
                 continue;
             }
 
-            // B3: lấy raw từ order theo key của config
             const sizeRaw = pickValueByKeys(labelValueMap, cfg.customize_size_key || []);
             const colorRaw = pickValueByKeys(labelValueMap, cfg.customize_color_key || []);
-
-            // 🔁 Mapping-only (không alias)
             const sizeMap = await mapOptionValue({ configCode, key: 'size', rawValue: sizeRaw });
             const colorMap = await mapOptionValue({ configCode, key: 'color', rawValue: colorRaw });
-
             const sizeValue = sizeMap.value;
             const colorValue = colorMap.value;
 
-            // ✅ NEW: Chọn vendor_product theo priority order
             let pfItems = toArray(cfg?.product_for_seller?.items).filter(Boolean);
             if (!pfItems.length) {
                 stagedItems.push({
@@ -1251,9 +1266,29 @@ const computeBaseCostForOrder = async (req, res) => {
                 });
                 continue;
             }
-
             if (['EBM', 'EBMA'].includes(configCode.toUpperCase()) && pfItems.length > 1) {
-                pfItems = pfItems.slice(1); // bỏ qua item đầu tiên
+                pfItems = pfItems.slice(1);
+            }
+
+            preItems.push({ item, sku, configCode, productTypeValue, matchedBy, sizeValue, colorValue, pfItems });
+
+            const vendorSet = await listCandidateVendors(pfItems, sizeValue, colorValue);
+            candidateSetsPerItem.push(vendorSet);
+        }
+
+        const preferredVendorId = choosePreferredVendorId(candidateSetsPerItem) || null;
+
+        // ============== PASS 2: Chọn vendor_product & gom nhóm ship (vendor+profile) ==============
+        const groups = new Map(); // key: `${vendorId}::eco=${eco}::add=${add}`, val: { vendorId, items:[], economyMax }
+
+        for (const pre of preItems) {
+            const { item, sku, configCode, productTypeValue, matchedBy, sizeValue, colorValue } = pre;
+            let { pfItems } = pre;
+
+            if (preferredVendorId) {
+                const pfPreferred = pfItems.filter(it => String(it?.vendor_id || it?.vendor?._id || '') === String(preferredVendorId));
+                const pfOthers = pfItems.filter(it => String(it?.vendor_id || it?.vendor?._id || '') !== String(preferredVendorId));
+                pfItems = [...pfPreferred, ...pfOthers];
             }
 
             const vendorSelection = await selectBestVendorProduct(pfItems, sizeValue, colorValue);
@@ -1267,32 +1302,23 @@ const computeBaseCostForOrder = async (req, res) => {
                 continue;
             }
 
-            const { vendorProductId, matched, selectedOrder, itemDisplayName } = vendorSelection;
+            const { vendorProductId, matched, selectedOrder, itemDisplayName, vendorId: selVendorId } = vendorSelection;
             const baseEach = Number(matched?.base_cost || 0);
             const qty = Math.max(1, Number(item.quantity || 1));
             const eco = Number(matched?.international?.economy || 0);
             const add = Number(matched?.international?.additional || 0);
+            const vendorId = String(selVendorId || '');
 
-            // ✅ Tính additional costs dựa trên config_code
-            let additionalCosts = {
-                embroidery: 0,
-                two_sided_print: 0,
-                two_position_print: 0
-            };
-
-            // Logic áp dụng phí additional theo config code
+            let additionalCosts = { embroidery: 0, two_sided_print: 0, two_position_print: 0 };
             if (['TSB'].includes(configCode.toUpperCase())) {
                 additionalCosts.two_sided_print = Number(matched?.additional_costs?.two_sided_print || 0);
             }
-
             if (['TS2S'].includes(configCode.toUpperCase())) {
                 additionalCosts.two_position_print = Number(matched?.additional_costs?.two_position_print || 0);
             }
-
             if (['EBM', 'EBMA'].includes(configCode.toUpperCase())) {
                 additionalCosts.embroidery = Number(matched?.additional_costs?.embroidery || 0);
             }
-
             const totalAdditionalCost = additionalCosts.embroidery + additionalCosts.two_sided_print + additionalCosts.two_position_print;
 
             const rec = {
@@ -1304,7 +1330,7 @@ const computeBaseCostForOrder = async (req, res) => {
                 sizeValue,
                 colorValue,
                 vendorProductId,
-                // ✅ NEW: Thông tin về selection priority
+                vendorId,
                 selectedOrder,
                 itemDisplayName,
                 baseEach,
@@ -1318,24 +1344,20 @@ const computeBaseCostForOrder = async (req, res) => {
             };
             stagedItems.push(rec);
 
-            // Cập nhật nhóm ship theo vendor_product
-            const g = groups.get(rec.vendorProductId) || { items: [], economy: 0, additional: 0 };
-            g.items.push(rec);
-            g.economy = Math.max(g.economy, eco);
-            g.additional = Math.max(g.additional, add);
-            groups.set(rec.vendorProductId, g);
+            const shippingProfileKey = `${vendorId}::eco=${eco}::add=${add}`;
+            const g = groups.get(shippingProfileKey) || { vendorId, items: [], economyMax: 0 };
+            g.items.push({ ...rec, eco, add });
+            g.economyMax = Math.max(g.economyMax, eco);
+            groups.set(shippingProfileKey, g);
         }
 
-        // Tính tổng: base + additional + shipping
+        // ============== TÍNH TỔNG ==============
         const perItemResults = [];
         const groupBreakdowns = [];
 
-        // 1) Cộng phần base item + additional costs (chưa shipping)
+        // 1) Base + additional (chưa shipping)
         for (const rec of stagedItems) {
-            if (rec.status !== 'ok') {
-                perItemResults.push(rec);
-                continue;
-            }
+            if (rec.status !== 'ok') { perItemResults.push(rec); continue; }
             const basePart = rec.baseEach * rec.qty;
             const additionalPart = rec.totalAdditionalCost * rec.qty;
 
@@ -1348,15 +1370,14 @@ const computeBaseCostForOrder = async (req, res) => {
                 sizeValue: rec.sizeValue,
                 colorValue: rec.colorValue,
                 vendorProductId: rec.vendorProductId,
+                vendorId: rec.vendorId || null,
                 matchedSku: rec.matchedSku,
-                // ✅ NEW: Selection info
                 selectedOrder: rec.selectedOrder,
                 itemDisplayName: rec.itemDisplayName,
                 base_cost_each: rec.baseEach,
                 quantity: rec.qty,
                 additional_costs_breakdown: rec.additionalCosts,
                 total_additional_cost_per_item: additionalPart,
-                // Shipping fields (sẽ được update sau)
                 shipping_international_economy: 0,
                 shipping_international_additional_units: 0,
                 shipping_international_additional_rate: 0,
@@ -1365,57 +1386,148 @@ const computeBaseCostForOrder = async (req, res) => {
             });
         }
 
-        // 2) Phân bổ phí shipping theo nhóm vendor_product
-        for (const [groupKey, g] of groups.entries()) {
-            const totalQty = g.items.reduce((s, it) => s + it.qty, 0);
-            if (totalQty <= 0) continue;
-
-            const eco = g.economy;
-            const add = g.additional;
-            const addUnits = Math.max(0, totalQty - 1);
-            const shippingTotal = eco + add * addUnits;
-
-            let economyAssigned = false;
-            let remainingAdditionalUnits = addUnits;
-
-            const sorted = [...g.items].sort((a, b) => String(a.orderItemId).localeCompare(String(b.orderItemId)));
-
-            for (const it of sorted) {
-                const out = perItemResults.find(r => r.orderItemId === it.orderItemId);
-                if (!out || out.status !== 'ok') continue;
-
-                let ecoForThisItem = 0;
-                if (!economyAssigned && it.qty > 0) {
-                    ecoForThisItem = eco;
-                    economyAssigned = true;
-                }
-
-                let addUnitsForThisItem = it.qty - (ecoForThisItem > 0 ? 1 : 0);
-                addUnitsForThisItem = Math.max(0, Math.min(addUnitsForThisItem, remainingAdditionalUnits));
-                remainingAdditionalUnits -= addUnitsForThisItem;
-
-                const addCostForThisItem = addUnitsForThisItem * add;
-
-                out.shipping_international_economy = ecoForThisItem;
-                out.shipping_international_additional_units = addUnitsForThisItem;
-                out.shipping_international_additional_rate = add;
-                out.base_cost_total_for_item_including_shipping = Number(
-                    (out.base_cost_total_for_item_including_shipping + ecoForThisItem + addCostForThisItem).toFixed(2)
-                );
-                out.formula = `(base ${it.baseEach} * qty ${it.qty}) + additional ${it.totalAdditionalCost} * qty ${it.qty} + eco ${ecoForThisItem} + add ${add} * ${addUnitsForThisItem} | Selected: Order ${out.selectedOrder} - ${out.itemDisplayName}`;
-            }
-
-            groupBreakdowns.push({
-                group_key: groupKey,
-                total_qty: totalQty,
-                shipping_economy_once: eco,
-                shipping_additional_rate: add,
-                shipping_additional_units: addUnits,
-                shipping_total_for_group: Number(shippingTotal.toFixed(2))
-            });
+        // ============== PHÂN BỔ SHIPPING ==============
+        // Tổ chức lại theo vendor để bắt special case trước
+        const vendorBuckets = new Map(); // vendorId -> { items: [rec], profiles: Map(profileKey -> group) }
+        for (const [profileKey, g] of groups.entries()) {
+            const vId = g.vendorId;
+            const buck = vendorBuckets.get(vId) || { items: [], profiles: new Map() };
+            buck.items.push(...g.items);
+            buck.profiles.set(profileKey, g);
+            vendorBuckets.set(vId, buck);
         }
 
-        // ================== BƯỚC 5: LƯU BREAKDOWN VÀO MODEL ==================
+        for (const [vendorId, bucket] of vendorBuckets.entries()) {
+            const items = bucket.items; // mảng rec {orderItemId, qty, eco, add, vendorProductId, baseEach, ...}
+
+            // SPECIAL CASE: đúng 2 sản phẩm khác nhau, mỗi cái qty = 1
+            const distinctProducts = new Set(items.map(x => x.vendorProductId)).size;
+            const totalQty = items.reduce((s, it) => s + it.qty, 0);
+            const allQtyAreOne = items.every(it => Number(it.qty) === 1);
+
+            if (distinctProducts === 2 && totalQty === 2 && allQtyAreOne) {
+                // Reset shipping cho 2 item (phòng trước đó có phân bổ theo profile)
+                for (const it of items) {
+                    const out = perItemResults.find(r => r.orderItemId === it.orderItemId && r.status === 'ok');
+                    if (!out) continue;
+                    // trừ lại nếu có (an toàn khi không có gì cũng không ảnh hưởng)
+                    const minus = (out.shipping_international_economy || 0)
+                        + (out.shipping_international_additional_units || 0) * (out.shipping_international_additional_rate || 0);
+                    out.base_cost_total_for_item_including_shipping = Number((out.base_cost_total_for_item_including_shipping - minus).toFixed(2));
+                    out.shipping_international_economy = 0;
+                    out.shipping_international_additional_units = 0;
+                    out.shipping_international_additional_rate = 0;
+                }
+
+                // Chọn "đắt hơn" theo eco; nếu eco bằng nhau, theo baseEach
+                const sortedByShipExpensive = [...items].sort((a, b) => {
+                    if (b.eco !== a.eco) return b.eco - a.eco;
+                    return (b.baseEach || 0) - (a.baseEach || 0);
+                });
+                const expensive = sortedByShipExpensive[0];
+                const cheap = sortedByShipExpensive[1];
+
+                // Gán economy cho sp "đắt hơn"
+                {
+                    const out = perItemResults.find(r => r.orderItemId === expensive.orderItemId && r.status === 'ok');
+                    if (out) {
+                        out.shipping_international_economy = expensive.eco;
+                        out.shipping_international_additional_units = 0;
+                        out.shipping_international_additional_rate = 0;
+                        out.base_cost_total_for_item_including_shipping = Number(
+                            (out.base_cost_total_for_item_including_shipping + expensive.eco).toFixed(2)
+                        );
+                        out.formula = `${out.formula || ''} | SPECIAL: eco(${expensive.eco}) for expensive product`;
+                    }
+                }
+
+                // Gán additional (1 đơn vị) cho sp "rẻ hơn" với rate của chính nó
+                {
+                    const out = perItemResults.find(r => r.orderItemId === cheap.orderItemId && r.status === 'ok');
+                    if (out) {
+                        out.shipping_international_economy = 0;
+                        out.shipping_international_additional_units = 1;
+                        out.shipping_international_additional_rate = cheap.add;
+                        out.base_cost_total_for_item_including_shipping = Number(
+                            (out.base_cost_total_for_item_including_shipping + cheap.add).toFixed(2)
+                        );
+                        out.formula = `${out.formula || ''} | SPECIAL: add(${cheap.add}) for cheaper product`;
+                    }
+                }
+
+                // Breakdown vendor-level cho special case
+                groupBreakdowns.push({
+                    group_key: `vendor:${vendorId}::SPECIAL_TWO_PRODUCTS`,
+                    vendor_id: vendorId,
+                    total_qty: 2,
+                    special_case: true,
+                    rule: 'eco of more expensive + additional of cheaper',
+                    shipping_total_for_group: Number((expensive.eco + cheap.add).toFixed(2))
+                });
+
+                // Bỏ qua phân bổ theo profile cho vendor này (đã xử lý xong)
+                continue;
+            }
+
+            // ELSE: dùng phân bổ theo profile như bình thường (economy 1 lần/profile)
+            for (const [profileKey, g] of bucket.profiles.entries()) {
+                const totalQtyProfile = g.items.reduce((s, it) => s + it.qty, 0);
+                if (totalQtyProfile <= 0) continue;
+
+                const ecoOnce = g.economyMax;
+                let remainingEconomyToAssign = 1;
+                let remainingAdditionalUnits = Math.max(0, totalQtyProfile - 1);
+
+                const sorted = [...g.items].sort((a, b) =>
+                    b.eco - a.eco || String(a.orderItemId).localeCompare(String(b.orderItemId))
+                );
+
+                for (const it of sorted) {
+                    const out = perItemResults.find(r => r.orderItemId === it.orderItemId && r.status === 'ok');
+                    if (!out) continue;
+
+                    let ecoForThisItem = 0;
+                    if (remainingEconomyToAssign > 0 && it.qty > 0) {
+                        ecoForThisItem = ecoOnce;
+                        remainingEconomyToAssign = 0;
+                    }
+
+                    let addUnitsForThisItem = it.qty - (ecoForThisItem > 0 ? 1 : 0);
+                    addUnitsForThisItem = Math.max(0, Math.min(addUnitsForThisItem, remainingAdditionalUnits));
+                    remainingAdditionalUnits -= addUnitsForThisItem;
+
+                    const addRate = it.add;
+                    const addCostForThisItem = addUnitsForThisItem * addRate;
+
+                    out.shipping_international_economy = (out.shipping_international_economy || 0) + ecoForThisItem;
+                    out.shipping_international_additional_units = (out.shipping_international_additional_units || 0) + addUnitsForThisItem;
+                    out.shipping_international_additional_rate = addRate; // (lưu rate cuối cùng của item)
+                    out.base_cost_total_for_item_including_shipping = Number(
+                        (out.base_cost_total_for_item_including_shipping + ecoForThisItem + addCostForThisItem).toFixed(2)
+                    );
+                    out.formula = `(base ${it.baseEach} * qty ${it.qty}) + additional ${it.totalAdditionalCost} * qty ${it.qty} + eco ${ecoForThisItem} + add ${addRate} * ${addUnitsForThisItem} | Selected: Order ${out.selectedOrder} - ${out.itemDisplayName}`;
+                }
+
+                const shippingTotalForGroup = Number((
+                    ecoOnce +
+                    g.items.reduce((sum, it) => {
+                        const out = perItemResults.find(r => r.orderItemId === it.orderItemId && r.status === 'ok');
+                        if (!out) return sum;
+                        return sum + (out.shipping_international_additional_units || 0) * (out.shipping_international_additional_rate || 0);
+                    }, 0)
+                ).toFixed(2));
+
+                groupBreakdowns.push({
+                    group_key: profileKey,
+                    vendor_id: g.vendorId,
+                    total_qty: totalQtyProfile,
+                    shipping_economy_once: ecoOnce,
+                    shipping_total_for_group: shippingTotalForGroup
+                });
+            }
+        }
+
+        // 3) Lưu breakdown vào model
         for (const out of perItemResults) {
             if (out.status !== 'ok') continue;
             const itemRef = order.items.find(i => String(i.orderItemId) === String(out.orderItemId));
@@ -1429,7 +1541,6 @@ const computeBaseCostForOrder = async (req, res) => {
                 colorValue: out.colorValue,
                 vendorProductId: out.vendorProductId || null,
                 matchedSku: out.matchedSku || null,
-                // ✅ NEW: Priority selection info
                 selectedOrder: out.selectedOrder,
                 itemDisplayName: out.itemDisplayName,
                 base_cost_each: out.base_cost_each,
@@ -1444,13 +1555,12 @@ const computeBaseCostForOrder = async (req, res) => {
             };
         }
 
-        // Lưu breakdown nhóm shipping và tổng order cost
         order.base_cost_shipping_groups = groupBreakdowns;
 
         let orderTotalBaseCost = 0;
-        for (const item of order.items) {
-            if (item.cost_breakdown && typeof item.cost_breakdown.base_cost_total_for_item_including_shipping === 'number') {
-                orderTotalBaseCost += item.cost_breakdown.base_cost_total_for_item_including_shipping;
+        for (const it of order.items) {
+            if (it.cost_breakdown && typeof it.cost_breakdown.base_cost_total_for_item_including_shipping === 'number') {
+                orderTotalBaseCost += it.cost_breakdown.base_cost_total_for_item_including_shipping;
             }
         }
         order.base_cost = Number(orderTotalBaseCost.toFixed(2));
@@ -1459,9 +1569,10 @@ const computeBaseCostForOrder = async (req, res) => {
         await order.save();
 
         return res.json({
-            message: 'Computed base cost with priority order selection',
+            message: 'Computed base cost with vendor-preference & consolidated shipping (with special 2-product rule)',
             orderId,
             base_cost: order.base_cost,
+            preferred_vendor_id: preferredVendorId || null,
             shipping_group_breakdowns: groupBreakdowns,
             detail: perItemResults
         });
@@ -1497,6 +1608,7 @@ const computeBaseCostForMany = async (req, res) => {
     }
 };
 // ================== END BASE COST ==================
+
 
 function computeOrderStatusFromItems(items = []) {
     const itemStatuses = items.map(i => norm(i?.tracking_info?.status));
