@@ -100,8 +100,8 @@ const listMappings = async (req, res) => {
             match_type,
             active,
             q, // giữ nguyên text search cũ
-            search, // 🔹 param mới
-            sort = 'priority:asc,created_at:asc'
+            search, // param mới
+            sort // không set default ở đây nữa
         } = req.query;
 
         const match = {};
@@ -127,12 +127,17 @@ const listMappings = async (req, res) => {
         }
 
         // Sort parser
-        const sortObj = {};
-        String(sort).split(',').forEach(pair => {
-            const [k, dir] = pair.split(':').map(s => s.trim());
-            if (!k) return;
-            sortObj[k] = String(dir || 'asc').toLowerCase() === 'desc' ? -1 : 1;
-        });
+        let sortObj = {};
+        if (sort) {
+            String(sort).split(',').forEach(pair => {
+                const [k, dir] = pair.split(':').map(s => s.trim());
+                if (!k) return;
+                sortObj[k] = String(dir || 'asc').toLowerCase() === 'desc' ? -1 : 1;
+            });
+        }
+        if (Object.keys(sortObj).length === 0) {
+            sortObj = { created_at: -1 }; // mặc định sắp xếp mới nhất
+        }
 
         const limit = String(perPage).toLowerCase() === 'all' ? 0 : Math.max(1, parseInt(perPage));
         const skip = limit ? (Math.max(1, parseInt(page)) - 1) * limit : 0;
@@ -153,6 +158,7 @@ const listMappings = async (req, res) => {
         return res.status(500).json({ message: 'List failed', error: err.message });
     }
 };
+
 
 // ---------- GET ONE ----------
 const getMappingById = async (req, res) => {
