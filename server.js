@@ -48,7 +48,7 @@ app.use('/api/listing', listingRoutes);
 app.use('/api/product-type', productTypeRoutes);
 app.use('/api/config-cost-center', configCostCenterRoutes);
 app.use('/api/scale', scaleRoutes);
-app.use('/api/qc', QCRoutes);
+app.use('/api/fulfillment/qc', QCRoutes);
 app.use('/api/mapping', configOptionMappingRoutes)
 
 // Error Handler
