@@ -1,7 +1,7 @@
 const express = require('express');
 const { vendorCostCenterController } = require('../controllers');
-const multer = require('multer'); // 🟢 THÊM DÒNG NÀY
-const upload = multer({ dest: 'uploads/' }); // 🟢 VÀ DÒNG NÀY
+const multer = require('multer');
+const upload = multer({ dest: 'uploads/' });
 const router = express.Router();
 
 // CRUD APIs
@@ -13,5 +13,6 @@ router.delete('/:id', vendorCostCenterController.deleteVendorCostCenter);
 router.post('/update-status', vendorCostCenterController.updateVendorCostCenterStatus);
 router.get('/by-product/:vendorProductId', vendorCostCenterController.getCostCentersByVendorProduct);
 router.post('/import', upload.single('file'), vendorCostCenterController.importVendorCostCenterFromExcel);
+router.post('/bulk-update', upload.single('file'), vendorCostCenterController.bulkUpdateVendorCostCenterFromExcel);
 
 module.exports = router;

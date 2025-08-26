@@ -68,38 +68,46 @@ function buildGrabinkOrderPayload(order) {
   const completedItems = (order.items || []).filter(i => i.scale_status === 'Complete');
 
   return {
-    api_key: process.env.GRABINK_API_KEY, // bắt buộc có trong .env
-    line_items: completedItems.map(item => ({
-      // TODO: map đúng numeric variant_id nếu bạn có bảng mapping; tạm để null
-      variant_id: null, // hoặc Number(item.cost_breakdown?.variant_id) nếu có
-      sku: item.cost_breakdown.matchedSku,
-      product_name: item.cost_breakdown?.itemDisplayName || item.title,
-      quantity: item.quantity,
+    api_key: process.env.GRABINK_API_KEY,
+    line_items: completedItems.map(item => {
+      // lấy fulfillment_file dạng object
+      const printFiles = [];
+      if (item.fulfillment_file && typeof item.fulfillment_file === 'object') {
+        Object.entries(item.fulfillment_file).forEach(([key, url]) => {
+          if (url) {
+            printFiles.push({ key, url });
+          }
+        });
+      }
 
-      // mockup / mockup_back
-      mockup: item.baseImage?.imageUrl || null,
-      mockup_back: "",
+      // nếu có svgFile thì thêm
+      if (item.svgFile) {
+        printFiles.push({ key: 'svg', url: item.svgFile });
+      }
 
-      // print_files: dùng file scale (fulfillment_file) là chủ đạo
-      print_files: [
-        ...(item.fulfillment_file ? [{ key: 'front', url: item.fulfillment_file }] : []),
-        // Nếu Grablink không nhận svg, có thể bỏ dòng sau:
-        ...(item.svgFile ? [{ key: 'svg', url: item.svgFile }] : [])
-      ]
-    })),
+      return {
+        variant_id: null, // hoặc Number(item.cost_breakdown?.variant_id)
+        sku: item.cost_breakdown?.matchedSku,
+        product_name: item.cost_breakdown?.itemDisplayName || item.title,
+        quantity: item.quantity,
+
+        mockup: item.baseImage?.imageUrl || null,
+        mockup_back: "",
+
+        print_files: printFiles
+      };
+    }),
 
     is_scan_label: false,
     order_status: 'new',
     ref_id: order.orderId,
-    shipping_label: null, // nếu có url label thì set, còn không để null
+    shipping_label: null,
     shipping_method: mapShippingMethod(order.shipping_type),
 
     address: {
       name: order.customer_infor?.name || '',
       email: order.customer_infor?.email || '',
       phone: order.customer_infor?.phone_number || '',
-      // Lưu ý: mẫu của bạn ghi country là tên quốc gia (vd "United States")
-      // Dữ liệu đang là mã "US" -> có thể cần map theo yêu cầu Grablink
       country: order.customer_infor?.country === 'US' ? 'United States' : (order.customer_infor?.country || ''),
       state: order.customer_infor?.state || '',
       city: order.customer_infor?.city || '',
@@ -109,6 +117,7 @@ function buildGrabinkOrderPayload(order) {
     }
   };
 }
+
 
 /**
  * Gửi 1 ĐƠN (duy nhất) sang Grablink (idempotent)
