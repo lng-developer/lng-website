@@ -213,7 +213,8 @@ const getQCList = async (req, res) => {
                         note: item?.tracking_info?.note
                     },
                     fulfillment_file: item.fulfillment_file,
-                    scale_status: item.scale_status // có thể khác Pending nếu đang lọc trạng thái khác
+                    scale_status: item.scale_status, // có thể khác Pending nếu đang lọc trạng thái khác
+                    qc_note: item.qc_note
                 };
             });
 
