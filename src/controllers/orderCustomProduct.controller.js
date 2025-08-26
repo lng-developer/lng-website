@@ -1281,16 +1281,143 @@ async function selectBestVendorProduct(pfItems, sizeValue, colorValue) {
     };
 }
 
-/**
- * POST body: { orderId: string }
- * Flow:
- * - Pass 1: tìm preferredVendorId (vendor phủ hết items)
- * - Pass 2: ưu tiên vendor đó; tính base + additional
- * - Shipping:
- *   + SPECIAL CASE: nếu 1 vendor có đúng 2 sản phẩm khác nhau và mỗi cái qty=1
- *       => ship = eco của sản phẩm có eco cao hơn + additional (1 đơn vị) của sản phẩm còn lại
- *   + ELSE: gom theo (vendor + profile eco/add): economy 1 lần (max eco trong profile), additional theo rate từng item
- */
+// ================== HELPER: Lấy phí ship theo shipping_type (với nhiều nhánh fallback & normalize) ==================
+async function resolveShippingRates({
+    matched,
+    shippingType,
+    vendorProductId,
+    sizeValue,
+    colorValue
+}) {
+    const type = String(shippingType || '').toLowerCase();
+
+    // Chuẩn hoá
+    const norm = (v) => String(v || '').trim();
+    const up = (v) => norm(v).toUpperCase();
+
+    const sizeCand = Array.from(new Set([norm(sizeValue), up(sizeValue)].filter(Boolean)));
+    const colorCand = Array.from(new Set([norm(colorValue), up(colorValue)].filter(Boolean)));
+
+    // Pick từ doc (matched hoặc doc DB)
+    const pickFromDoc = (doc, preferProfile /* 'priority' | 'international' */) => {
+        if (!doc) return null;
+
+        const hasPriority = doc.priority && (
+            doc.priority.economy != null || doc.priority.additional != null
+        );
+        const hasIntl = doc.international && (
+            doc.international.economy != null || doc.international.additional != null
+        );
+
+        // Ưu tiên profile theo yêu cầu
+        if (preferProfile === 'priority' && hasPriority) {
+            return {
+                eco: Number(doc.priority.economy ?? 0),
+                add: Number(doc.priority.additional ?? 0),
+                profile: 'priority',
+                source: 'doc'
+            };
+        }
+        if (hasIntl) {
+            return {
+                eco: Number(doc.international.economy ?? 0),
+                add: Number(doc.international.additional ?? 0),
+                profile: 'international',
+                source: 'doc'
+            };
+        }
+        // Nếu ưu tiên priority nhưng không có, và cũng không có quốc tế → null
+        return null;
+    };
+
+    // Tra DB theo nhiều nhánh
+    async function lookupCostCenter(preferProfile) {
+        if (!(typeof VendorCostCenter?.findOne === 'function') || !vendorProductId) return null;
+
+        // 1) vendor_size/vendor_color (case-insensitive)
+        for (const sv of sizeCand.length ? sizeCand : [undefined]) {
+            for (const cv of colorCand.length ? colorCand : [undefined]) {
+                if (!sv && !cv) continue;
+                const doc = await VendorCostCenter.findOne({
+                    vendor_product: vendorProductId,
+                    ...(sv ? { vendor_size: new RegExp(`^${sv}$`, 'i') } : {}),
+                    ...(cv ? { vendor_color: new RegExp(`^${cv}$`, 'i') } : {})
+                }).lean();
+                const picked = pickFromDoc(doc, preferProfile);
+                if (picked) return picked;
+            }
+        }
+
+        // 2) standard_size/standard_color (case-insensitive)
+        for (const sv of sizeCand.length ? sizeCand : [undefined]) {
+            for (const cv of colorCand.length ? colorCand : [undefined]) {
+                if (!sv && !cv) continue;
+                const doc = await VendorCostCenter.findOne({
+                    vendor_product: vendorProductId,
+                    ...(sv ? { standard_size: new RegExp(`^${sv}$`, 'i') } : {}),
+                    ...(cv ? { standard_color: new RegExp(`^${cv}$`, 'i') } : {})
+                }).lean();
+                const picked = pickFromDoc(doc, preferProfile);
+                if (picked) return picked;
+            }
+        }
+
+        // 3) Chỉ theo vendor_product (lấy record bất kỳ của SP để có profile mặc định)
+        {
+            const doc = await VendorCostCenter.findOne({ vendor_product: vendorProductId }).lean();
+            const picked = pickFromDoc(doc, preferProfile);
+            if (picked) return picked;
+        }
+
+        return null;
+    }
+
+    // ===== LOGIC CHÍNH =====
+    if (type === 'expedited') {
+        // 1) matched.priority
+        if (matched?.priority && (matched.priority.economy != null || matched.priority.additional != null)) {
+            return {
+                eco: Number(matched.priority.economy ?? 0),
+                add: Number(matched.priority.additional ?? 0),
+                profile: 'priority',
+                source: 'matched'
+            };
+        }
+        // 2) DB ưu tiên priority, nếu không có thì lấy international
+        const dbPicked = await lookupCostCenter('priority');
+        if (dbPicked) return dbPicked;
+
+        // 3) Fallback matched.international (đổi profile về international cho đúng thực tế)
+        if (matched?.international && (matched.international.economy != null || matched.international.additional != null)) {
+            return {
+                eco: Number(matched.international.economy ?? 0),
+                add: Number(matched.international.additional ?? 0),
+                profile: 'international',
+                source: 'matched-fallback'
+            };
+        }
+        // 4) Zero
+        return { eco: 0, add: 0, profile: 'priority', source: 'zero' };
+    }
+
+    // STANDARD (hoặc loại khác) → INTERNATIONAL
+    if (matched?.international && (matched.international.economy != null || matched.international.additional != null)) {
+        return {
+            eco: Number(matched.international.economy ?? 0),
+            add: Number(matched.international.additional ?? 0),
+            profile: 'international',
+            source: 'matched'
+        };
+    }
+    const dbPicked = await lookupCostCenter('international');
+    if (dbPicked) return dbPicked;
+
+    return { eco: 0, add: 0, profile: 'international', source: 'zero' };
+}
+
+
+
+// ================== COMPUTE BASE COST (FULL) ==================
 const computeBaseCostForOrder = async (req, res) => {
     try {
         const { orderId } = req.body;
@@ -1301,6 +1428,8 @@ const computeBaseCostForOrder = async (req, res) => {
         if (!Array.isArray(order.items) || order.items.length === 0) {
             return res.status(400).json({ message: 'Order has no items' });
         }
+
+        const shippingTypeForOrder = order.shipping_type || 'Standard';
 
         // ============== PASS 1: Pre-scan để chọn preferredVendorId ==============
         const stagedItems = [];
@@ -1341,6 +1470,7 @@ const computeBaseCostForOrder = async (req, res) => {
                 });
                 continue;
             }
+            // Đặc thù EBM/EBMA
             if (['EBM', 'EBMA'].includes(configCode.toUpperCase()) && pfItems.length > 1) {
                 pfItems = pfItems.slice(1);
             }
@@ -1354,7 +1484,7 @@ const computeBaseCostForOrder = async (req, res) => {
         const preferredVendorId = choosePreferredVendorId(candidateSetsPerItem) || null;
 
         // ============== PASS 2: Chọn vendor_product & gom nhóm ship (vendor+profile) ==============
-        const groups = new Map(); // key: `${vendorId}::eco=${eco}::add=${add}`, val: { vendorId, items:[], economyMax }
+        const groups = new Map(); // key: `${vendorId}::profile=${shipProfile}::eco=${eco}::add=${add}`
 
         for (const pre of preItems) {
             const { item, sku, configCode, productTypeValue, matchedBy, sizeValue, colorValue } = pre;
@@ -1377,14 +1507,34 @@ const computeBaseCostForOrder = async (req, res) => {
                 continue;
             }
 
-            const { vendorProductId, matched, selectedOrder, itemDisplayName, vendorId: selVendorId } = vendorSelection;
+            const { vendorProductId, matched, selectedOrder, itemDisplayName } = vendorSelection;
+
+            const vendorId =
+                String(
+                    vendorSelection.vendorId ||
+                    matched?.vendor_id ||
+                    matched?.vendor?._id ||
+                    matched?.vendorId ||
+                    'unknown_vendor'
+                );
+
             const baseEach = Number(matched?.base_cost || 0);
             const qty = Math.max(1, Number(item.quantity || 1));
-            const eco = Number(matched?.international?.economy || 0);
-            const add = Number(matched?.international?.additional || 0);
-            const vendorId = String(selVendorId || '');
 
-            let additionalCosts = { embroidery: 0, two_sided_print: 0, two_position_print: 0 };
+            // >>> LẤY PHÍ SHIP THEO shipping_type (có fallback tra DB nếu thiếu priority) <<<
+            const rate = await resolveShippingRates({
+                matched,
+                shippingType: shippingTypeForOrder,
+                vendorProductId,
+                sizeValue,
+                colorValue
+            });
+            const eco = Number(rate.eco || 0);
+            const add = Number(rate.add || 0);
+            const shipProfile = rate.profile;
+
+            // Additional costs
+            const additionalCosts = { embroidery: 0, two_sided_print: 0, two_position_print: 0 };
             if (['TSB'].includes(configCode.toUpperCase())) {
                 additionalCosts.two_sided_print = Number(matched?.additional_costs?.two_sided_print || 0);
             }
@@ -1412,16 +1562,18 @@ const computeBaseCostForOrder = async (req, res) => {
                 qty,
                 eco,
                 add,
-                matchedSku: matched.sku || null,
+                shipProfile, // chỉ dùng trong lúc tính/group
+                matchedSku: matched?.sku || null,
                 additionalCosts,
                 totalAdditionalCost,
                 status: 'ok'
             };
             stagedItems.push(rec);
 
-            const shippingProfileKey = `${vendorId}::eco=${eco}::add=${add}`;
-            const g = groups.get(shippingProfileKey) || { vendorId, items: [], economyMax: 0 };
-            g.items.push({ ...rec, eco, add });
+            // key group: vendor + profile + rate
+            const shippingProfileKey = `${vendorId}::profile=${shipProfile}::eco=${eco}::add=${add}`;
+            const g = groups.get(shippingProfileKey) || { vendorId, shipProfile, items: [], economyMax: 0 };
+            g.items.push({ ...rec });
             g.economyMax = Math.max(g.economyMax, eco);
             groups.set(shippingProfileKey, g);
         }
@@ -1453,16 +1605,15 @@ const computeBaseCostForOrder = async (req, res) => {
                 quantity: rec.qty,
                 additional_costs_breakdown: rec.additionalCosts,
                 total_additional_cost_per_item: additionalPart,
-                shipping_international_economy: 0,
-                shipping_international_additional_units: 0,
+                shipping_international_economy: 0,           // giữ tên field cũ để tương thích schema
+                shipping_international_additional_units: 0,  // (nội dung có thể là priority)
                 shipping_international_additional_rate: 0,
                 base_cost_total_for_item_including_shipping: basePart + additionalPart,
                 status: 'ok'
             });
         }
 
-        // ============== PHÂN BỔ SHIPPING ==============
-        // Tổ chức lại theo vendor để bắt special case trước
+        // 2) Phân bổ shipping
         const vendorBuckets = new Map(); // vendorId -> { items: [rec], profiles: Map(profileKey -> group) }
         for (const [profileKey, g] of groups.entries()) {
             const vId = g.vendorId;
@@ -1473,7 +1624,7 @@ const computeBaseCostForOrder = async (req, res) => {
         }
 
         for (const [vendorId, bucket] of vendorBuckets.entries()) {
-            const items = bucket.items; // mảng rec {orderItemId, qty, eco, add, vendorProductId, baseEach, ...}
+            const items = bucket.items;
 
             // SPECIAL CASE: đúng 2 sản phẩm khác nhau, mỗi cái qty = 1
             const distinctProducts = new Set(items.map(x => x.vendorProductId)).size;
@@ -1481,20 +1632,19 @@ const computeBaseCostForOrder = async (req, res) => {
             const allQtyAreOne = items.every(it => Number(it.qty) === 1);
 
             if (distinctProducts === 2 && totalQty === 2 && allQtyAreOne) {
-                // Reset shipping cho 2 item (phòng trước đó có phân bổ theo profile)
+                // reset ship trước
                 for (const it of items) {
                     const out = perItemResults.find(r => r.orderItemId === it.orderItemId && r.status === 'ok');
                     if (!out) continue;
-                    // trừ lại nếu có (an toàn khi không có gì cũng không ảnh hưởng)
-                    const minus = (out.shipping_international_economy || 0)
-                        + (out.shipping_international_additional_units || 0) * (out.shipping_international_additional_rate || 0);
+                    const minus =
+                        (out.shipping_international_economy || 0) +
+                        (out.shipping_international_additional_units || 0) * (out.shipping_international_additional_rate || 0);
                     out.base_cost_total_for_item_including_shipping = Number((out.base_cost_total_for_item_including_shipping - minus).toFixed(2));
                     out.shipping_international_economy = 0;
                     out.shipping_international_additional_units = 0;
                     out.shipping_international_additional_rate = 0;
                 }
 
-                // Chọn "đắt hơn" theo eco; nếu eco bằng nhau, theo baseEach
                 const sortedByShipExpensive = [...items].sort((a, b) => {
                     if (b.eco !== a.eco) return b.eco - a.eco;
                     return (b.baseEach || 0) - (a.baseEach || 0);
@@ -1502,57 +1652,53 @@ const computeBaseCostForOrder = async (req, res) => {
                 const expensive = sortedByShipExpensive[0];
                 const cheap = sortedByShipExpensive[1];
 
-                // Gán economy cho sp "đắt hơn"
+                // eco cho sp "đắt hơn"
                 {
                     const out = perItemResults.find(r => r.orderItemId === expensive.orderItemId && r.status === 'ok');
                     if (out) {
                         out.shipping_international_economy = expensive.eco;
-                        out.shipping_international_additional_units = 0;
-                        out.shipping_international_additional_rate = 0;
                         out.base_cost_total_for_item_including_shipping = Number(
                             (out.base_cost_total_for_item_including_shipping + expensive.eco).toFixed(2)
                         );
-                        out.formula = `${out.formula || ''} | SPECIAL: eco(${expensive.eco}) for expensive product`;
+                        out.formula = `${out.formula || ''} | SPECIAL[${expensive.shipProfile}]: eco(${expensive.eco}) for expensive product`;
                     }
                 }
-
-                // Gán additional (1 đơn vị) cho sp "rẻ hơn" với rate của chính nó
+                // additional (1) cho sp "rẻ hơn"
                 {
                     const out = perItemResults.find(r => r.orderItemId === cheap.orderItemId && r.status === 'ok');
                     if (out) {
-                        out.shipping_international_economy = 0;
                         out.shipping_international_additional_units = 1;
                         out.shipping_international_additional_rate = cheap.add;
                         out.base_cost_total_for_item_including_shipping = Number(
                             (out.base_cost_total_for_item_including_shipping + cheap.add).toFixed(2)
                         );
-                        out.formula = `${out.formula || ''} | SPECIAL: add(${cheap.add}) for cheaper product`;
+                        out.formula = `${out.formula || ''} | SPECIAL[${cheap.shipProfile}]: add(${cheap.add}) for cheaper product`;
                     }
                 }
 
-                // Breakdown vendor-level cho special case
                 groupBreakdowns.push({
                     group_key: `vendor:${vendorId}::SPECIAL_TWO_PRODUCTS`,
                     vendor_id: vendorId,
                     total_qty: 2,
                     special_case: true,
+                    shipping_profile: expensive.shipProfile,
                     rule: 'eco of more expensive + additional of cheaper',
                     shipping_total_for_group: Number((expensive.eco + cheap.add).toFixed(2))
                 });
 
-                // Bỏ qua phân bổ theo profile cho vendor này (đã xử lý xong)
-                continue;
+                continue; // bỏ phân bổ profile thường cho vendor này
             }
 
-            // ELSE: dùng phân bổ theo profile như bình thường (economy 1 lần/profile)
+            // ELSE: phân bổ theo từng profile
             for (const [profileKey, g] of bucket.profiles.entries()) {
                 const totalQtyProfile = g.items.reduce((s, it) => s + it.qty, 0);
                 if (totalQtyProfile <= 0) continue;
 
-                const ecoOnce = g.economyMax;
+                const ecoOnce = g.economyMax; // charge 1 lần/profile
                 let remainingEconomyToAssign = 1;
                 let remainingAdditionalUnits = Math.max(0, totalQtyProfile - 1);
 
+                // ưu tiên item eco cao trước
                 const sorted = [...g.items].sort((a, b) =>
                     b.eco - a.eco || String(a.orderItemId).localeCompare(String(b.orderItemId))
                 );
@@ -1576,11 +1722,11 @@ const computeBaseCostForOrder = async (req, res) => {
 
                     out.shipping_international_economy = (out.shipping_international_economy || 0) + ecoForThisItem;
                     out.shipping_international_additional_units = (out.shipping_international_additional_units || 0) + addUnitsForThisItem;
-                    out.shipping_international_additional_rate = addRate; // (lưu rate cuối cùng của item)
+                    out.shipping_international_additional_rate = addRate;
                     out.base_cost_total_for_item_including_shipping = Number(
                         (out.base_cost_total_for_item_including_shipping + ecoForThisItem + addCostForThisItem).toFixed(2)
                     );
-                    out.formula = `(base ${it.baseEach} * qty ${it.qty}) + additional ${it.totalAdditionalCost} * qty ${it.qty} + eco ${ecoForThisItem} + add ${addRate} * ${addUnitsForThisItem} | Selected: Order ${out.selectedOrder} - ${out.itemDisplayName}`;
+                    out.formula = `(base ${it.baseEach} * qty ${it.qty}) + additional ${it.totalAdditionalCost} * qty ${it.qty} + [${g.shipProfile}] eco ${ecoForThisItem} + add ${addRate} * ${addUnitsForThisItem} | Selected: Order ${out.selectedOrder} - ${out.itemDisplayName}`;
                 }
 
                 const shippingTotalForGroup = Number((
@@ -1596,6 +1742,7 @@ const computeBaseCostForOrder = async (req, res) => {
                     group_key: profileKey,
                     vendor_id: g.vendorId,
                     total_qty: totalQtyProfile,
+                    shipping_profile: g.shipProfile,
                     shipping_economy_once: ecoOnce,
                     shipping_total_for_group: shippingTotalForGroup
                 });
@@ -1622,6 +1769,7 @@ const computeBaseCostForOrder = async (req, res) => {
                 quantity: out.quantity,
                 additional_costs_breakdown: out.additional_costs_breakdown,
                 total_additional_cost_per_item: out.total_additional_cost_per_item,
+                // vẫn giữ tên 'international' để tương thích schema
                 shipping_international_economy: out.shipping_international_economy,
                 shipping_international_additional_units: out.shipping_international_additional_units,
                 shipping_international_additional_rate: out.shipping_international_additional_rate,
@@ -1644,7 +1792,7 @@ const computeBaseCostForOrder = async (req, res) => {
         await order.save();
 
         return res.json({
-            message: 'Computed base cost with vendor-preference & consolidated shipping (with special 2-product rule)',
+            message: 'Computed base cost with vendor-preference & consolidated shipping (priority for Expedited, international otherwise)',
             orderId,
             base_cost: order.base_cost,
             preferred_vendor_id: preferredVendorId || null,
@@ -1655,6 +1803,7 @@ const computeBaseCostForOrder = async (req, res) => {
         return res.status(500).json({ message: 'Compute failed', error: err.message });
     }
 };
+
 
 /**
  * POST body: { limit?: number }

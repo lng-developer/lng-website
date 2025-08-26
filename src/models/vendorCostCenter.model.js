@@ -17,16 +17,22 @@ const vendorCostCenterSchema = new mongoose.Schema({
         economy: { type: Number, require: true },
         additional: { type: Number, require: true }
     },
-    // ✅ NEW: Additional costs cho thêu và in
+    // ✅ NEW: Shipping Priority
+    priority: {
+        economy: { type: Number, default: 0 },
+        additional: { type: Number, default: 0 }
+    },
+    // ✅ Additional costs cho thêu và in
     additional_costs: {
-        embroidery: { type: Number, default: 0 },           // Phí thêu additional
-        two_sided_print: { type: Number, default: 0 },      // Phí in 2 mặt
-        two_position_print: { type: Number, default: 0 }    // Phí in 2 vị trí
+        embroidery: { type: Number, default: 0 },
+        two_sided_print: { type: Number, default: 0 },
+        two_position_print: { type: Number, default: 0 }
     },
     product_type_design: String,
     history: [
         {
             updated_by: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+            updated_at: { type: Date, default: Date.now }
         }
     ],
     status: { type: String, enum: ['Active', 'Inactive'], default: 'Active' }
