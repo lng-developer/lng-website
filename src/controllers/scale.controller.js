@@ -169,7 +169,7 @@ const uploadFulfillmentFileForItem = [
   async (req, res) => {
     try {
       const { orderId, orderItemId } = req.params;
-      const { meta } = req.body; // JSON string ví dụ: [{"position":"front"},{"position":"back"}]
+      const { meta } = req.body; // JSON string: [{"position":"front"},{"position":"back"}]
 
       if (!req.files || req.files.length === 0) {
         return res.status(400).json({ message: 'Missing files' });
@@ -192,15 +192,23 @@ const uploadFulfillmentFileForItem = [
       const item = order.items.find(i => i.orderItemId === orderItemId);
       if (!item) return res.status(404).json({ message: 'Order item not found' });
 
-      // Nếu fulfillment_file chưa có thì khởi tạo
-      if (!item.fulfillment_file) {
-        item.fulfillment_file = {};
+      // --- Đảm bảo fulfillment_file là Map, xử lý dữ liệu cũ ---
+      const ff = item.fulfillment_file;
+      if (!ff) {
+        item.fulfillment_file = new Map();
+      } else if (typeof ff === 'string') {
+        // dữ liệu cũ đang là "", ép về Map rỗng
+        item.fulfillment_file = new Map();
+      } else if (!(ff instanceof Map)) {
+        // nếu là plain object => convert sang Map
+        item.fulfillment_file = new Map(Object.entries(ff));
       }
 
-      // Upload từng file và gán vào key
+      // --- Upload & gán key ---
       for (let i = 0; i < req.files.length; i++) {
         const file = req.files[i];
-        const pos = positions[i].position.toLowerCase();
+        const pos = String(positions[i]?.position || '').trim().toLowerCase();
+        if (!pos) return res.status(400).json({ message: `Missing position for file index ${i}` });
 
         const public_id = `fulfillment_files/${orderId}-${orderItemId}-${pos}`;
         const up = await uploadStreamToCloudinary(file.buffer, { public_id });
@@ -211,11 +219,14 @@ const uploadFulfillmentFileForItem = [
       item.scale_status = 'Pending';
       order.scale_overall_status = computeOverallScaleStatus(order);
 
+      // mark modified cho nested Map trong subdoc
+      item.markModified('fulfillment_file');
+
       await order.save();
 
       return res.json({
         message: 'Uploaded fulfillment files successfully',
-        fulfillment_file: item.fulfillment_file,
+        fulfillment_file: Object.fromEntries(item.fulfillment_file), // trả về dạng object cho dễ đọc
         item_scale_status: item.scale_status,
         order_scale_overall_status: order.scale_overall_status
       });
