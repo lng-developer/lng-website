@@ -23,6 +23,7 @@
     "mongoose": "^8.16.4",
     "morgan": "^1.10.0",
     "multer": "^2.0.1",
+    "sharp": "^0.34.3",
     "streamifier": "^0.1.1",
     "xlsx": "^0.18.5"
   },

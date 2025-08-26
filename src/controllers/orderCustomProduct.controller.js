@@ -6,6 +6,8 @@ const XLSX = require('xlsx');
 const path = require('path');
 const upload = multer({ dest: 'uploads/' });
 const axios = require('axios');
+const sharp = require('sharp');
+const MAX_CLOUDINARY_BYTES = 10 * 1024 * 1024; // 10MB theo plan hiện tại
 const AdmZip = require('adm-zip');
 const streamifier = require('streamifier');
 const cloudinary = require('../utils/cloudinary');
@@ -22,6 +24,7 @@ require('dotenv').config();
 
 const ALLOWED = ["New", "Fulfilled", "Shipped", "Cancelled"];
 const norm = (s) => (ALLOWED.includes(s) ? s : "New");
+
 
 const importOrderJson = async (req, res) => {
     try {
@@ -153,6 +156,25 @@ const validateAddressWithSmarty = async (address) => {
     }
 };
 
+// Helper nén ảnh
+async function compressToUnderLimit(buffer, maxBytes = MAX_CLOUDINARY_BYTES) {
+    const widths = [2200, 2000, 1600];
+    const qualities = [85, 80, 72, 65, 60, 55, 50];
+
+    for (const w of widths) {
+        for (const q of qualities) {
+            const out = await sharp(buffer)
+                .rotate()
+                .resize({ width: w, withoutEnlargement: true })
+                .jpeg({ quality: q, mozjpeg: true })
+                .toBuffer();
+
+            if (out.length <= maxBytes) return out;
+        }
+    }
+    return null;
+}
+
 const updateOrdersFromXlsx = async (req, res) => {
     try {
         const filePath = req.file.path;
@@ -184,6 +206,7 @@ const updateOrdersFromXlsx = async (req, res) => {
 
         const results = [];
 
+        // ==== Flow cập nhật theo ship date ====
         if (type === 'Latest ship date') {
             for (const row of rows) {
                 const orderId = row.amazon_order_id;
@@ -206,7 +229,8 @@ const updateOrdersFromXlsx = async (req, res) => {
                     } else {
                         results.push({ orderId, status: 'skipped - same status' });
                     }
-                    // ✅ Kiểm tra địa chỉ nếu chưa có
+
+                    // Kiểm tra địa chỉ nếu chưa có
                     if (
                         existingOrder.address_validation?.isValid === null &&
                         existingOrder.address_validation?.smartyResponse === null
@@ -312,38 +336,88 @@ const updateOrdersFromXlsx = async (req, res) => {
                 const zipResponse = await axios.get(url, { responseType: 'arraybuffer' });
                 const zip = new AdmZip(Buffer.from(zipResponse.data));
 
-                const imageEntries = zip.getEntries().filter(entry => /\.(jpe?g|png)$/i.test(entry.entryName));
-                const cloudinaryUrls = [];
+                const allEntries = zip.getEntries();
+                const imageEntries = allEntries.filter(entry => /\.(jpe?g|png)$/i.test(entry.entryName));
+                const jsonEntry = allEntries.find(entry => entry.entryName.endsWith('.json'));
 
+                const cloudinaryUrls = [];
+                const skippedSnapshots = [];
+
+                // --- Upload ảnh ---
                 for (const imageEntry of imageEntries) {
-                    const imageBuffer = imageEntry.getData();
-                    const imageName = path.basename(imageEntry.entryName);
-                    const cloudinaryUrl = await uploadToCloudinary(imageBuffer, imageName);
-                    cloudinaryUrls.push(cloudinaryUrl);
+                    try {
+                        const imageBuffer = imageEntry.getData();
+                        const imageName = path.basename(imageEntry.entryName);
+                        let bufferForUpload = imageBuffer;
+
+                        if (bufferForUpload.length > MAX_CLOUDINARY_BYTES) {
+                            const compressed = await compressToUnderLimit(bufferForUpload, MAX_CLOUDINARY_BYTES);
+                            if (!compressed) {
+                                skippedSnapshots.push({ image: imageName, reason: `oversize after compress (${bufferForUpload.length} bytes)` });
+                                continue;
+                            }
+                            bufferForUpload = compressed;
+                        }
+
+                        try {
+                            const finalName = bufferForUpload === imageBuffer
+                                ? imageName
+                                : imageName.replace(/\.(png|jpg|jpeg)$/i, '') + '_compressed.jpg';
+
+                            const cloudinaryUrl = await uploadToCloudinary(bufferForUpload, finalName);
+                            cloudinaryUrls.push(cloudinaryUrl);
+                        } catch (e) {
+                            const msg = String(e?.message || '');
+                            if (/File size too large/i.test(msg)) {
+                                try {
+                                    const lastTry = await sharp(bufferForUpload)
+                                        .resize({ width: 1400, withoutEnlargement: true })
+                                        .jpeg({ quality: 50, mozjpeg: true })
+                                        .toBuffer();
+
+                                    if (lastTry.length <= MAX_CLOUDINARY_BYTES) {
+                                        const finalName = imageName.replace(/\.(png|jpg|jpeg)$/i, '') + '_compressed_last.jpg';
+                                        const url = await uploadToCloudinary(lastTry, finalName);
+                                        cloudinaryUrls.push(url);
+                                        continue;
+                                    }
+                                } catch (_) { /* ignore */ }
+
+                                skippedSnapshots.push({ image: imageName, reason: 'cloudinary: file size too large' });
+                                continue;
+                            }
+                            skippedSnapshots.push({ image: imageName, reason: `upload error: ${msg}` });
+                            continue;
+                        }
+                    } catch (innerErr) {
+                        skippedSnapshots.push({
+                            image: imageEntry?.entryName || '<unknown>',
+                            reason: `unexpected: ${innerErr?.message || innerErr}`
+                        });
+                        continue;
+                    }
                 }
 
-                const jsonEntry = zip.getEntries().find(entry => entry.entryName.endsWith('.json'));
+                // --- JSON ---
                 if (!jsonEntry) {
-                    results.push({ orderId, status: 'no JSON in ZIP', snapshots: cloudinaryUrls });
+                    results.push({ orderId, status: 'no JSON in ZIP', snapshots: cloudinaryUrls, skippedSnapshots });
                     continue;
                 }
 
                 const jsonData = JSON.parse(zip.readAsText(jsonEntry));
                 jsonData.cloudinarySnapshots = cloudinaryUrls;
+                jsonData.skippedSnapshots = skippedSnapshots;
 
                 const fakeReq = { body: jsonData };
                 const fakeRes = {
                     status: code => ({
-                        json: msg => {
-                            results.push({
-                                orderId,
-                                status: code,
-                                message: msg?.message || msg,
-                                snapshots: cloudinaryUrls
-                            });
-                            // ✅ NEW: import JSON OK -> cũng đánh dấu tính base cost
-                            if (autoCompute && code === 200) ordersToCompute.add(orderId);
-                        }
+                        json: msg => results.push({
+                            orderId,
+                            status: code,
+                            message: msg?.message || msg,
+                            snapshots: cloudinaryUrls,
+                            skippedSnapshots
+                        })
                     })
                 };
 
