@@ -165,11 +165,26 @@ async function sendOrderToGrablink(order) {
  * - Cập nhật order.scale_overall_status
  */
 const uploadFulfillmentFileForItem = [
-  upload.single('file'),
+  upload.array('files'),
   async (req, res) => {
     try {
       const { orderId, orderItemId } = req.params;
-      if (!req.file) return res.status(400).json({ message: 'Missing file' });
+      const { meta } = req.body; // JSON string ví dụ: [{"position":"front"},{"position":"back"}]
+
+      if (!req.files || req.files.length === 0) {
+        return res.status(400).json({ message: 'Missing files' });
+      }
+
+      let positions = [];
+      try {
+        positions = JSON.parse(meta);
+      } catch (err) {
+        return res.status(400).json({ message: 'Invalid meta JSON' });
+      }
+
+      if (positions.length !== req.files.length) {
+        return res.status(400).json({ message: 'Files count not match positions' });
+      }
 
       const order = await OrderCustomProduct.findOne({ orderId });
       if (!order) return res.status(404).json({ message: 'Order not found' });
@@ -177,18 +192,30 @@ const uploadFulfillmentFileForItem = [
       const item = order.items.find(i => i.orderItemId === orderItemId);
       if (!item) return res.status(404).json({ message: 'Order item not found' });
 
-      const public_id = `fulfillment_files/${orderId}-${orderItemId}`;
-      const up = await uploadStreamToCloudinary(req.file.buffer, { public_id });
+      // Nếu fulfillment_file chưa có thì khởi tạo
+      if (!item.fulfillment_file) {
+        item.fulfillment_file = {};
+      }
 
-      item.fulfillment_file = up.secure_url; // chỉ lưu URL
-      item.scale_status = 'Pending';         // chuyển trạng thái item
+      // Upload từng file và gán vào key
+      for (let i = 0; i < req.files.length; i++) {
+        const file = req.files[i];
+        const pos = positions[i].position.toLowerCase();
+
+        const public_id = `fulfillment_files/${orderId}-${orderItemId}-${pos}`;
+        const up = await uploadStreamToCloudinary(file.buffer, { public_id });
+
+        item.fulfillment_file.set(pos, up.secure_url);
+      }
+
+      item.scale_status = 'Pending';
       order.scale_overall_status = computeOverallScaleStatus(order);
 
       await order.save();
 
       return res.json({
-        message: 'Uploaded fulfillment file successfully',
-        url: up.secure_url,
+        message: 'Uploaded fulfillment files successfully',
+        fulfillment_file: item.fulfillment_file,
         item_scale_status: item.scale_status,
         order_scale_overall_status: order.scale_overall_status
       });
@@ -197,6 +224,8 @@ const uploadFulfillmentFileForItem = [
     }
   }
 ];
+
+
 
 /**
  * Xác nhận scale cho 1 item:

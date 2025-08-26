@@ -118,8 +118,12 @@ const orderItemSchema = new mongoose.Schema({
     snapshotImage: String,
     svgFile: String,
 
-    fulfillment_file: { type: String, default: '' },
-
+    fulfillment_file: {
+        type: Map,
+        of: String,
+        default: {}
+    },
+    
     scale_status: {
         type: String,
         enum: ["Need Scale", "Pending", "Complete", "QC Rejected"],
