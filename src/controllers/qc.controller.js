@@ -29,7 +29,7 @@ const getQCList = async (req, res) => {
 
         // ==== matchStage (Order-level) ====
         const matchStage = {};
-        
+
         // date range
         if (from && to) {
             matchStage.createdAt = { $gte: new Date(from), $lte: new Date(to) };
@@ -53,10 +53,11 @@ const getQCList = async (req, res) => {
                 }
             }
         } else {
-            // Mặc định: chỉ đơn cần QC
-            matchStage.scale_overall_status = 'Pending';
-            needFilterPendingItems = true;
+            // Mặc định: All = Pending + Sent + QC Rejected + Ready + Failed
+            matchStage.scale_overall_status = { $in: ['Pending', 'Sent', 'QC Rejected', 'Ready', 'Failed'] };
+            needFilterPendingItems = false; // không cần lọc item pending riêng
         }
+
 
         // --- search mở rộng ---
         let searchOr = null;
