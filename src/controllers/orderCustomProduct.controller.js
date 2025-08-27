@@ -1214,10 +1214,15 @@ async function tryMatchVendorProduct(pfItem, sizeValue, colorValue) {
 async function listCandidateVendors(pfItems = [], sizeValue, colorValue) {
     const out = new Set();
     for (const it of pfItems) {
-        const vendorId = String(it?.vendor_id || it?.vendor?._id || '');
-        if (!vendorId) continue;
+        const vendorProductId = it?.vendor_product;
+        if (!vendorProductId) continue;
+
         const matched = await tryMatchVendorProduct(it, sizeValue, colorValue);
-        if (matched) out.add(vendorId);
+        if (!matched) continue;
+
+        const vendorId =
+            String(it?.vendor_id || it?.vendor?._id || await getVendorIdByVendorProductId(vendorProductId) || '');
+        if (vendorId) out.add(vendorId);
     }
     return out;
 }
@@ -1234,52 +1239,96 @@ function choosePreferredVendorId(candidateSetsPerItem) {
     return inter.size ? [...inter][0] : null;
 }
 
-/** Chọn vendor_product theo priority; pfItems đã được reorder sẵn nếu cần */
-async function selectBestVendorProduct(pfItems, sizeValue, colorValue) {
-    const sortedItems = pfItems
-        .filter(it => (it.status || '').toLowerCase() === 'active')
-        .sort((a, b) => (a.order || 999) - (b.order || 999));
+/**
+ * Chọn VendorProduct tốt nhất từ pfItems cho 1 item.
+ * - Ưu tiên pfItem status = active (sau đó mới tất cả)
+ * - Nếu có forcedVendorId thì CHỈ xét các pfItems thuộc vendor đó.
+ * - Luôn cố lấy vendorId thật từ VendorProduct khi pfItem không có.
+ */
+async function selectBestVendorProduct(pfItems, sizeValue, colorValue, opts = {}) {
+    const { forcedVendorId = null, strictForcedVendor = true } = opts;
 
-    const itemsToCheck = sortedItems.length > 0
-        ? sortedItems
-        : pfItems.sort((a, b) => (a.order || 999) - (b.order || 999));
+    if (!Array.isArray(pfItems) || pfItems.length === 0) {
+        return { success: false, reason: 'No pfItems provided', checkedItems: [] };
+    }
 
+    // Chuẩn hóa danh sách theo active -> order
+    const byOrder = (a, b) => (a.order || 999) - (b.order || 999);
+    const actives = pfItems.filter(it => String(it.status || '').toLowerCase() === 'active').sort(byOrder);
+    let itemsToCheck = (actives.length ? actives : [...pfItems].sort(byOrder));
+
+    // Map sẵn vendorId cho từng pfItem
+    const resolved = [];
+    for (const it of itemsToCheck) {
+        const vpId = it?.vendor_product;
+        if (!vpId) continue;
+        const vId = String(it?.vendor_id || it?.vendor?._id || (await getVendorIdByVendorProductId(vpId)) || '');
+        resolved.push({ ...it, __vendorId: vId, __vendorProductId: vpId });
+    }
+
+    // Nếu ép vendor: chỉ giữ lại các pfItem cùng vendor
+    if (forcedVendorId) {
+        const filtered = resolved.filter(x => x.__vendorId && String(x.__vendorId) === String(forcedVendorId));
+        if (filtered.length === 0) {
+            // Không có pfItem thuộc vendor bị ép
+            return {
+                success: false,
+                reason: `No pfItems under forced vendor ${forcedVendorId}`,
+                forcedVendorId
+            };
+        }
+        itemsToCheck = filtered;
+    } else {
+        itemsToCheck = resolved;
+    }
+
+    // Tìm cost center khớp size/color
     for (const item of itemsToCheck) {
-        const vendorProductId = item?.vendor_product;
-        if (!vendorProductId) continue;
+        const vendorProductId = item.__vendorProductId;
+        const vendorId = item.__vendorId;
 
         const candidates = await VendorCostCenter.find({
             vendor_product: vendorProductId,
-            status: { $in: ['Active', null] }
+            status: { $in: ['Active', 'active', null] }
         })
             .select('vendor_size vendor_color standard_size standard_color base_cost sku international.economy international.additional additional_costs')
             .lean();
 
         if (!candidates?.length) continue;
 
-        const matched = findBestCostCenter(candidates, sizeValue, colorValue, { strict: true });
+        // strict trước, không được thì thử non-strict
+        let matched = findBestCostCenter(candidates, sizeValue, colorValue, { strict: true });
+        if (!matched) matched = findBestCostCenter(candidates, sizeValue, colorValue, { strict: false });
+
         if (matched && Number(matched?.base_cost || 0) > 0) {
             return {
                 success: true,
-                vendorProductId: String(vendorProductId),
+                vendorProductId,
                 matched,
                 selectedOrder: item.order || 999,
                 itemDisplayName: item.display_name || 'Unknown',
-                vendorId: String(item?.vendor_id || item?.vendor?._id || '')
+                vendorId
             };
         }
     }
 
+    // Không tìm thấy phù hợp
     return {
         success: false,
-        reason: 'No matching vendor product with valid cost center found',
+        reason: forcedVendorId && strictForcedVendor
+            ? `No matching cost center under forced vendor ${forcedVendorId}`
+            : 'No matching vendor product with valid cost center found',
+        forcedVendorId: forcedVendorId || undefined,
         checkedItems: itemsToCheck.map(it => ({
             order: it.order,
             display_name: it.display_name,
-            vendor_product: String(it.vendor_product || '')
+            vendor_product: String(it.__vendorProductId || ''),
+            vendor_id: String(it.__vendorId || '')
         }))
     };
 }
+
+
 
 // ================== HELPER: Lấy phí ship theo shipping_type (với nhiều nhánh fallback & normalize) ==================
 async function resolveShippingRates({
@@ -1415,6 +1464,11 @@ async function resolveShippingRates({
     return { eco: 0, add: 0, profile: 'international', source: 'zero' };
 }
 
+async function getVendorIdByVendorProductId(vendorProductId) {
+    if (!vendorProductId) return null;
+    const vp = await VendorProduct.findById(vendorProductId).select('vendor_id').lean();
+    return vp?.vendor_id ? String(vp.vendor_id) : null;
+}
 
 
 // ================== COMPUTE BASE COST (FULL) ==================
@@ -1472,7 +1526,7 @@ const computeBaseCostForOrder = async (req, res) => {
             }
             // Đặc thù EBM/EBMA
             if (['EBM', 'EBMA'].includes(configCode.toUpperCase()) && pfItems.length > 1) {
-                pfItems = pfItems.slice(1);
+                pfItems = pfItems.slice(2);
             }
 
             preItems.push({ item, sku, configCode, productTypeValue, matchedBy, sizeValue, colorValue, pfItems });
@@ -1484,50 +1538,48 @@ const computeBaseCostForOrder = async (req, res) => {
         const preferredVendorId = choosePreferredVendorId(candidateSetsPerItem) || null;
 
         // ============== PASS 2: Chọn vendor_product & gom nhóm ship (vendor+profile) ==============
-        const groups = new Map(); // key: `${vendorId}::profile=${shipProfile}::eco=${eco}::add=${add}`
+        const groups = new Map();
 
         for (const pre of preItems) {
             const { item, sku, configCode, productTypeValue, matchedBy, sizeValue, colorValue } = pre;
             let { pfItems } = pre;
 
-            if (preferredVendorId) {
-                const pfPreferred = pfItems.filter(it => String(it?.vendor_id || it?.vendor?._id || '') === String(preferredVendorId));
-                const pfOthers = pfItems.filter(it => String(it?.vendor_id || it?.vendor?._id || '') !== String(preferredVendorId));
-                pfItems = [...pfPreferred, ...pfOthers];
-            }
+            // ép vendor nếu có preferredVendorId
+            const vendorSelection = await selectBestVendorProduct(
+                pfItems,
+                sizeValue,
+                colorValue,
+                preferredVendorId
+                    ? { forcedVendorId: preferredVendorId, strictForcedVendor: true }
+                    : {}
+            );
 
-            const vendorSelection = await selectBestVendorProduct(pfItems, sizeValue, colorValue);
             if (!vendorSelection.success) {
                 stagedItems.push({
-                    orderItemId: item.orderItemId, sku, configCode, sizeValue, colorValue,
+                    orderItemId: item.orderItemId,
+                    sku,
+                    configCode,
+                    sizeValue,
+                    colorValue,
                     status: 'failed',
                     reason: vendorSelection.reason,
-                    checkedItems: vendorSelection.checkedItems
+                    checkedItems: vendorSelection.checkedItems,
                 });
                 continue;
             }
 
-            const { vendorProductId, matched, selectedOrder, itemDisplayName } = vendorSelection;
-
-            const vendorId =
-                String(
-                    vendorSelection.vendorId ||
-                    matched?.vendor_id ||
-                    matched?.vendor?._id ||
-                    matched?.vendorId ||
-                    'unknown_vendor'
-                );
+            const { vendorProductId, matched, selectedOrder, itemDisplayName, vendorId } = vendorSelection;
 
             const baseEach = Number(matched?.base_cost || 0);
             const qty = Math.max(1, Number(item.quantity || 1));
 
-            // >>> LẤY PHÍ SHIP THEO shipping_type (có fallback tra DB nếu thiếu priority) <<<
+            // Lấy phí ship
             const rate = await resolveShippingRates({
                 matched,
                 shippingType: shippingTypeForOrder,
                 vendorProductId,
                 sizeValue,
-                colorValue
+                colorValue,
             });
             const eco = Number(rate.eco || 0);
             const add = Number(rate.add || 0);
@@ -1544,7 +1596,10 @@ const computeBaseCostForOrder = async (req, res) => {
             if (['EBM', 'EBMA'].includes(configCode.toUpperCase())) {
                 additionalCosts.embroidery = Number(matched?.additional_costs?.embroidery || 0);
             }
-            const totalAdditionalCost = additionalCosts.embroidery + additionalCosts.two_sided_print + additionalCosts.two_position_print;
+            const totalAdditionalCost =
+                additionalCosts.embroidery +
+                additionalCosts.two_sided_print +
+                additionalCosts.two_position_print;
 
             const rec = {
                 orderItemId: item.orderItemId,
@@ -1562,17 +1617,22 @@ const computeBaseCostForOrder = async (req, res) => {
                 qty,
                 eco,
                 add,
-                shipProfile, // chỉ dùng trong lúc tính/group
+                shipProfile,
                 matchedSku: matched?.sku || null,
                 additionalCosts,
                 totalAdditionalCost,
-                status: 'ok'
+                status: 'ok',
             };
             stagedItems.push(rec);
 
-            // key group: vendor + profile + rate
+            // group key
             const shippingProfileKey = `${vendorId}::profile=${shipProfile}::eco=${eco}::add=${add}`;
-            const g = groups.get(shippingProfileKey) || { vendorId, shipProfile, items: [], economyMax: 0 };
+            const g = groups.get(shippingProfileKey) || {
+                vendorId,
+                shipProfile,
+                items: [],
+                economyMax: 0,
+            };
             g.items.push({ ...rec });
             g.economyMax = Math.max(g.economyMax, eco);
             groups.set(shippingProfileKey, g);
