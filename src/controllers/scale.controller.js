@@ -465,7 +465,7 @@ const getScaleList = async (req, res) => {
     let needFilterPendingItems = false; // chỉ lọc items Pending khi đang xem Pending
     if (scale_status && String(scale_status).trim() !== '') {
       if (/^all$/i.test(scale_status.trim())) {
-        matchStage.scale_overall_status = { $in: ['Need Scale', 'Pending', 'Sent', 'QC Rejected', 'Ready'] };
+        matchStage.scale_overall_status = { $in: ['Need Scale', 'Pending', 'Sent', 'QC Rejected'] };
       } else {
         const wanted = scale_status.split(',').map(canon).filter(Boolean);
         const valid = wanted.filter(v => KNOWN.includes(v));
@@ -480,7 +480,7 @@ const getScaleList = async (req, res) => {
       }
     } else {
       // Mặc định: All = Pending + Sent + QC Rejected + Ready + Failed
-      matchStage.scale_overall_status = { $in: ['Need Scale', 'Pending', 'Sent', 'QC Rejected', 'Ready'] };
+      matchStage.scale_overall_status = { $in: ['Need Scale', 'Pending', 'Sent', 'QC Rejected'] };
       needFilterPendingItems = false; // không cần lọc item pending riêng
     }
 
@@ -851,7 +851,7 @@ const getScaleStatistics = async (req, res) => {
       };
 
       // Thêm All = tổng Pending + Sent + QC Rejected + Ready
-      counts['All'] = counts['Pending'] + counts['Sent'] + counts['QC Rejected'] + counts['Ready'] + counts['Need Scale'];
+      counts['All'] = counts['Pending'] + counts['Sent'] + counts['QC Rejected'] + counts['Need Scale'];
 
       return counts;
     };
