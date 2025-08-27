@@ -58,62 +58,95 @@ function mapShippingMethod(shipping_type = 'Standard') {
   return 'standard';
 }
 
+
+function buildPrintFiles(ff) {
+  if (!ff) return [];
+
+  // Map internal keys → Grabink keys
+  const keyMap = {
+    front: 'front',
+    back: 'back',
+    left_sleeve: 'sleeve_left',
+    right_sleeve: 'sleeve_right',
+    collar: 'chest_left',   // ⚠️ bạn cần confirm chỗ này: Collar nên map sang chest_left hay chest_right?
+  };
+
+  // Mongoose Map
+  if (ff instanceof Map) {
+    return Array.from(ff.entries())
+      .filter(([, v]) => !!v)
+      .map(([k, v]) => ({
+        key: keyMap[k] || String(k).toLowerCase(),
+        url: String(v),
+      }));
+  }
+
+  // Plain object
+  if (typeof ff === 'object' && !Array.isArray(ff)) {
+    return Object.entries(ff)
+      .filter(([, v]) => !!v)
+      .map(([k, v]) => ({
+        key: keyMap[k] || String(k).toLowerCase(),
+        url: String(v),
+      }));
+  }
+
+  // Legacy string (1 link -> front)
+  if (typeof ff === 'string') {
+    return ff ? [{ key: 'front', url: ff }] : [];
+  }
+
+  return [];
+}
+
+
+
 /**
  * Build payload 1 ĐƠN duy nhất gửi Grablink
  * - Theo mẫu bạn cung cấp
  * - line_items chỉ lấy các item đã Complete để an toàn
  * - variant_id: hiện chưa có numeric mapping -> để null (bạn có thể map từ VendorProduct → variant_id số nếu có bảng mapping)
  */
-function buildGrabinkOrderPayload(order) {
-  const completedItems = (order.items || []).filter(i => i.scale_status === 'Complete');
+function buildGrabinkOrderPayload(orderObj) {
+  const completedItems = (orderObj.items || []).filter(i => i.scale_status === 'Complete');
 
   return {
     api_key: process.env.GRABINK_API_KEY,
     line_items: completedItems.map(item => {
-      // lấy fulfillment_file dạng object
-      const printFiles = [];
-      if (item.fulfillment_file && typeof item.fulfillment_file === 'object') {
-        Object.entries(item.fulfillment_file).forEach(([key, url]) => {
-          if (url) {
-            printFiles.push({ key, url });
-          }
-        });
-      }
-
-      // nếu có svgFile thì thêm
-      if (item.svgFile) {
-        printFiles.push({ key: 'svg', url: item.svgFile });
-      }
+      const printFiles = [
+        ...buildPrintFiles(item.fulfillment_file),
+        ...(item.svgFile ? [{ key: 'svg', url: item.svgFile }] : [])
+      ];
 
       return {
         variant_id: null, // hoặc Number(item.cost_breakdown?.variant_id)
         sku: item.cost_breakdown?.matchedSku,
         product_name: item.cost_breakdown?.itemDisplayName || item.title,
         quantity: item.quantity,
-
         mockup: item.baseImage?.imageUrl || null,
         mockup_back: "",
-
         print_files: printFiles
       };
     }),
 
     is_scan_label: false,
     order_status: 'new',
-    ref_id: order.orderId,
+    ref_id: orderObj.orderId,
     shipping_label: null,
-    shipping_method: mapShippingMethod(order.shipping_type),
+    shipping_method: mapShippingMethod(orderObj.shipping_type),
 
     address: {
-      name: order.customer_infor?.name || '',
-      email: order.customer_infor?.email || '',
-      phone: order.customer_infor?.phone_number || '',
-      country: order.customer_infor?.country === 'US' ? 'United States' : (order.customer_infor?.country || ''),
-      state: order.customer_infor?.state || '',
-      city: order.customer_infor?.city || '',
-      street1: order.customer_infor?.address || '',
-      street2: order.customer_infor?.address_2 || null,
-      zip: order.customer_infor?.zip_code || ''
+      name: orderObj.customer_infor?.name || '',
+      email: orderObj.customer_infor?.email || '',
+      phone: orderObj.customer_infor?.phone_number || '',
+      country: orderObj.customer_infor?.country === 'US'
+        ? 'United States'
+        : (orderObj.customer_infor?.country || ''),
+      state: orderObj.customer_infor?.state || '',
+      city: orderObj.customer_infor?.city || '',
+      street1: orderObj.customer_infor?.address || '',
+      street2: orderObj.customer_infor?.address_2 || null,
+      zip: orderObj.customer_infor?.zip_code || ''
     }
   };
 }
@@ -126,17 +159,27 @@ function buildGrabinkOrderPayload(order) {
  * - Thành công: set sent=true, scale_overall_status='Sent'
  * - Thất bại: ném lỗi để caller xử lý (thường set 'Failed')
  */
-async function sendOrderToGrablink(order) {
-  if (order.grabink_submission?.sent) {
-    return { alreadySent: true, response: order.grabink_submission?.last_response };
+async function sendOrderToGrablink(orderDoc) {
+  if (orderDoc.grabink_submission?.sent) {
+    return { alreadySent: true, response: orderDoc.grabink_submission?.last_response };
   }
 
-  const payload = buildGrabinkOrderPayload(order);
+  // ✨ Quan trọng: convert sang POJO để tránh circular
+  const orderObj = orderDoc.toObject({ getters: false, virtuals: false });
 
-  // Chặn case line_items rỗng (không có item Complete)
+  const payload = buildGrabinkOrderPayload(orderObj);
+
   if (!payload.line_items || payload.line_items.length === 0) {
     const err = new Error('No completed items to send.');
     err.code = 'NO_LINE_ITEMS';
+    throw err;
+  }
+
+  // (tuỳ) nếu yêu cầu phải có print_files:
+  const anyHasPrint = payload.line_items.some(li => Array.isArray(li.print_files) && li.print_files.length > 0);
+  if (!anyHasPrint) {
+    const err = new Error('No print_files found for completed items.');
+    err.code = 'NO_PRINT_FILES';
     throw err;
   }
 
@@ -144,24 +187,23 @@ async function sendOrderToGrablink(order) {
   const headers = { 'Content-Type': 'application/json' };
 
   const resp = await axios.post(endpoint, payload, { headers });
-
-  // Tiêu chí thành công: 2xx
   if (resp.status >= 300) throw new Error(`Grablink responded with status ${resp.status}`);
 
   const externalId = resp.data?.id || resp.data?.orderId || null;
 
-  order.grabink_submission = {
+  orderDoc.grabink_submission = {
     sent: true,
     sent_at: new Date(),
-    attempt_count: (order.grabink_submission?.attempt_count || 0) + 1,
-    last_response: resp.data,
+    attempt_count: (orderDoc.grabink_submission?.attempt_count || 0) + 1,
+    last_response: resp.data, // resp.data là plain JSON
     external_id: externalId
   };
-  order.scale_overall_status = 'Sent';
-  await order.save();
+  orderDoc.scale_overall_status = 'Sent';
+  await orderDoc.save();
 
   return { alreadySent: false, response: resp.data };
 }
+
 
 // ============================
 // Controllers
@@ -276,7 +318,9 @@ const confirmScaleForItem = async (req, res) => {
 
     if (d === 'reject') {
       item.scale_status = 'QC Rejected';
-      item.fulfillment_file = '';   // clear file khi reject
+      // Clear thống nhất theo kiểu Map rỗng:
+      item.fulfillment_file = new Map();
+      item.markModified('fulfillment_file');
       if (note) item.qc_note = note; // lưu note QC
       order.scale_overall_status = 'QC Rejected'; // bất kỳ reject nào thì order cũng QC Rejected
 
