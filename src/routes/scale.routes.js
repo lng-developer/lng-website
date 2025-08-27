@@ -21,4 +21,8 @@ router.post(
 
 router.put('/orders/:orderId/items/:orderItemId/cs-note', scaleController.updateCSNoteForItem);
 
+router.get('/list', scaleController.getScaleList);
+
+router.get('/statistics', scaleController.getScaleStatistics);
+
 module.exports = router;
