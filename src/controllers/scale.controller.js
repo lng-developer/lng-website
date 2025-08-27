@@ -165,9 +165,8 @@ async function sendOrderToGrablink(orderDoc) {
     return { alreadySent: true, response: orderDoc.grabink_submission?.last_response };
   }
 
-  // ✨ Quan trọng: convert sang POJO để tránh circular
+  // Convert sang POJO để build payload, tránh circular
   const orderObj = orderDoc.toObject({ getters: false, virtuals: false });
-
   const payload = buildGrabinkOrderPayload(orderObj);
 
   if (!payload.line_items || payload.line_items.length === 0) {
@@ -176,8 +175,9 @@ async function sendOrderToGrablink(orderDoc) {
     throw err;
   }
 
-  // (tuỳ) nếu yêu cầu phải có print_files:
-  const anyHasPrint = payload.line_items.some(li => Array.isArray(li.print_files) && li.print_files.length > 0);
+  const anyHasPrint = payload.line_items.some(
+    li => Array.isArray(li.print_files) && li.print_files.length > 0
+  );
   if (!anyHasPrint) {
     const err = new Error('No print_files found for completed items.');
     err.code = 'NO_PRINT_FILES';
@@ -192,18 +192,32 @@ async function sendOrderToGrablink(orderDoc) {
 
   const externalId = resp.data?.id || resp.data?.orderId || null;
 
+  // Ghi nhận gửi thành công
   orderDoc.grabink_submission = {
     sent: true,
     sent_at: new Date(),
     attempt_count: (orderDoc.grabink_submission?.attempt_count || 0) + 1,
-    last_response: resp.data, // resp.data là plain JSON
+    last_response: resp.data,
     external_id: externalId
   };
+
+  // Cập nhật trạng thái scale & đơn
   orderDoc.scale_overall_status = 'Sent';
+
+  // >>>>>>>>> ADD: set order.status thành Fulfilled khi gửi thành công
+  orderDoc.status = 'Fulfilled';              // nếu bạn muốn đúng chữ thường: 'fulfilled'
+  orderDoc.fulfilled_at = new Date();         // (tuỳ chọn) ghi lại thời điểm fulfilled
+  // (tuỳ chọn) nếu có field lưu external id chung:
+  if (!orderDoc.external_order_id && externalId) {
+    orderDoc.external_order_id = externalId;
+  }
+  // <<<<<<<<<< END ADD
+
   await orderDoc.save();
 
   return { alreadySent: false, response: resp.data };
 }
+
 
 
 // ============================
@@ -837,7 +851,7 @@ const getScaleStatistics = async (req, res) => {
       };
 
       // Thêm All = tổng Pending + Sent + QC Rejected + Ready
-      counts['All'] = counts['Pending'] + counts['Sent'] + counts['QC Rejected'] + counts['Ready'];
+      counts['All'] = counts['Pending'] + counts['Sent'] + counts['QC Rejected'] + counts['Ready'] + counts['Need Scale'];
 
       return counts;
     };
