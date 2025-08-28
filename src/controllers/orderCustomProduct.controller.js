@@ -1329,6 +1329,57 @@ async function selectBestVendorProduct(pfItems, sizeValue, colorValue, opts = {}
 }
 
 
+// ======== NEW: Build rank cho vendor dựa trên pfItems.order (số nhỏ ưu tiên trước) ========
+async function buildVendorRank(preItems) {
+    const rank = new Map(); // vendorId -> minOrder
+    for (const pre of preItems) {
+        // Đảm bảo mỗi pfItem có __vendorId giống trong selectBestVendorProduct
+        const resolved = [];
+        for (const it of toArray(pre.pfItems)) {
+            const vpId = it?.vendor_product;
+            if (!vpId) continue;
+            const vId = String(
+                it?.vendor_id || it?.vendor?._id || (await getVendorIdByVendorProductId(vpId)) || ''
+            );
+            if (!vId) continue;
+            resolved.push({ ...it, __vendorId: vId, __vendorProductId: vpId });
+        }
+        // Cập nhật rank theo order nhỏ nhất
+        for (const it of resolved) {
+            const o = it.order ?? 999;
+            const key = String(it.__vendorId);
+            rank.set(key, Math.min(rank.get(key) ?? 999, o));
+        }
+    }
+    return rank;
+}
+
+// ======== NEW: Chọn preferred vendor ổn định theo giao & vendor-rank ========
+function choosePreferredVendorIdStable(candidateSetsPerItem, vendorRank) {
+    if (!candidateSetsPerItem.length) return null;
+
+    // Giao tất cả set
+    let inter = new Set(candidateSetsPerItem[0]);
+    for (let i = 1; i < candidateSetsPerItem.length; i++) {
+        const cur = candidateSetsPerItem[i];
+        inter = new Set([...inter].filter(v => cur.has(v)));
+        if (inter.size === 0) break;
+    }
+    if (!inter.size) return null;
+
+    // Chọn vendor có rank nhỏ nhất (ưu tiên pfItem.order thấp nhất)
+    let best = null;
+    let bestRank = Infinity;
+    for (const vId of inter) {
+        const r = vendorRank.get(String(vId)) ?? 999;
+        if (r < bestRank || (r === bestRank && String(vId) < String(best))) {
+            best = vId;
+            bestRank = r;
+        }
+    }
+    return best;
+}
+
 
 // ================== HELPER: Lấy phí ship theo shipping_type (với nhiều nhánh fallback & normalize) ==================
 async function resolveShippingRates({
@@ -1535,7 +1586,17 @@ const computeBaseCostForOrder = async (req, res) => {
             candidateSetsPerItem.push(vendorSet);
         }
 
-        const preferredVendorId = choosePreferredVendorId(candidateSetsPerItem) || null;
+        // (CODE MỚI) — KHÔNG ÉP vendor nếu đơn chỉ có 1 item.
+        // Nếu có từ 2 item trở lên: giao vendor và chọn theo vendor-rank (pfItems.order)
+        let preferredVendorId = null;
+        if (preItems.length >= 2) {
+            const vendorRank = await buildVendorRank(preItems);
+            preferredVendorId = choosePreferredVendorIdStable(candidateSetsPerItem, vendorRank) || null;
+        }
+
+        // (khuyến nghị) log debug ngắn gọn
+        console.log('[BaseCost] candidates per item:', candidateSetsPerItem.map(s => [...s]));
+        console.log('[BaseCost] preferredVendorId:', preferredVendorId);
 
         // ============== PASS 2: Chọn vendor_product & gom nhóm ship (vendor+profile) ==============
         const groups = new Map();
