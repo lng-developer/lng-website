@@ -1,5 +1,7 @@
+const dotenv = require('dotenv');
+dotenv.config();
 module.exports = {
-    secret: "Khoa bi mat de sinh cuoi access token",
+    secret: process.env.JWT_SECRET,
     jwtExpiration: 86400, //1h
     jwtRefreshExpriration: 86400 //24h
 }
