@@ -3,7 +3,8 @@ const Listing = db.listing
 const XLSX = require('xlsx');
 const fs = require('fs');
 const path = require('path');
-// Lấy danh sách listing (có phân trang + lọc + sort)
+
+// Lấy danh sách listing (có phân trang + lọc + sort + populate tên seller/store)
 const getListings = async (req, res) => {
     try {
         const {
@@ -12,16 +13,16 @@ const getListings = async (req, res) => {
             asinType,
             seller,
             platform,
-            sort = 'createdAt',
+            sort = 'createdAt',   // có thể: createdAt | updatedAt | total_sales | seller_name
             order = 'desc',
             search
         } = req.query;
 
         const filter = {};
-
         if (asinType) filter.asin_type = asinType;
-        if (seller) filter.seller = seller;
+        if (seller) filter.seller = seller;           // ObjectId của User
         if (platform) filter.platform = platform;
+
         if (search) {
             const regex = new RegExp(search, 'i');
             filter.$or = [
@@ -30,16 +31,30 @@ const getListings = async (req, res) => {
             ];
         }
 
-        const skip = (page - 1) * perPage;
+        const skip = (Number(page) - 1) * Number(perPage);
         const total = await Listing.countDocuments(filter);
-        const listings = await Listing.find(filter)
-            .sort({ [sort]: order === 'asc' ? 1 : -1 })
-            .skip(skip)
-            .limit(Number(perPage));
 
-        res.json({ total, listings });
+        // NOTE: dùng populate + lean để trả seller.name nhẹ hơn
+        let listings = await Listing.find(filter)
+            .sort({ [sort === 'seller_name' ? 'createdAt' : sort]: order === 'asc' ? 1 : -1 }) // tạm sort theo createdAt nếu sort=seller_name (sẽ sort lại sau)
+            .skip(skip)
+            .limit(Number(perPage))
+            .populate({ path: 'seller', select: 'full_name' })
+            .populate({ path: 'store', select: 'name' })
+            .lean();
+
+        // Nếu client yêu cầu sort theo seller_name thì sort sau populate
+        if (sort === 'seller_name') {
+            listings.sort((a, b) => {
+                const A = (a.seller_name || '').toString();
+                const B = (b.seller_name || '').toString();
+                return order === 'asc' ? A.localeCompare(B) : B.localeCompare(A);
+            });
+        }
+
+        return res.json({ total, listings });
     } catch (error) {
-        res.status(500).json({ message: 'Error fetching listings', error: error.message });
+        return res.status(500).json({ message: 'Error fetching listings', error: error.message });
     }
 };
 
