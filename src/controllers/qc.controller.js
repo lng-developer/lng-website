@@ -205,7 +205,8 @@ const getQCList = async (req, res) => {
                         vendorProductId,
                         vendorProductDisplayName,
                         sizeValue: item?.cost_breakdown?.sizeValue || null,
-                        colorValue: item?.cost_breakdown?.colorValue || null
+                        colorValue: item?.cost_breakdown?.colorValue || null,
+                        vendorProductSKU: item?.cost_breakdown?.matchedSku
                     },
                     tracking_info: {
                         fulfillment: item?.tracking_info?.fulfillment,
