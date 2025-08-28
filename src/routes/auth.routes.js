@@ -3,7 +3,7 @@ const { login, refreshToken, changePassword } = require('../controllers/auth.con
 const router = express.Router();
 const { authenticateToken } = require('../middlewares/auth.middleware');
 
-router.post('/login', authenticateToken, login);
+router.post('/login', login);
 router.post('/refresh', authenticateToken, refreshToken);
 router.post('/change-password', authenticateToken, changePassword);
 
