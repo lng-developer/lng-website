@@ -2,16 +2,14 @@
 const express = require('express');
 const router = express.Router();
 const ctrl = require('../controllers/configCostCenter.controller');
+const { authenticateToken } = require('../middlewares/auth.middleware');
 
-// Middleware auth/role (nếu có) kẹp vào đây
-
-router.get('/', ctrl.listConfigs);                 // ?page=&perPage=&platform=&status=&search=&product_for_seller=&product_for_seller_name=
-router.get('/:id', ctrl.getConfig);
-
-router.post('/', ctrl.createConfig);
-router.patch('/:id', ctrl.updateConfig);
-router.patch('/:id/status', ctrl.toggleStatus);    // { status: 'Active' | 'Inactive' }
-router.patch('/:id/flags', ctrl.toggleFlags);      // { is_set?: bool, is_pack?: bool }
-router.delete('/:id', ctrl.removeConfig);
+router.get('/', authenticateToken, ctrl.listConfigs);
+router.get('/:id', authenticateToken, ctrl.getConfig);
+router.post('/', authenticateToken, ctrl.createConfig);
+router.patch('/:id', authenticateToken, ctrl.updateConfig);
+router.patch('/:id/status', authenticateToken, ctrl.toggleStatus);
+router.patch('/:id/flags', authenticateToken, ctrl.toggleFlags);
+router.delete('/:id', authenticateToken, ctrl.removeConfig);
 
 module.exports = router;

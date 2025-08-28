@@ -1,17 +1,17 @@
 const express = require('express');
 const router = express.Router();
-
+const { authenticateToken, authorizeRoles } = require('../middlewares/auth.middleware');
 const { accountController } = require('../controllers');
 
 // ROUTES CRUD - ACCOUNT
-router.get('/', accountController.getAllAccounts);
+router.get('/', authenticateToken, authorizeRoles('Admin'), accountController.getAllAccounts);
 
-router.get('/:id', accountController.getAccountById);
+router.get('/:id', authenticateToken, authorizeRoles('Admin'), accountController.getAccountById);
 
-router.post('/', accountController.createAccount);
+router.post('/', authenticateToken, authorizeRoles('Admin'), accountController.createAccount);
 
-router.put('/:id', accountController.updateAccount);
+router.put('/:id', authenticateToken, authorizeRoles('Admin'), accountController.updateAccount);
 
-router.delete('/:id', accountController.deleteAccount);
+router.delete('/:id', authenticateToken, authorizeRoles('Admin'), accountController.deleteAccount);
 
 module.exports = router;
