@@ -109,22 +109,26 @@ function normalizeProviderKey(vendorDoc) {
  * - Nếu nhiều provider khác nhau: ném lỗi có status=409
  */
 async function resolveProviderFromOrder(orderDoc, VendorProductModel) {
-  const ids = new Set();
-  for (const it of (orderDoc.items || [])) {
-    const vid = it?.cost_breakdown?.vendorProductId;
-    if (vid) ids.add(String(vid));
-  }
-
-  if (ids.size === 0) {
-    return { providerKey: null, reasons: ['No vendorProductId found on items'] };
-  }
-
   const idObjs = [];
-  for (const s of ids) {
-    if (require('mongoose').Types.ObjectId.isValid(s)) idObjs.push(new require('mongoose').Types.ObjectId(s));
+
+  for (const it of (orderDoc.items || [])) {
+    const raw = it?.cost_breakdown?.vendorProductId;
+    if (!raw) continue;
+
+    // Nếu đã là ObjectId thì dùng luôn, nếu là string thì validate + new
+    if (typeof raw === 'object' && raw !== null && raw._bsontype === 'ObjectID') {
+      idObjs.push(raw);
+      continue;
+    }
+
+    const s = String(raw);
+    if (mongoose.isValidObjectId(s)) {
+      idObjs.push(new mongoose.Types.ObjectId(s)); // <-- luôn dùng new
+    }
   }
+
   if (idObjs.length === 0) {
-    return { providerKey: null, reasons: ['All vendorProductId are invalid'] };
+    return { providerKey: null, reasons: ['No valid vendorProductId found on items'] };
   }
 
   // Lấy VendorProduct + populate vendor_id
@@ -133,28 +137,28 @@ async function resolveProviderFromOrder(orderDoc, VendorProductModel) {
     .populate({ path: 'vendor_id', select: 'name fulfillment_type status' })
     .lean();
 
-  if (!vps || vps.length === 0) {
+  if (!vps?.length) {
     return { providerKey: null, reasons: ['No VendorProduct matched in DB'] };
   }
 
-  // Gom các provider chuẩn hóa
+  // Gom provider
   const provSet = new Set();
   for (const vp of vps) {
-    const v = vp?.vendor_id;
-    const key = normalizeProviderKey(v);
+    const key = normalizeProviderKey(vp?.vendor_id);
     if (key) provSet.add(key);
+  }
+
+  if (provSet.size > 1) {
+    const many = [...provSet];
+    const err = new Error(`Multiple providers detected in order: ${many.join(', ')}`);
+    err.status = 409;
+    err.code = 'MULTIPLE_VENDORS_IN_ORDER';
+    err.providers = many;
+    throw err;
   }
 
   if (provSet.size === 0) {
     return { providerKey: null, reasons: ['Vendor present but cannot map to a provider'] };
-  }
-  if (provSet.size > 1) {
-    const many = [...provSet].join(', ');
-    const err = new Error(`Multiple providers detected in order: ${many}`);
-    err.status = 409;
-    err.code = 'MULTIPLE_VENDORS_IN_ORDER';
-    err.providers = [...provSet];
-    throw err;
   }
 
   return { providerKey: [...provSet][0], reasons: [] };
