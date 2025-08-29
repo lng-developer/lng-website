@@ -435,7 +435,7 @@ const getScaleList = async (req, res) => {
       perPage = 10,
       from,
       to,
-      scale_status,      // All | Pending | Ready | ...
+      scale_status,
       search,
       shopName
     } = req.query;
@@ -450,10 +450,26 @@ const getScaleList = async (req, res) => {
       return t;
     };
 
-    // 1) Match theo thời gian (chỉ bước này match trực tiếp)
+    // ===== RBAC =====
+    const role = req.user?.role || '';
+    const userId = req.user?.userId || '';
+    const isAdmin = /^admin$/i.test(role);
+    const isSeller = /^seller$/i.test(role);
+
+    if (!isAdmin && !isSeller) {
+      return res.status(403).json({ message: 'Access denied: insufficient permissions' });
+    }
+
+    // 1) Match theo thời gian + seller filter
     const initialMatch = {};
     if (from && to) {
       initialMatch.createdAt = { $gte: new Date(from), $lte: new Date(to) };
+    }
+    if (isSeller) {
+      if (!mongoose.Types.ObjectId.isValid(userId)) {
+        return res.status(400).json({ message: 'Invalid user id in token' });
+      }
+      initialMatch.sellerId = new mongoose.Types.ObjectId(userId);
     }
 
     // 2) Base pipeline
@@ -471,7 +487,7 @@ const getScaleList = async (req, res) => {
       },
       { $unwind: { path: '$shop', preserveNullAndEmptyArrays: true } },
 
-      // ✅ NEW: populate seller từ sellerId
+      // populate seller
       {
         $lookup: {
           from: 'users',
@@ -480,16 +496,14 @@ const getScaleList = async (req, res) => {
           as: 'seller'
         }
       },
-      {
-        $unwind: { path: '$seller', preserveNullAndEmptyArrays: true }
-      },
+      { $unwind: { path: '$seller', preserveNullAndEmptyArrays: true } },
 
-      // Filter shopName (nếu có)
+      // Filter shopName
       ...(shopName && shopName.trim()
         ? [{ $match: { 'shop.name': { $regex: new RegExp(shopName.trim(), 'i') } } }]
         : []),
 
-      // Filter search (nếu có) — thêm tìm theo seller
+      // Filter search (mở rộng thêm seller)
       ...((() => {
         if (!search || !search.trim()) return [];
         const keyword = new RegExp(search.trim(), 'i');
@@ -501,7 +515,6 @@ const getScaleList = async (req, res) => {
               { 'items.orderItemId': keyword },
               { 'customer_infor.email': keyword },
               { 'customer_infor.name': keyword },
-              // ✅ NEW: search theo seller
               { 'seller.full_name': keyword },
               { 'seller.email': keyword }
             ]
@@ -509,7 +522,7 @@ const getScaleList = async (req, res) => {
         }];
       })()),
 
-      // Chuẩn hoá bucket giống statistics
+      // Chuẩn hoá bucket
       {
         $addFields: {
           hasPendingItem: {
@@ -546,7 +559,6 @@ const getScaleList = async (req, res) => {
       pipeline.push({ $match: { overall_status_bucket: { $in: ['Need Scale', 'Pending', 'Sent', 'QC Rejected'] } } });
     }
 
-    // 4) Nếu lọc đúng Pending → yêu cầu hasPendingItem=true
     if (onlyPending) {
       pipeline.push({ $match: { hasPendingItem: true } });
     }
@@ -575,10 +587,9 @@ const getScaleList = async (req, res) => {
     pipeline.push({ $sort: { createdAt: -1 } });
     if (!isAll) pipeline.push({ $skip: skip }, { $limit: limitNum });
 
-    // --- Query ---
     const orders = await OrderCustomProduct.aggregate(pipeline);
 
-    // === Map vendor product name (như cũ) ===
+    // === Map vendor product name (giữ nguyên logic cũ) ===
     const vendorIdSet = new Set();
     for (const o of orders) {
       for (const it of (o.items || [])) {
@@ -612,7 +623,6 @@ const getScaleList = async (req, res) => {
       }
     }
 
-    // --- Shape output ---
     const result = orders.map(order => {
       const items = (order.items || []).map(item => {
         const surfaces = item.version3Data?.customizationInfo?.surfaces || [];
@@ -698,6 +708,7 @@ const getScaleList = async (req, res) => {
 
 
 
+
 // ============================
 // STATISTICS — giữ nguyên chuẩn
 // ============================
@@ -706,9 +717,25 @@ const getScaleStatistics = async (req, res) => {
     const { from, to, search, shopName, breakdown, timeseries = 'false' } = req.query;
     const KNOWN = ['Need Scale', 'Pending', 'Ready', 'Sent', 'Failed', 'QC Rejected'];
 
+    // ===== RBAC =====
+    const role = req.user?.role || '';
+    const userId = req.user?.userId || '';
+    const isAdmin = /^admin$/i.test(role);
+    const isSeller = /^seller$/i.test(role);
+
+    if (!isAdmin && !isSeller) {
+      return res.status(403).json({ message: 'Access denied: insufficient permissions' });
+    }
+
     const matchStage = {};
     if (from && to) {
       matchStage.createdAt = { $gte: new Date(from), $lte: new Date(to) };
+    }
+    if (isSeller) {
+      if (!mongoose.Types.ObjectId.isValid(userId)) {
+        return res.status(400).json({ message: 'Invalid user id in token' });
+      }
+      matchStage.sellerId = new mongoose.Types.ObjectId(userId);
     }
 
     let searchOr = null;
@@ -755,7 +782,7 @@ const getScaleStatistics = async (req, res) => {
       }
     ];
 
-    // Overall counts (Pending chỉ khi có item Pending)
+    // Overall counts (Pending chỉ tính khi có item Pending)
     const overallPipeline = [
       ...basePipeline,
       {
@@ -806,7 +833,7 @@ const getScaleStatistics = async (req, res) => {
         'QC Rejected': c['QC Rejected'] || 0,
         'Other': c['Other'] || 0
       };
-      // All = Need Scale + Pending + Sent + QC Rejected
+      // All = Need Scale + Pending + Sent + QC Rejected (theo quy ước của bạn)
       counts['All'] = counts['Need Scale'] + counts['Pending'] + counts['Sent'] + counts['QC Rejected'];
       return counts;
     };
@@ -816,9 +843,9 @@ const getScaleStatistics = async (req, res) => {
       counts: normalizeCounts(overallRaw?.counts || {})
     };
 
-    // breakdown & timeseries bỏ qua ở đây (giữ code cũ của bạn nếu cần)
-
+    // giữ nguyên nếu bạn chưa cần breakdown/timeseries
     return res.json({ overall, breakdown: [], timeseries: [] });
+
   } catch (error) {
     console.error('❌ getScaleStatistics error:', error);
     return res.status(500).json({
@@ -827,6 +854,7 @@ const getScaleStatistics = async (req, res) => {
     });
   }
 };
+
 
 
 

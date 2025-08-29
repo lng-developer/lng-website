@@ -631,17 +631,40 @@ const getFrontendOrders = async (req, res) => {
             sevenDayAlert,
             platform,
             search,
-            userNull,         // <- dùng để lọc đơn CHƯA có seller
+            userNull,        // chỉ Admin mới được dùng
             noPsd,
             shippingType,
             shopName,
             openCase
         } = req.query;
 
+        // ===== RBAC =====
+        const role = req.user?.role || '';
+        const userId = req.user?.userId || '';
+        const isAdmin = /^admin$/i.test(role);
+        const isSeller = /^seller$/i.test(role);
+
+        if (!isAdmin && !isSeller) {
+            return res.status(403).json({ message: 'Access denied: insufficient permissions' });
+        }
+
         const matchStage = {};
 
+        // Chặn Seller cố tình lọc đơn người khác / đơn chưa có seller
+        if (isSeller) {
+            if (!mongoose.Types.ObjectId.isValid(userId)) {
+                return res.status(400).json({ message: 'Invalid user id in token' });
+            }
+            matchStage.sellerId = new mongoose.Types.ObjectId(userId);
+        } else {
+            // Admin có thể dùng userNull
+            if (userNull === 'true') {
+                matchStage.sellerId = { $in: [null, undefined] };
+            }
+        }
+
         if (statuses && statuses.trim() !== '') {
-            const statusArray = statuses.split(',').filter(s => s.trim());
+            const statusArray = statuses.split(',').map(s => s.trim()).filter(Boolean);
             if (statusArray.length > 0) matchStage.status = { $in: statusArray };
         }
 
@@ -678,11 +701,6 @@ const getFrontendOrders = async (req, res) => {
 
         if (platform) {
             matchStage.platform = platform;
-        }
-
-        // ✅ Sửa: dùng sellerId thay vì userId
-        if (userNull === 'true') {
-            matchStage.sellerId = { $in: [null, undefined] };
         }
 
         if (noPsd === 'true') {
@@ -723,7 +741,7 @@ const getFrontendOrders = async (req, res) => {
                 }
             },
 
-            // ✅ NEW: populate seller (User) để lấy full_name
+            // populate seller
             {
                 $lookup: {
                     from: 'users',
@@ -746,18 +764,17 @@ const getFrontendOrders = async (req, res) => {
         const countResult = await OrderCustomProduct.aggregate(countPipeline);
         const totalCount = countResult[0]?.total || 0;
 
-        const isAll = perPage === 'All';
-        const skip = (parseInt(page) - 1) * parseInt(perPage);
-        const limit = parseInt(perPage);
+        const isAll = String(perPage).toLowerCase() === 'all';
+        const pageNum = parseInt(page, 10) || 1;
+        const limitNum = isAll ? (totalCount || 1) : (parseInt(perPage, 10) || 10);
+        const skip = isAll ? 0 : (pageNum - 1) * limitNum;
 
         pipeline.push({ $sort: { createdAt: -1 } });
-        if (!isAll) {
-            pipeline.push({ $skip: skip }, { $limit: limit });
-        }
+        if (!isAll) pipeline.push({ $skip: skip }, { $limit: limitNum });
 
         const orders = await OrderCustomProduct.aggregate(pipeline);
 
-        // === Thu thập tất cả vendorProductId từ cost_breakdown của items ===
+        // --- map vendor product name (giữ nguyên logic cũ) ---
         const vendorIdSet = new Set();
         for (const o of orders) {
             for (const it of (o.items || [])) {
@@ -766,14 +783,11 @@ const getFrontendOrders = async (req, res) => {
             }
         }
 
-        // === Lấy map: vendorProductId -> "Vendor Name + Product Name" ===
         let vendorFullNameMap = new Map();
         if (vendorIdSet.size > 0) {
             const idObjs = [];
             for (const id of vendorIdSet) {
-                if (mongoose.Types.ObjectId.isValid(id)) {
-                    idObjs.push(new mongoose.Types.ObjectId(id));
-                }
+                if (mongoose.Types.ObjectId.isValid(id)) idObjs.push(new mongoose.Types.ObjectId(id));
             }
 
             if (idObjs.length > 0) {
@@ -821,7 +835,7 @@ const getFrontendOrders = async (req, res) => {
                     customized_url: item.customized_url,
                     cost_center: {
                         vendorProductId,
-                        vendorProductDisplayName,      // "Vendor Name + Product Name"
+                        vendorProductDisplayName,
                         sizeValue: item?.cost_breakdown?.sizeValue || null,
                         colorValue: item?.cost_breakdown?.colorValue || null
                     },
@@ -853,8 +867,6 @@ const getFrontendOrders = async (req, res) => {
                 case: order.case,
                 address_validation: order.address_validation?.isValid,
                 scale_overall_status: order.scale_overall_status,
-
-                // ✅ Trả về seller (nếu có)
                 seller: order.seller
                     ? { _id: order.seller._id, full_name: order.seller.full_name, email: order.seller.email }
                     : null
@@ -864,8 +876,8 @@ const getFrontendOrders = async (req, res) => {
         res.json({
             data: result,
             totalCount,
-            totalPages: isAll ? 1 : Math.ceil(totalCount / limit),
-            currentPage: parseInt(page)
+            totalPages: isAll ? 1 : Math.ceil(totalCount / limitNum),
+            currentPage: pageNum
         });
 
     } catch (error) {
@@ -893,16 +905,36 @@ const getOrderStatistics = async (req, res) => {
             openCase
         } = req.query;
 
+        // ===== RBAC =====
+        const role = req.user?.role || '';
+        const userId = req.user?.userId || '';
+        const isAdmin = /^admin$/i.test(role);
+        const isSeller = /^seller$/i.test(role);
+
+        if (!isAdmin && !isSeller) {
+            return res.status(403).json({ message: 'Access denied: insufficient permissions' });
+        }
+
         const baseFilter = {};
+
+        // Seller chỉ thấy đơn của họ
+        if (isSeller) {
+            if (!mongoose.Types.ObjectId.isValid(userId)) {
+                return res.status(400).json({ message: 'Invalid user id in token' });
+            }
+            baseFilter.sellerId = new mongoose.Types.ObjectId(userId);
+        } else {
+            // Chỉ Admin mới được lọc đơn chưa có seller
+            if (userNull === 'true') {
+                baseFilter.sellerId = { $in: [null, undefined] }; // [Sửa lỗi] trước đây dùng userId
+            }
+        }
 
         if (from && to) {
             if (isNaN(Date.parse(from)) || isNaN(Date.parse(to))) {
                 return res.status(400).json({ message: 'Invalid date format in from or to' });
             }
-            baseFilter.createdAt = {
-                $gte: new Date(from),
-                $lte: new Date(to)
-            };
+            baseFilter.createdAt = { $gte: new Date(from), $lte: new Date(to) };
         }
 
         if (search) {
@@ -913,13 +945,7 @@ const getOrderStatistics = async (req, res) => {
             ];
         }
 
-        if (platform) {
-            baseFilter.platform = platform;
-        }
-
-        if (userNull === 'true') {
-            baseFilter.userId = null;
-        }
+        if (platform) baseFilter.platform = platform;
 
         if (noPsd === 'true') {
             baseFilter['items.snapshotImage'] = { $in: [null, ''] };
@@ -932,14 +958,14 @@ const getOrderStatistics = async (req, res) => {
         if (shippingType && shippingType.trim() !== '') {
             const validShippingTypes = ["Second Day", "Ground", "Overnight", "Economy", "Standard", "Expedited"];
             const types = shippingType.split(',').map(t => t.trim()).filter(t => validShippingTypes.includes(t));
-            if (types.length === 1) {
-                baseFilter.shipping_type = types[0];
-            } else if (types.length > 1) {
-                baseFilter.shipping_type = { $in: types };
-            }
+            if (types.length === 1) baseFilter.shipping_type = types[0];
+            else if (types.length > 1) baseFilter.shipping_type = { $in: types };
         }
 
         if (shopId) {
+            if (!mongoose.Types.ObjectId.isValid(shopId)) {
+                return res.status(400).json({ message: 'Invalid shopId' });
+            }
             baseFilter.shopId = new mongoose.Types.ObjectId(shopId);
         }
 
