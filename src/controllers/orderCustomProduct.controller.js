@@ -16,6 +16,7 @@ const ConfigCostCenter = db.configCostCenter;
 const VendorCostCenter = db.vendorCostCenter;
 const VendorProduct = db.vendorProduct;
 const ConfigOptionMapping = db.configOptionMapping;
+const User = db.user;
 
 
 const mongoose = require('mongoose');
@@ -175,6 +176,50 @@ async function compressToUnderLimit(buffer, maxBytes = MAX_CLOUDINARY_BYTES) {
     return null;
 }
 
+// ============================
+// Helpers: parse MSNV & chọn theo majority
+// ============================
+function extractMSNVFromSKU(sku) {
+    if (!sku || typeof sku !== 'string') return null;
+    const first = sku.split('-')[0]?.trim();
+    if (!first) return null;
+    // Chuẩn hoá: chữ hoa, bỏ khoảng trắng
+    return first.toUpperCase();
+}
+
+/**
+ * Chọn MSNV majority từ một mảng SKU
+ * @param {string[]} skus
+ * @returns {string|null} msnv (chữ hoa) hoặc null
+ */
+function pickMajorityMSNVFromSkus(skus = []) {
+    const counts = new Map();
+    for (const s of skus) {
+        const msnv = extractMSNVFromSKU(s);
+        if (!msnv) continue;
+        counts.set(msnv, (counts.get(msnv) || 0) + 1);
+    }
+    if (!counts.size) return null;
+    // Lấy MSNV có tần suất cao nhất
+    let best = null, bestCnt = -1;
+    for (const [k, v] of counts.entries()) {
+        if (v > bestCnt) { best = k; bestCnt = v; }
+    }
+    return best;
+}
+
+/**
+ * Tìm user._id theo employee_id (case-insensitive)
+ * @param {string} msnv
+ * @returns {Promise<ObjectId|null>}
+ */
+async function findSellerIdByEmployeeId(msnv) {
+    if (!msnv) return null;
+    // Tìm chính xác theo employee_id (không suy diễn)
+    const user = await User.findOne({ employee_id: msnv }).select('_id');
+    return user?._id || null;
+}
+
 const updateOrdersFromXlsx = async (req, res) => {
     try {
         const filePath = req.file.path;
@@ -185,7 +230,16 @@ const updateOrdersFromXlsx = async (req, res) => {
 
         // ✅ NEW: cờ auto compute & tập order cần tính
         const autoCompute = String(req.body?.autoComputeBaseCost ?? 'true') !== 'false';
+        const overrideSeller = String(req.body?.overrideSeller ?? 'false') === 'true'; // ✅ Cho phép ghi đè seller nếu muốn
+
         const ordersToCompute = new Set();
+        const results = [];
+
+        // ✅ NEW: gom SKU theo order để xử lý sellerId cuối cùng theo majority
+        /** @type {Map<string, string[]>} */
+        const orderIdToSkus = new Map();
+        /** @type {Set<string>} */
+        const ordersTouched = new Set();
 
         if (ext === '.txt') {
             const raw = fs.readFileSync(filePath, 'utf8');
@@ -203,8 +257,6 @@ const updateOrdersFromXlsx = async (req, res) => {
         } else {
             return res.status(400).json({ message: 'Only .txt files are supported' });
         }
-
-        const results = [];
 
         // ==== Flow cập nhật theo ship date ====
         if (type === 'Latest ship date') {
@@ -257,6 +309,16 @@ const updateOrdersFromXlsx = async (req, res) => {
             const orderId = row.order_id;
             if (!orderId) continue;
 
+            // đánh dấu order đã chạm
+            ordersTouched.add(orderId);
+
+            // gom sku để xử lý seller cuối cùng
+            if (row.sku) {
+                const arr = orderIdToSkus.get(orderId) || [];
+                arr.push(row.sku);
+                orderIdToSkus.set(orderId, arr);
+            }
+
             const itemData = {
                 orderItemId: row.order_item_id,
                 sku: row.sku,
@@ -292,6 +354,16 @@ const updateOrdersFromXlsx = async (req, res) => {
                 const exists = existing.items.some(i => i.orderItemId === itemData.orderItemId);
                 if (!exists) {
                     existing.items.push(itemData);
+
+                    // ✅ NEW: nếu chưa có sellerId hoặc cho phép override, thử gán theo SKU vừa thêm (tạm thời).
+                    if ((overrideSeller || !existing.sellerId) && itemData.sku) {
+                        const msnv = extractMSNVFromSKU(itemData.sku);
+                        if (msnv) {
+                            const sellerId = await findSellerIdByEmployeeId(msnv);
+                            if (sellerId) existing.sellerId = sellerId;
+                        }
+                    }
+
                     await existing.save();
                     results.push({ orderId, status: 'item added' });
 
@@ -307,7 +379,18 @@ const updateOrdersFromXlsx = async (req, res) => {
                     }
                 }
             } else {
+                // NEW ORDER
                 const newOrder = new OrderCustomProduct({ ...basicData, items: [itemData] });
+
+                // ✅ NEW: gán sellerId ngay nếu tìm được từ SKU
+                if (itemData.sku) {
+                    const msnv = extractMSNVFromSKU(itemData.sku);
+                    if (msnv) {
+                        const sellerId = await findSellerIdByEmployeeId(msnv);
+                        if (sellerId) newOrder.sellerId = sellerId;
+                    }
+                }
+
                 await newOrder.save();
 
                 const validationResult = await validateAddressWithSmarty(basicData.customer_infor);
@@ -427,6 +510,39 @@ const updateOrdersFromXlsx = async (req, res) => {
             }
         }
 
+        // ✅ NEW: SAU KHI IMPORT XONG — chốt sellerId theo majority SKU cho từng order
+        // - Chỉ gán nếu order chưa có sellerId hoặc khi overrideSeller = true
+        const sellerAssignResults = [];
+        for (const oid of ordersTouched) {
+            const skus = orderIdToSkus.get(oid) || [];
+            const msnv = pickMajorityMSNVFromSkus(skus);
+            if (!msnv) {
+                sellerAssignResults.push({ orderId: oid, seller: null, reason: 'no msnv parsed from skus' });
+                continue;
+            }
+
+            const sellerId = await findSellerIdByEmployeeId(msnv);
+            if (!sellerId) {
+                sellerAssignResults.push({ orderId: oid, seller: null, msnv, reason: 'no user match by employee_id' });
+                continue;
+            }
+
+            const orderDoc = await OrderCustomProduct.findOne({ orderId: oid }).select('_id sellerId');
+            if (!orderDoc) {
+                sellerAssignResults.push({ orderId: oid, seller: null, msnv, reason: 'order not found when assigning' });
+                continue;
+            }
+
+            if (orderDoc.sellerId && !overrideSeller) {
+                sellerAssignResults.push({ orderId: oid, seller: String(orderDoc.sellerId), msnv, action: 'kept-existing' });
+                continue;
+            }
+
+            orderDoc.sellerId = sellerId;
+            await orderDoc.save();
+            sellerAssignResults.push({ orderId: oid, seller: String(sellerId), msnv, action: 'assigned' });
+        }
+
         // ✅ NEW: chạy tính base cost cho các order đã gom
         let baseCostResults = [];
         if (autoCompute && ordersToCompute.size > 0) {
@@ -445,10 +561,13 @@ const updateOrdersFromXlsx = async (req, res) => {
             }
         }
 
-        fs.unlinkSync(filePath);
+        // dọn file tạm
+        try { fs.unlinkSync(filePath); } catch (_) { }
+
         return res.json({
             message: 'Batch import completed',
             results,
+            seller_assignment: sellerAssignResults,
             base_cost_auto_computed: autoCompute,
             base_cost_results: baseCostResults
         });
@@ -458,6 +577,7 @@ const updateOrdersFromXlsx = async (req, res) => {
         res.status(500).json({ message: 'Batch import failed', error: error.message });
     }
 };
+
 
 
 const uploadToCloudinary = (buffer, filename) => {
@@ -498,7 +618,6 @@ const getOrderById = async (req, res) => {
     }
 };
 
-// ✅ Updated getFrontendOrders to group multiple items under one orderId
 const getFrontendOrders = async (req, res) => {
     try {
         const {
@@ -512,7 +631,7 @@ const getFrontendOrders = async (req, res) => {
             sevenDayAlert,
             platform,
             search,
-            userNull,
+            userNull,         // <- dùng để lọc đơn CHƯA có seller
             noPsd,
             shippingType,
             shopName,
@@ -533,14 +652,13 @@ const getFrontendOrders = async (req, res) => {
                 { 'customer_infor.name': keyword }
             ];
         }
+
         if (openCase === 'true') {
             matchStage.case = { $exists: true, $not: { $size: 0 } };
         }
+
         if (from && to) {
-            matchStage.createdAt = {
-                $gte: new Date(from),
-                $lte: new Date(to)
-            };
+            matchStage.createdAt = { $gte: new Date(from), $lte: new Date(to) };
         }
 
         if (isNoCostCenter === 'true') {
@@ -562,8 +680,9 @@ const getFrontendOrders = async (req, res) => {
             matchStage.platform = platform;
         }
 
+        // ✅ Sửa: dùng sellerId thay vì userId
         if (userNull === 'true') {
-            matchStage.userId = null;
+            matchStage.sellerId = { $in: [null, undefined] };
         }
 
         if (noPsd === 'true') {
@@ -601,6 +720,22 @@ const getFrontendOrders = async (req, res) => {
                     localField: 'case',
                     foreignField: '_id',
                     as: 'case'
+                }
+            },
+
+            // ✅ NEW: populate seller (User) để lấy full_name
+            {
+                $lookup: {
+                    from: 'users',
+                    localField: 'sellerId',
+                    foreignField: '_id',
+                    as: 'seller'
+                }
+            },
+            {
+                $unwind: {
+                    path: '$seller',
+                    preserveNullAndEmptyArrays: true
                 }
             },
 
@@ -717,7 +852,12 @@ const getFrontendOrders = async (req, res) => {
                 base_cost: order.base_cost,
                 case: order.case,
                 address_validation: order.address_validation?.isValid,
-                scale_overall_status: order.scale_overall_status
+                scale_overall_status: order.scale_overall_status,
+
+                // ✅ Trả về seller (nếu có)
+                seller: order.seller
+                    ? { _id: order.seller._id, full_name: order.seller.full_name, email: order.seller.email }
+                    : null
             };
         });
 
