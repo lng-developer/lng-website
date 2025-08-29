@@ -456,7 +456,7 @@ const getScaleList = async (req, res) => {
       initialMatch.createdAt = { $gte: new Date(from), $lte: new Date(to) };
     }
 
-    // 2) Base pipeline (KHÔNG match trạng thái thô ở đây)
+    // 2) Base pipeline
     const pipeline = [
       { $match: initialMatch },
 
@@ -471,10 +471,25 @@ const getScaleList = async (req, res) => {
       },
       { $unwind: { path: '$shop', preserveNullAndEmptyArrays: true } },
 
-      // Filter shopName & search (nếu có)
+      // ✅ NEW: populate seller từ sellerId
+      {
+        $lookup: {
+          from: 'users',
+          localField: 'sellerId',
+          foreignField: '_id',
+          as: 'seller'
+        }
+      },
+      {
+        $unwind: { path: '$seller', preserveNullAndEmptyArrays: true }
+      },
+
+      // Filter shopName (nếu có)
       ...(shopName && shopName.trim()
         ? [{ $match: { 'shop.name': { $regex: new RegExp(shopName.trim(), 'i') } } }]
         : []),
+
+      // Filter search (nếu có) — thêm tìm theo seller
       ...((() => {
         if (!search || !search.trim()) return [];
         const keyword = new RegExp(search.trim(), 'i');
@@ -485,13 +500,16 @@ const getScaleList = async (req, res) => {
               { 'items.sku': keyword },
               { 'items.orderItemId': keyword },
               { 'customer_infor.email': keyword },
-              { 'customer_infor.name': keyword }
+              { 'customer_infor.name': keyword },
+              // ✅ NEW: search theo seller
+              { 'seller.full_name': keyword },
+              { 'seller.email': keyword }
             ]
           }
         }];
       })()),
 
-      // CHUẨN HOÁ GIỐNG STATISTICS
+      // Chuẩn hoá bucket giống statistics
       {
         $addFields: {
           hasPendingItem: {
@@ -509,7 +527,7 @@ const getScaleList = async (req, res) => {
       }
     ];
 
-    // 3) Áp dụng filter trạng thái TRÊN BUCKET (không dùng raw field nữa)
+    // 3) Áp filter theo bucket
     let onlyPending = false;
     if (scale_status && String(scale_status).trim() !== '') {
       if (/^all$/i.test(scale_status.trim())) {
@@ -521,21 +539,19 @@ const getScaleList = async (req, res) => {
           pipeline.push({ $match: { overall_status_bucket: { $in: valid } } });
           onlyPending = (valid.length === 1 && valid[0] === 'Pending');
         } else {
-          // ép rỗng
           pipeline.push({ $match: { overall_status_bucket: '__NO_MATCH__' } });
         }
       }
     } else {
-      // Mặc định: All = Need Scale + Pending + Sent + QC Rejected (match theo BUCKET)
       pipeline.push({ $match: { overall_status_bucket: { $in: ['Need Scale', 'Pending', 'Sent', 'QC Rejected'] } } });
     }
 
-    // 4) Nếu lọc đúng Pending → yêu cầu hasPendingItem=true (order-level), KHÔNG filter mảng items
+    // 4) Nếu lọc đúng Pending → yêu cầu hasPendingItem=true
     if (onlyPending) {
       pipeline.push({ $match: { hasPendingItem: true } });
     }
 
-    // 5) Join Case (tuỳ nghiệp vụ, không ảnh hưởng đếm)
+    // 5) Join Case
     pipeline.push({
       $lookup: {
         from: 'cases',
@@ -562,7 +578,7 @@ const getScaleList = async (req, res) => {
     // --- Query ---
     const orders = await OrderCustomProduct.aggregate(pipeline);
 
-    // === Map vendor product name (giữ nguyên như bạn) ===
+    // === Map vendor product name (như cũ) ===
     const vendorIdSet = new Set();
     for (const o of orders) {
       for (const it of (o.items || [])) {
@@ -656,7 +672,10 @@ const getScaleList = async (req, res) => {
         base_cost: order.base_cost,
         case: order.case,
         address_validation: order.address_validation?.isValid,
-        scale_overall_status: order.scale_overall_status
+        scale_overall_status: order.scale_overall_status,
+        seller: order.seller
+          ? { _id: order.seller._id, full_name: order.seller.full_name, email: order.seller.email }
+          : null
       };
     });
 
@@ -675,6 +694,7 @@ const getScaleList = async (req, res) => {
     });
   }
 };
+
 
 
 
