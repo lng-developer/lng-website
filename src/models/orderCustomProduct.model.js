@@ -214,6 +214,11 @@ const orderCustomProductSchema = new mongoose.Schema({
         attempt_count: { type: Number, default: 0 },
         last_response: { type: Object, default: null },
         external_id: { type: String, default: null } // [Chưa xác minh]: nếu Grabink trả ID
+    },
+
+    sellerId: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'User'
     }
 });
 
