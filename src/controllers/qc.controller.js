@@ -12,19 +12,18 @@ const getQCList = async (req, res) => {
             from,
             to,
             scale_status,      // filter theo scale_overall_status (order-level)
-            search,            // regex theo orderId (+ mở rộng sku/orderItemId/email/name)
+            search,            // regex theo orderId (+ mở rộng sku/orderItemId/email/name/seller)
             shopName
         } = req.query;
 
         const KNOWN = ['Need Scale', 'Pending', 'Ready', 'Sent', 'Failed', 'QC Rejected'];
 
-        // Map alias từ query về canonical trong DB
         const canon = s => {
             const t = String(s || '').trim();
             if (!t) return '';
-            if (/^complete$/i.test(t)) return 'Ready';                // alias
-            if (/^qc\s*reject(?:ed)?$/i.test(t)) return 'QC Rejected'; // alias
-            return t; // Pending, Sent, Ready, Failed, Need Scale,...
+            if (/^complete$/i.test(t)) return 'Ready';
+            if (/^qc\s*reject(?:ed)?$/i.test(t)) return 'QC Rejected';
+            return t;
         };
 
         // ==== matchStage (Order-level) ====
@@ -45,19 +44,16 @@ const getQCList = async (req, res) => {
                 const valid = wanted.filter(v => KNOWN.includes(v));
                 if (valid.length > 0) {
                     matchStage.scale_overall_status = { $in: valid };
-                    // nếu chỉ xem đúng Pending thì mới lọc items Pending
                     needFilterPendingItems = (valid.length === 1 && valid[0] === 'Pending');
                 } else {
-                    // ép không có kết quả nếu tham số không hợp lệ
                     matchStage.scale_overall_status = { $in: ['__NO_MATCH__'] };
                 }
             }
         } else {
             // Mặc định: All = Pending + Sent + QC Rejected + Ready + Failed
             matchStage.scale_overall_status = { $in: ['Pending', 'Sent', 'QC Rejected', 'Ready', 'Failed'] };
-            needFilterPendingItems = false; // không cần lọc item pending riêng
+            needFilterPendingItems = false;
         }
-
 
         // --- search mở rộng ---
         let searchOr = null;
@@ -68,12 +64,14 @@ const getQCList = async (req, res) => {
                 { 'items.sku': keyword },
                 { 'items.orderItemId': keyword },
                 { 'customer_infor.email': keyword },
-                { 'customer_infor.name': keyword }
+                { 'customer_infor.name': keyword },
+                // ✅ thêm tìm theo seller
+                { 'seller.full_name': keyword },
+                { 'seller.email': keyword }
             ];
         }
 
-        const pipeline = [
-            // 1) Bắt đầu từ Order
+        const basePipeline = [
             { $match: matchStage },
 
             // 2) Join Shop
@@ -86,6 +84,17 @@ const getQCList = async (req, res) => {
                 }
             },
             { $unwind: { path: '$shop', preserveNullAndEmptyArrays: true } },
+
+            // ✅ Join Seller
+            {
+                $lookup: {
+                    from: 'users',
+                    localField: 'sellerId',
+                    foreignField: '_id',
+                    as: 'seller'
+                }
+            },
+            { $unwind: { path: '$seller', preserveNullAndEmptyArrays: true } },
 
             // 3) Filter theo shopName nếu có
             ...(shopName && shopName.trim() !== ''
@@ -106,7 +115,9 @@ const getQCList = async (req, res) => {
             ...(searchOr ? [{ $match: { $or: searchOr } }] : [])
         ];
 
-        // 6) (tùy chọn) Chỉ giữ lại các items có scale_status = "Pending" để QC (khi đang xem Pending)
+        const pipeline = [...basePipeline];
+
+        // 6) (tùy chọn) Chỉ giữ lại items Pending khi đang xem Pending
         if (needFilterPendingItems) {
             pipeline.push({
                 $addFields: {
@@ -119,7 +130,6 @@ const getQCList = async (req, res) => {
                     }
                 }
             });
-            // 7) Đảm bảo đơn còn ít nhất 1 item Pending sau khi filter
             pipeline.push({ $match: { $expr: { $gt: [{ $size: '$items' }, 0] } } });
         }
 
@@ -130,8 +140,8 @@ const getQCList = async (req, res) => {
 
         // --- Paginate ---
         const isAll = String(perPage).toLowerCase() === 'all';
-        const skip = (parseInt(page) - 1) * parseInt(perPage);
-        const limit = parseInt(perPage);
+        const skip = (parseInt(page, 10) - 1) * parseInt(perPage, 10);
+        const limit = parseInt(perPage, 10);
 
         pipeline.push({ $sort: { createdAt: -1 } });
         if (!isAll) pipeline.push({ $skip: skip }, { $limit: limit });
@@ -215,7 +225,7 @@ const getQCList = async (req, res) => {
                         note: item?.tracking_info?.note
                     },
                     fulfillment_file: item.fulfillment_file,
-                    scale_status: item.scale_status, // có thể khác Pending nếu đang lọc trạng thái khác
+                    scale_status: item.scale_status,
                     qc_note: item.qc_note
                 };
             });
@@ -235,15 +245,20 @@ const getQCList = async (req, res) => {
                 base_cost: order.base_cost,
                 case: order.case,
                 address_validation: order.address_validation?.isValid,
-                scale_overall_status: order.scale_overall_status
+                scale_overall_status: order.scale_overall_status,
+
+                // ✅ trả về thông tin seller (nếu có)
+                seller: order.seller
+                    ? { _id: order.seller._id, full_name: order.seller.full_name, email: order.seller.email }
+                    : null
             };
         });
 
         res.json({
             data: result,
             totalCount,
-            totalPages: isAll ? 1 : Math.ceil(totalCount / limit),
-            currentPage: parseInt(page)
+            totalPages: isAll ? 1 : Math.ceil(totalCount / (isAll ? (totalCount || 1) : limit)),
+            currentPage: parseInt(page, 10)
         });
 
     } catch (error) {
@@ -254,6 +269,7 @@ const getQCList = async (req, res) => {
         });
     }
 };
+
 
 
 const getQCStatistics = async (req, res) => {
