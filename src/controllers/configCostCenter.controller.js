@@ -40,9 +40,9 @@ const listConfigs = async (req, res) => {
             is_set,
             is_pack,
             code,
-            product_for_seller,       // filter theo ID
-            product_for_seller_name,  // filter theo tên (populate + match)
-            search,                   // text search các field đã tạo index
+            product_for_seller,
+            product_for_seller_name,
+            search,                   
             sort = '-created_at'
         } = req.query;
 

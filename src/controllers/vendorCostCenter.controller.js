@@ -211,14 +211,15 @@ const importVendorCostCenterFromExcel = async (req, res) => {
             const priority_economy = num(row[14]);
             const priority_additional = num(row[15]);
 
-            if (!vendor_size || !vendor_color) continue;
+            const sizeVal = vendor_size || '';
+            const colorVal = vendor_color || '';
 
             const doc = new VendorCostCenter({
                 vendor_product,
-                vendor_size,
-                vendor_color,
-                standard_size: vendor_size,
-                standard_color: vendor_color,
+                vendor_size: sizeVal,
+                vendor_color: colorVal,
+                standard_size: sizeVal,
+                standard_color: colorVal,
                 sku: product_code,
                 base_cost,
                 dosmetic: { economy: domestic_economy, additional: domestic_additional },
@@ -313,16 +314,18 @@ const bulkUpdateVendorCostCenterFromExcel = async (req, res) => {
             const priority_economy = num(row[14]);
             const priority_additional = num(row[15]);
 
-            if (!vendor_size || !vendor_color) continue;
+            const sizeVal = vendor_size || '';
+            const colorVal = vendor_color || '';
+
 
             const filter = makeFilter(vendor_product, product_code, vendor_size, vendor_color);
 
             const $set = {
                 vendor_product,
-                vendor_size,
-                vendor_color,
-                standard_size: vendor_size,
-                standard_color: vendor_color,
+                vendor_size: sizeVal,
+                vendor_color: colorVal,
+                standard_size: sizeVal,
+                standard_color: colorVal,
                 sku: product_code,
                 base_cost,
                 dosmetic: { economy: domestic_economy, additional: domestic_additional },
