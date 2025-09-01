@@ -1,8 +1,10 @@
 const db = require('../models');
+const multer = require("multer")
 const Listing = db.listing
 const XLSX = require('xlsx');
 const fs = require('fs');
 const path = require('path');
+const { uploadBufferToWasabi, getSignedUrlForKey } = require('../utils/wasabi'); // ✅ đường dẫn từ controllers → utils
 
 // Lấy danh sách listing (có phân trang + lọc + sort + populate tên seller/store)
 const getListings = async (req, res) => {
@@ -73,21 +75,84 @@ const upsertListing = async (req, res) => {
     }
 };
 
-// Gắn PSD
-const updatePSD = async (req, res) => {
+// Multer dùng bộ nhớ (RAM) để giữ file upload
+
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 1024 * 1024 * 1024 }, // 1GB
+  fileFilter: (req, file, cb) => {
+    const ok = file.mimetype === 'image/vnd.adobe.photoshop' || /\.psd$/i.test(file.originalname);
+    if (!ok) return cb(new Error('Chỉ chấp nhận PSD'));
+    cb(null, true);
+  }
+});
+
+
+function buildPsdKeyFromAsin(asin) {
+    const safeAsin = asin.replace(/[^A-Za-z0-9_\-\.]/g, '_');
+    return `psd/${safeAsin}/${asin}.psd`;   // => tên file trên Wasabi = <ASIN>.psd
+}
+
+const updatePSD = [
+    upload.single('file'),
+    async (req, res) => {
+        try {
+            const { asin } = req.params;
+            const { status } = req.body;
+
+            if (!asin) return res.status(400).json({ message: 'Thiếu asin' });
+            if (!req.file?.buffer) return res.status(400).json({ message: 'Thiếu file PSD (field: file)' });
+
+            const key = buildPsdKeyFromAsin(asin); // cố định theo ASIN
+
+            // Upload (overwrite nếu tồn tại)
+            const { url } = await uploadBufferToWasabi(req.file.buffer, {
+                key,
+                contentType: 'image/vnd.adobe.photoshop'
+            });
+
+            const updated = await Listing.findOneAndUpdate(
+                { asin },
+                {
+                    $set: {
+                        asin,
+                        'psd.psd_id': asin,                                     // ✅ trùng ASIN
+                        'psd.url': url,                                         // với bucket private có thể để trống và chỉ dùng signed URL
+                        'psd.status': status === 'Unavailable' ? 'Unavailable' : 'Available',
+                        date_updated: new Date()
+                    }
+                },
+                { upsert: true, new: true, setDefaultsOnInsert: true }
+            );
+
+            return res.json({ message: 'Cập nhật PSD thành công', listing: updated });
+        } catch (err) {
+            console.error('Error updating PSD:', err);
+            return res.status(500).json({ message: 'Error updating PSD', error: err.message });
+        }
+    }
+];
+
+const getPsdSignedUrl = async (req, res) => {
     try {
         const { asin } = req.params;
-        const { psd_id, status } = req.body;
+        const expires = Math.max(60, Math.min(86400, Number(req.query.expires) || 3600)); // 1m–24h
+        const asAttachment = String(req.query.download || '') === '1';
 
-        const updated = await Listing.findOneAndUpdate(
-            { asin },
-            { $set: { 'psd.psd_id': psd_id, 'psd.status': status } },
-            { new: true }
-        );
+        const listing = await Listing.findOne({ asin }).lean();
+        if (!listing) return res.status(404).json({ message: 'Listing không tồn tại' });
 
-        res.json(updated);
+        const key = listing?.psd?.psd_id;
+        if (!key) return res.status(400).json({ message: 'Listing chưa có PSD' });
+
+        // đặt tên file tải về đẹp hơn (nếu có)
+        const filename = `${asin}${path.extname(key) || '.psd'}`;
+
+        const url = await getSignedUrlForKey(key, { expiresIn: expires, asAttachment, filename });
+        return res.json({ asin, key, signed_url: url, expires_in: expires });
     } catch (error) {
-        res.status(500).json({ message: 'Error updating PSD', error: error.message });
+        console.error('Error getPsdSignedUrl:', error);
+        return res.status(500).json({ message: 'Lỗi tạo signed URL', error: error.message });
     }
 };
 
@@ -216,5 +281,6 @@ module.exports = {
     upsertListing,
     updatePSD,
     deleteListing,
-    importListingsFromExcel
+    importListingsFromExcel,
+    getPsdSignedUrl
 };

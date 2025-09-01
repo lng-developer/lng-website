@@ -1,3 +1,4 @@
+// models/listing.js
 const mongoose = require('mongoose');
 
 const listingSchema = new mongoose.Schema({
@@ -14,25 +15,18 @@ const listingSchema = new mongoose.Schema({
     },
 
     psd: {
-        psd_id: String,
+        psd_id: String, // có thể là object key trong S3
+        url: String,    // ✅ link tải PSD
         status: { type: String, enum: ['Available', 'Unavailable'], default: 'Unavailable' }
     },
 
-    store: {
-        type: mongoose.Schema.Types.ObjectId,
-        ref: 'Shop'
-    },
+    store: { type: mongoose.Schema.Types.ObjectId, ref: 'Shop' },
     platform: { type: String, default: 'Amazon' },
-    seller: {
-        type: mongoose.Schema.Types.ObjectId,
-        ref: 'User'
-    },
+    seller: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
 
-    thread_color: String, // e.g. "No config", "Customize Key", ...
-    thread_note: String,  // optional: thêm ghi chú cho thread nếu có
-
+    thread_color: String,
+    thread_note: String,
     asin_type: { type: String, enum: ['PODLovers', 'Normal', 'Outline', 'Style', 'Tool', 'Custom Image', 'Auto Fulfill', 'Other'], default: 'Normal' },
-
     other_config: String,
 }, { timestamps: true });
 

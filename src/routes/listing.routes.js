@@ -10,5 +10,6 @@ router.post('/', authenticateToken, listingController.upsertListing);
 router.patch('/:asin/psd', authenticateToken, listingController.updatePSD);
 router.delete('/:asin', authenticateToken, listingController.deleteListing);
 router.post('/import', authenticateToken, upload.single('file'), listingController.importListingsFromExcel);
+router.get('/:asin/psd-url', authenticateToken, listingController.getPsdSignedUrl);
 
 module.exports = router;
