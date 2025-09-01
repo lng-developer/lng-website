@@ -16,31 +16,39 @@ const s3 = new S3Client({
     credentials: { accessKeyId: WASABI_KEY, secretAccessKey: WASABI_SECRET }
 });
 
-async function uploadBufferToWasabi(buffer, opts = {}) {
-    const { key, contentType = 'application/octet-stream', acl } = opts;
+function buildPsdKeyFromAsin(asin) {
+    const safe = String(asin).replace(/[^A-Za-z0-9_.-]/g, '_');
+    return `psd/${safe}/${asin}.psd`;          // ✅ thống nhất key
+}
+
+async function uploadBufferToWasabi(buffer, { key, contentType = 'application/octet-stream' } = {}) {
     await s3.send(new PutObjectCommand({
-        Bucket: WASABI_BUCKET,
+        Bucket: process.env.WASABI_BUCKET,
         Key: key,
         Body: buffer,
-        ContentType: contentType,
-        ACL: WASABI_PUBLIC ? (acl || 'public-read') : undefined
+        ContentType: contentType
     }));
-    const url = `${WASABI_ENDPOINT.replace('https://', `https://${WASABI_BUCKET}.`)}/${encodeURI(key)}`;
+    const url = `${process.env.WASABI_ENDPOINT.replace('https://', `https://${process.env.WASABI_BUCKET}.`)}/${encodeURI(key)}`;
     return { key, url };
 }
 
-// ✅ ký URL tải xuống cho object private
-async function getSignedUrlForKey(key, { expiresIn = 3600, asAttachment = false, filename } = {}) {
-    const respDisposition = asAttachment
-        ? `attachment${filename ? `; filename="${filename.replace(/"/g, '')}"` : ''}`
-        : undefined;
+async function objectExists(key) {
+    try {
+        await s3.send(new HeadObjectCommand({ Bucket: process.env.WASABI_BUCKET, Key: key }));
+        return true;
+    } catch (e) {
+        if (e.$metadata?.httpStatusCode === 404 || e.name === 'NotFound') return false;
+        throw e;
+    }
+}
 
+async function getSignedUrlForKey(key, { expiresIn = 3600, asAttachment = false, filename } = {}) {
     const cmd = new GetObjectCommand({
-        Bucket: WASABI_BUCKET,
+        Bucket: process.env.WASABI_BUCKET,
         Key: key,
-        ...(respDisposition ? { ResponseContentDisposition: respDisposition } : {})
+        ...(asAttachment ? { ResponseContentDisposition: `attachment${filename ? `; filename="${filename.replace(/"/g, '')}"` : ''}` } : {})
     });
     return await getSignedUrl(s3, cmd, { expiresIn });
 }
 
-module.exports = { s3, uploadBufferToWasabi, getSignedUrlForKey };
+module.exports = { s3, uploadBufferToWasabi, getSignedUrlForKey, objectExists, buildPsdKeyFromAsin };

@@ -1,12 +1,21 @@
+// controllers/listing.controller.js
 const db = require('../models');
-const multer = require("multer")
-const Listing = db.listing
+const multer = require('multer');
+const Listing = db.listing;
 const XLSX = require('xlsx');
 const fs = require('fs');
 const path = require('path');
-const { uploadBufferToWasabi, getSignedUrlForKey } = require('../utils/wasabi'); // ✅ đường dẫn từ controllers → utils
 
-// Lấy danh sách listing (có phân trang + lọc + sort + populate tên seller/store)
+// ✅ dùng các helper từ utils/wasabi
+const {
+    uploadBufferToWasabi,
+    getSignedUrlForKey,
+    buildPsdKeyFromAsin,
+} = require('../utils/wasabi');
+
+// ==============================
+// GET list (paging + filter + sort + populate)
+// ==============================
 const getListings = async (req, res) => {
     try {
         const {
@@ -15,37 +24,32 @@ const getListings = async (req, res) => {
             asinType,
             seller,
             platform,
-            sort = 'createdAt',   // có thể: createdAt | updatedAt | total_sales | seller_name
+            sort = 'createdAt', // createdAt | updatedAt | total_sales | seller_name
             order = 'desc',
-            search
+            search,
         } = req.query;
 
         const filter = {};
         if (asinType) filter.asin_type = asinType;
-        if (seller) filter.seller = seller;           // ObjectId của User
+        if (seller) filter.seller = seller;
         if (platform) filter.platform = platform;
 
         if (search) {
             const regex = new RegExp(search, 'i');
-            filter.$or = [
-                { asin: regex },
-                { 'template.design_product': regex }
-            ];
+            filter.$or = [{ asin: regex }, { 'template.design_product': regex }];
         }
 
         const skip = (Number(page) - 1) * Number(perPage);
         const total = await Listing.countDocuments(filter);
 
-        // NOTE: dùng populate + lean để trả seller.name nhẹ hơn
         let listings = await Listing.find(filter)
-            .sort({ [sort === 'seller_name' ? 'createdAt' : sort]: order === 'asc' ? 1 : -1 }) // tạm sort theo createdAt nếu sort=seller_name (sẽ sort lại sau)
+            .sort({ [sort === 'seller_name' ? 'createdAt' : sort]: order === 'asc' ? 1 : -1 })
             .skip(skip)
             .limit(Number(perPage))
             .populate({ path: 'seller', select: 'full_name' })
             .populate({ path: 'store', select: 'name' })
             .lean();
 
-        // Nếu client yêu cầu sort theo seller_name thì sort sau populate
         if (sort === 'seller_name') {
             listings.sort((a, b) => {
                 const A = (a.seller_name || '').toString();
@@ -60,14 +64,16 @@ const getListings = async (req, res) => {
     }
 };
 
-// Tạo mới hoặc cập nhật listing
+// ==============================
+// Upsert listing
+// ==============================
 const upsertListing = async (req, res) => {
     try {
         const data = req.body;
         const updated = await Listing.findOneAndUpdate(
             { asin: data.asin },
             { $set: data },
-            { upsert: true, new: true }
+            { upsert: true, new: true },
         );
         res.json(updated);
     } catch (error) {
@@ -75,54 +81,52 @@ const upsertListing = async (req, res) => {
     }
 };
 
-// Multer dùng bộ nhớ (RAM) để giữ file upload
-
+// ==============================
+// Multer config (nhận PSD qua RAM)
+// ==============================
 const upload = multer({
-  storage: multer.memoryStorage(),
-  limits: { fileSize: 1024 * 1024 * 1024 }, // 1GB
-  fileFilter: (req, file, cb) => {
-    const ok = file.mimetype === 'image/vnd.adobe.photoshop' || /\.psd$/i.test(file.originalname);
-    if (!ok) return cb(new Error('Chỉ chấp nhận PSD'));
-    cb(null, true);
-  }
+    storage: multer.memoryStorage(),
+    limits: { fileSize: 1024 * 1024 * 1024 }, // 1GB
+    fileFilter: (req, file, cb) => {
+        const ok = file.mimetype === 'image/vnd.adobe.photoshop' || /\.psd$/i.test(file.originalname);
+        if (!ok) return cb(new Error('Chỉ chấp nhận PSD'));
+        cb(null, true);
+    },
 });
 
-
-function buildPsdKeyFromAsin(asin) {
-    const safeAsin = asin.replace(/[^A-Za-z0-9_\-\.]/g, '_');
-    return `psd/${safeAsin}/${asin}.psd`;   // => tên file trên Wasabi = <ASIN>.psd
-}
-
+// ==============================
+// Upload/Update PSD (overwrite theo ASIN)
+// ==============================
 const updatePSD = [
     upload.single('file'),
     async (req, res) => {
         try {
             const { asin } = req.params;
-            const { status } = req.body;
+            const status = (req.body && req.body.status) === 'Unavailable' ? 'Unavailable' : 'Available';
 
             if (!asin) return res.status(400).json({ message: 'Thiếu asin' });
             if (!req.file?.buffer) return res.status(400).json({ message: 'Thiếu file PSD (field: file)' });
 
-            const key = buildPsdKeyFromAsin(asin); // cố định theo ASIN
+            // Key cố định theo ASIN: psd/<ASIN>/<ASIN>.psd
+            const key = buildPsdKeyFromAsin(asin);
 
             // Upload (overwrite nếu tồn tại)
             const { url } = await uploadBufferToWasabi(req.file.buffer, {
                 key,
-                contentType: 'image/vnd.adobe.photoshop'
+                contentType: 'image/vnd.adobe.photoshop',
             });
 
             const updated = await Listing.findOneAndUpdate(
                 { asin },
                 {
                     $set: {
-                        asin,
-                        'psd.psd_id': asin,                                     // ✅ trùng ASIN
-                        'psd.url': url,                                         // với bucket private có thể để trống và chỉ dùng signed URL
-                        'psd.status': status === 'Unavailable' ? 'Unavailable' : 'Available',
-                        date_updated: new Date()
-                    }
+                        'psd.psd_id': asin, // trùng ASIN
+                        'psd.url': url,     // với bucket private, URL này không tải trực tiếp; dùng signed URL để tải
+                        'psd.status': status,
+                        date_updated: new Date(),
+                    },
                 },
-                { upsert: true, new: true, setDefaultsOnInsert: true }
+                { upsert: true, new: true, setDefaultsOnInsert: true },
             );
 
             return res.json({ message: 'Cập nhật PSD thành công', listing: updated });
@@ -130,9 +134,12 @@ const updatePSD = [
             console.error('Error updating PSD:', err);
             return res.status(500).json({ message: 'Error updating PSD', error: err.message });
         }
-    }
+    },
 ];
 
+// ==============================
+// Lấy signed URL để download PSD
+// ==============================
 const getPsdSignedUrl = async (req, res) => {
     try {
         const { asin } = req.params;
@@ -142,13 +149,12 @@ const getPsdSignedUrl = async (req, res) => {
         const listing = await Listing.findOne({ asin }).lean();
         if (!listing) return res.status(404).json({ message: 'Listing không tồn tại' });
 
-        const key = listing?.psd?.psd_id;
-        if (!key) return res.status(400).json({ message: 'Listing chưa có PSD' });
+        // ✅ luôn build key từ ASIN theo quy ước lưu file
+        const key = buildPsdKeyFromAsin(asin);
 
-        // đặt tên file tải về đẹp hơn (nếu có)
         const filename = `${asin}${path.extname(key) || '.psd'}`;
-
         const url = await getSignedUrlForKey(key, { expiresIn: expires, asAttachment, filename });
+
         return res.json({ asin, key, signed_url: url, expires_in: expires });
     } catch (error) {
         console.error('Error getPsdSignedUrl:', error);
@@ -156,7 +162,9 @@ const getPsdSignedUrl = async (req, res) => {
     }
 };
 
-// Xoá listing
+// ==============================
+// Delete listing
+// ==============================
 const deleteListing = async (req, res) => {
     try {
         const { asin } = req.params;
@@ -166,7 +174,10 @@ const deleteListing = async (req, res) => {
         res.status(500).json({ message: 'Error deleting listing', error: error.message });
     }
 };
-// Map giữa field trong MongoDB <=> Tên cột trong Excel
+
+// ==============================
+// Excel import
+// ==============================
 const fieldColumnMapping = {
     asin: 'ASIN',
     product_image: 'Image',
@@ -190,10 +201,7 @@ const fieldColumnMapping = {
     'psd.status': 'PSD Status',
 };
 
-// Trả về tên cột tương ứng trong Excel
-const formatColumnName = (fieldName) => {
-    return fieldColumnMapping[fieldName] || fieldName;
-};
+const formatColumnName = (fieldName) => fieldColumnMapping[fieldName] || fieldName;
 
 const importListingsFromExcel = async (req, res) => {
     try {
@@ -208,38 +216,34 @@ const importListingsFromExcel = async (req, res) => {
             const asin = row[formatColumnName('asin')]?.toString().trim();
             if (!asin) continue;
 
-            const newListing = {
-                asin,
-                template: {},
-                psd: {},
-            };
+            const newListing = { asin, template: {}, psd: {} };
 
-            // Các trường cấp 1
             const topLevelFields = [
-                'product_image', 'total_sales', 'platform',
-                'store', 'seller', 'thread_color', 'thread_note',
-                'asin_type', 'other_config'
+                'product_image',
+                'total_sales',
+                'platform',
+                'store',
+                'seller',
+                'thread_color',
+                'thread_note',
+                'asin_type',
+                'other_config',
             ];
 
-            // Template
             const templateFields = ['style', 'sub_style', 'design_product', 'variant'];
             const psdFields = ['psd_id', 'status'];
 
-            topLevelFields.forEach(field => {
+            topLevelFields.forEach((field) => {
                 const col = formatColumnName(field);
-                if (row[col] !== undefined) {
-                    newListing[field] = row[col];
-                }
+                if (row[col] !== undefined) newListing[field] = row[col];
             });
 
-            templateFields.forEach(field => {
+            templateFields.forEach((field) => {
                 const col = formatColumnName(`template.${field}`);
-                if (row[col] !== undefined) {
-                    newListing.template[field] = row[col];
-                }
+                if (row[col] !== undefined) newListing.template[field] = row[col];
             });
 
-            psdFields.forEach(field => {
+            psdFields.forEach((field) => {
                 const col = formatColumnName(`psd.${field}`);
                 if (row[col] !== undefined) {
                     if (field === 'status') {
@@ -250,7 +254,6 @@ const importListingsFromExcel = async (req, res) => {
                 }
             });
 
-            // Mặc định fallback
             newListing.template.variant ||= 'All';
             newListing.psd.status ||= 'Unavailable';
             newListing.platform ||= 'Amazon';
@@ -275,12 +278,11 @@ const importListingsFromExcel = async (req, res) => {
     }
 };
 
-
 module.exports = {
     getListings,
     upsertListing,
     updatePSD,
     deleteListing,
     importListingsFromExcel,
-    getPsdSignedUrl
+    getPsdSignedUrl,
 };
