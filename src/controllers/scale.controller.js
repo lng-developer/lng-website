@@ -277,40 +277,72 @@ const confirmScaleForItem = async (req, res) => {
   }
 };
 
-const retrySendGrabink = async (req, res) => {
+// Retry gửi đơn sang vendor cụ thể (auto-resolve nếu không truyền provider)
+const retrySendFulfillment = async (req, res) => {
   try {
     const { orderId } = req.params;
-    const provider = (req.query.provider || req.body?.provider || 'grabink'); // default
+    let providerKey = String(req.query.provider || req.body?.provider || '').trim(); // optional
+
     const order = await OrderCustomProduct.findOne({ orderId });
     if (!order) return res.status(404).json({ message: 'Order not found' });
 
+    // 1) Nếu không truyền provider, auto-resolve từ VendorProduct → Vendor
+    if (!providerKey) {
+      try {
+        const resolved = await resolveProviderFromOrder(order, VendorProduct);
+        providerKey = resolved.providerKey || providerKey;
+      } catch (provErr) {
+        // Trường hợp có nhiều vendor trong cùng đơn
+        const status = provErr.status || 409;
+        return res.status(status).json({
+          message: 'Unable to auto-select provider because multiple vendors were detected for this order.',
+          error: provErr.message,
+          providers: provErr.providers || [],
+          hint: 'Please specify "provider" in query/body, e.g., ?provider=grabink or ?provider=merchfox'
+        });
+      }
+    }
+
+    // 2) Fallback nếu vẫn chưa xác định được
+    if (!providerKey) providerKey = 'grabink';
+
+    // 3) Kiểm tra điều kiện retry theo trạng thái tổng
     const okToSend =
       (order.scale_overall_status === 'Ready' || order.scale_overall_status === 'Failed');
-
-    const submissions = order.vendor_submissions || {};
-    const sub = submissions[provider] || (provider === 'grabink' ? order.grabink_submission : null);
-    const alreadySent = !!(sub?.sent);
-
-    if (!okToSend || alreadySent) {
+    if (!okToSend) {
       return res.status(409).json({
-        message: `Order is not ready to send or already sent.`,
+        message: 'Order is not ready to send.',
         scale_overall_status: order.scale_overall_status,
-        alreadySent,
-        provider,
+        provider: providerKey
       });
     }
 
-    const result = await FulfillmentService.send(order, provider);
+    // 4) Idempotency theo provider
+    const submissions = order.vendor_submissions || {};
+    const sub = submissions[providerKey] || (providerKey === 'grabink' ? order.grabink_submission : null);
+    const alreadySent = !!(sub?.sent);
+    if (alreadySent) {
+      return res.status(409).json({
+        message: `Order already sent to ${providerKey}.`,
+        provider: providerKey,
+        last_response: sub?.last_response || null,
+        sent_at: sub?.sent_at || null
+      });
+    }
+
+    // 5) Gửi lại
+    const result = await FulfillmentService.send(order, providerKey);
     return res.json({
-      message: result.alreadySent ? `Order already sent to ${result.vendorKey}.` : `Order sent to ${result.vendorKey}.`,
+      message: result.alreadySent
+        ? `Order already sent to ${result.vendorKey}.`
+        : `Order sent to ${result.vendorKey}.`,
       provider: result.vendorKey,
-      submission_response: result.response,
+      submission_response: result.response
     });
   } catch (err) {
     return res.status(500).json({ message: 'Retry failed', error: err.message });
   }
 };
-
 // ============================
 // LIST — khớp chuẩn STATISTICS
 // ============================
@@ -783,7 +815,7 @@ const updateCSNoteForItem = async (req, res) => {
 module.exports = {
   uploadFulfillmentFileForItem,
   confirmScaleForItem,
-  retrySendGrabink,    // giờ đã hỗ trợ ?provider=
+  retrySendGrabink: retrySendFulfillment,    // giờ đã hỗ trợ ?provider=
   updateCSNoteForItem,
   getScaleList,
   getScaleStatistics,

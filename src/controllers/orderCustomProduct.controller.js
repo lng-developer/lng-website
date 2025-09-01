@@ -2141,7 +2141,10 @@ function computeOrderStatusFromItems(items = []) {
 const updateItemTracking = async (req, res) => {
     try {
         const { orderId, orderItemId } = req.params;
-        let { fulfillment, tracking, status, note } = req.body;
+
+        // ✅ an toàn khi req.body undefined
+        const body = req.body || {};
+        let { fulfillment, tracking, status, note } = body;
 
         // Chuẩn hoá chuỗi
         const tFulfillment = fulfillment !== undefined ? String(fulfillment).trim() : undefined;
@@ -2152,12 +2155,21 @@ const updateItemTracking = async (req, res) => {
             return res.status(400).json({ message: "Invalid status", allowed: ALLOWED });
         }
 
-        // NEW RULE: nếu có tracking (khác rỗng) -> ép status = 'Shipped'
+        // Nếu không có field nào để update -> trả 400 sớm
+        if (
+            tFulfillment === undefined &&
+            tTracking === undefined &&
+            status === undefined &&
+            note === undefined
+        ) {
+            return res.status(400).json({ message: "No updatable fields provided (fulfillment/tracking/status/note)" });
+        }
+
+        // NEW RULE: có tracking -> ép Shipped
         if (tTracking !== undefined && tTracking.length > 0) {
             status = "Shipped";
         }
 
-        // Build $set động
         const $set = {};
         if (tFulfillment !== undefined) $set["items.$[it].tracking_info.fulfillment"] = tFulfillment;
         if (tTracking !== undefined) $set["items.$[it].tracking_info.tracking"] = tTracking;
@@ -2165,25 +2177,16 @@ const updateItemTracking = async (req, res) => {
         if (note !== undefined) $set["items.$[it].tracking_info.note"] = String(note);
         $set["items.$[it].tracking_info.updated_at"] = new Date();
 
-        if (Object.keys($set).length === 0) {
-            return res.status(400).json({ message: "No updatable fields provided" });
-        }
-
-        // Cập nhật item
         const docAfterItemUpdate = await OrderCustomProduct.findOneAndUpdate(
             { orderId },
             { $set },
-            {
-                arrayFilters: [{ "it.orderItemId": orderItemId }],
-                new: true
-            }
+            { arrayFilters: [{ "it.orderItemId": orderItemId }], new: true }
         );
 
         if (!docAfterItemUpdate) {
             return res.status(404).json({ message: "Order not found" });
         }
 
-        // Đồng bộ trạng thái đơn
         const newOrderStatus = computeOrderStatusFromItems(docAfterItemUpdate.items);
         if (newOrderStatus !== docAfterItemUpdate.status) {
             await OrderCustomProduct.updateOne(
@@ -2205,6 +2208,7 @@ const updateItemTracking = async (req, res) => {
         return res.status(500).json({ message: "Update failed", error: err.message });
     }
 };
+
 
 module.exports = {
     importOrderFromFile,
