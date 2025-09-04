@@ -1,5 +1,7 @@
 const express = require("express");
 const router = express.Router();
+const multer = require("multer");
+const upload = multer({ storage: multer.memoryStorage() });
 const {
   authenticateToken,
   authorizeRoles,
@@ -11,7 +13,14 @@ router.get(
   "/",
   authenticateToken,
   authorizeRoles("Admin", "Seller"),
-  reportController.getDailyReport
+  reportController.getReportMatrix
+);
+router.post(
+  "/import-file",
+  // authenticateToken,
+  // authorizeRoles("Admin", "Seller"),
+  upload.single("file"),
+  reportController.importReportFromFile
 );
 
 module.exports = router;
