@@ -17,10 +17,8 @@ const { Schema } = mongoose;
 const ReportDailySchema = new Schema(
   {
     seller: {
-      type: Schema.Types.ObjectId,
-      ref: "User",
-      required: true,
-      index: true,
+      _id: { type: Schema.Types.ObjectId, ref: "User", required: true },
+      full_name: { type: String, required: true },
     },
     day: { type: Date, required: true, index: true }, // ngày (00:00 UTC)
     // số liệu chính để hiển thị như bảng
