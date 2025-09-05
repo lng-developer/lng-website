@@ -14,6 +14,7 @@ const ProductTypeGroup = require("./productTypeGroup.model");
 const ConfigCostCenter = require("./configCostCenter.model");
 const ConfigOptionMapping = require("./configOptionMapping");
 const Report = require("./report.model");
+const Ads = require("./ads.model");
 
 // Cau hinh mongoose dang global
 mongoose.Promise = global.Promise;
@@ -36,6 +37,7 @@ db.productTypeGroup = ProductTypeGroup;
 db.configCostCenter = ConfigCostCenter;
 db.configOptionMapping = ConfigOptionMapping;
 db.Report = Report;
+db.Ads = Ads;
 db.connectDB = async () => {
   await mongoose
     .connect(process.env.MONGO_URI, {

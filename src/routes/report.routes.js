@@ -17,8 +17,8 @@ router.get(
 );
 router.post(
   "/import-file",
-  // authenticateToken,
-  // authorizeRoles("Admin", "Seller"),
+  authenticateToken,
+  authorizeRoles("Admin"),
   upload.single("file"),
   reportController.importReportFromFile
 );

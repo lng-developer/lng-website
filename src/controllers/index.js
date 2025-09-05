@@ -15,6 +15,7 @@ const scaleController = require("./scale.controller");
 const configOptionMapping = require("./configOptionMapping.controller");
 const QCController = require("./qc.controller");
 const reportController = require("./report.controller");
+const adsController = require("./ads.controller");
 
 module.exports = {
   roleController,
@@ -34,4 +35,5 @@ module.exports = {
   configOptionMapping,
   QCController,
   reportController,
+  adsController,
 };

@@ -23,6 +23,7 @@ const {
   scaleRoutes,
   QCRoutes,
   reportRoutes,
+  adsRoutes,
 } = require("./src/routes");
 
 const app = express();
@@ -53,6 +54,7 @@ app.use("/api/scale", scaleRoutes);
 app.use("/api/fulfillment/qc", QCRoutes);
 app.use("/api/mapping", configOptionMappingRoutes);
 app.use("/api/report", reportRoutes);
+app.use("/api/ads", adsRoutes);
 
 // Error Handler
 app.use((err, req, res, next) => {
