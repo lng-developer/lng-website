@@ -353,7 +353,7 @@ const getScaleList = async (req, res) => {
       perPage = 10,
       from,
       to,
-      scale_status,
+      // scale_status,   // ❌ KHÔNG dùng nữa vì ta đã cố định Need Scale tổng thể
       search,
       shopName
     } = req.query;
@@ -378,8 +378,11 @@ const getScaleList = async (req, res) => {
       return res.status(403).json({ message: 'Access denied: insufficient permissions' });
     }
 
-    // 1) Match theo thời gian + seller filter
-    const initialMatch = {};
+    // 1) Match theo thời gian + seller filter + ✅ cố định trạng thái đơn/tổng thể
+    const initialMatch = {
+      status: 'New',                     // ✅ chỉ đơn New
+      scale_overall_status: 'Need Scale' // ✅ và tổng thể Need Scale
+    };
     if (from && to) {
       initialMatch.createdAt = { $gte: new Date(from), $lte: new Date(to) };
     }
@@ -440,7 +443,7 @@ const getScaleList = async (req, res) => {
         }];
       })()),
 
-      // Chuẩn hoá bucket
+      // Chuẩn hoá bucket (giữ để dùng downstream, nhưng ⚠️ KHÔNG còn lọc theo bucket nữa)
       {
         $addFields: {
           hasPendingItem: {
@@ -458,29 +461,8 @@ const getScaleList = async (req, res) => {
       }
     ];
 
-    // 3) Áp filter theo bucket
-    let onlyPending = false;
-    if (scale_status && String(scale_status).trim() !== '') {
-      if (/^all$/i.test(scale_status.trim())) {
-        pipeline.push({ $match: { overall_status_bucket: { $in: ['Need Scale', 'Pending', 'Sent', 'QC Rejected'] } } });
-      } else {
-        const wanted = String(scale_status).split(',').map(canon).filter(Boolean);
-        const valid = wanted.filter(v => KNOWN.includes(v));
-        if (valid.length > 0) {
-          pipeline.push({ $match: { overall_status_bucket: { $in: valid } } });
-          onlyPending = (valid.length === 1 && valid[0] === 'Pending');
-        } else {
-          pipeline.push({ $match: { overall_status_bucket: '__NO_MATCH__' } });
-        }
-      }
-    } else {
-      pipeline.push({ $match: { overall_status_bucket: { $in: ['Need Scale', 'Pending', 'Sent', 'QC Rejected'] } } });
-    }
-
-    if (onlyPending) {
-      pipeline.push({ $match: { hasPendingItem: true } });
-    }
-
+    // ❌ BỎ TOÀN BỘ khối “3) Áp filter theo bucket” trước đây
+    // (vì ta đã cố định Need Scale ở initialMatch)
     // 5) Join Case
     pipeline.push({
       $lookup: {

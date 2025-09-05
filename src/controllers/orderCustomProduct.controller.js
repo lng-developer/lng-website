@@ -241,6 +241,9 @@ const updateOrdersFromXlsx = async (req, res) => {
         /** @type {Set<string>} */
         const ordersTouched = new Set();
 
+        // ✅ NEW: Cache ASIN-to-Listing mapping để tránh query nhiều lần
+        const asinToListingMap = new Map();
+
         if (ext === '.txt') {
             const raw = fs.readFileSync(filePath, 'utf8');
             const delimiter = raw.includes('\t') ? '\t' : ',';
@@ -256,6 +259,26 @@ const updateOrdersFromXlsx = async (req, res) => {
             });
         } else {
             return res.status(400).json({ message: 'Only .txt files are supported' });
+        }
+
+        // ✅ NEW: Pre-fetch all unique ASINs from rows to build cache
+        const uniqueAsins = new Set();
+        for (const row of rows) {
+            const asin = row.asin?.trim();
+            if (asin) uniqueAsins.add(asin);
+        }
+
+        if (uniqueAsins.size > 0) {
+            const listings = await Listing.find({
+                asin: { $in: Array.from(uniqueAsins) }
+            }).select('asin product_image').lean();
+
+            for (const listing of listings) {
+                if (listing.asin && listing.product_image) {
+                    asinToListingMap.set(listing.asin, listing.product_image);
+                }
+            }
+            console.log(`[Import] Found ${asinToListingMap.size} ASIN-Listing matches from ${uniqueAsins.size} unique ASINs`);
         }
 
         // ==== Flow cập nhật theo ship date ====
@@ -319,12 +342,21 @@ const updateOrdersFromXlsx = async (req, res) => {
                 orderIdToSkus.set(orderId, arr);
             }
 
+            // ✅ NEW: Lấy ASIN và tìm base image từ Listing
+            const asin = row.asin?.trim();
+            let baseImageFromListing = null;
+            if (asin && asinToListingMap.has(asin)) {
+                baseImageFromListing = asinToListingMap.get(asin);
+            }
+
             const itemData = {
                 orderItemId: row.order_item_id,
                 sku: row.sku,
                 title: row.product_name,
                 customized_url: row.customized_url,
-                quantity: Number(row.quantity_purchased || 1)
+                quantity: Number(row.quantity_purchased || 1),
+                // ✅ NEW: Thêm ASIN vào itemData
+                asin: asin || null
             };
 
             const basicData = {
@@ -353,6 +385,15 @@ const updateOrdersFromXlsx = async (req, res) => {
             if (existing) {
                 const exists = existing.items.some(i => i.orderItemId === itemData.orderItemId);
                 if (!exists) {
+                    // ✅ NEW: Set base image từ Listing nếu có
+                    if (baseImageFromListing) {
+                        itemData.baseImage = {
+                            imageUrl: baseImageFromListing,
+                            width: null,
+                            height: null
+                        };
+                    }
+
                     existing.items.push(itemData);
 
                     // ✅ NEW: nếu chưa có sellerId hoặc cho phép override, thử gán theo SKU vừa thêm (tạm thời).
@@ -365,12 +406,50 @@ const updateOrdersFromXlsx = async (req, res) => {
                     }
 
                     await existing.save();
-                    results.push({ orderId, status: 'item added' });
+                    results.push({
+                        orderId,
+                        status: 'item added',
+                        baseImageFromListing: !!baseImageFromListing,
+                        asin: asin || null
+                    });
 
                     // ✅ NEW: có thay đổi item -> cần tính base cost
                     if (autoCompute) ordersToCompute.add(orderId);
                 } else {
-                    results.push({ orderId, status: 'item exists' });
+                    // ✅ NEW: Item đã tồn tại, nhưng kiểm tra xem có cần update base image từ Listing không
+                    if (baseImageFromListing) {
+                        const existingItem = existing.items.find(i => i.orderItemId === itemData.orderItemId);
+                        if (existingItem && (!existingItem.baseImage?.imageUrl || existingItem.baseImage.imageUrl === '')) {
+                            existingItem.baseImage = {
+                                imageUrl: baseImageFromListing,
+                                width: existingItem.baseImage?.width || null,
+                                height: existingItem.baseImage?.height || null
+                            };
+                            existingItem.asin = asin;
+                            await existing.save();
+
+                            results.push({
+                                orderId,
+                                status: 'item exists - base image updated from listing',
+                                baseImageFromListing: true,
+                                asin: asin
+                            });
+                        } else {
+                            results.push({
+                                orderId,
+                                status: 'item exists',
+                                baseImageFromListing: false,
+                                asin: asin || null
+                            });
+                        }
+                    } else {
+                        results.push({
+                            orderId,
+                            status: 'item exists',
+                            baseImageFromListing: false,
+                            asin: asin || null
+                        });
+                    }
                     skipProcessingZip = true;
 
                     // ✅ NEW: đơn chưa có base_cost thì tính bù
@@ -380,6 +459,15 @@ const updateOrdersFromXlsx = async (req, res) => {
                 }
             } else {
                 // NEW ORDER
+                // ✅ NEW: Set base image từ Listing nếu có
+                if (baseImageFromListing) {
+                    itemData.baseImage = {
+                        imageUrl: baseImageFromListing,
+                        width: null,
+                        height: null
+                    };
+                }
+
                 const newOrder = new OrderCustomProduct({ ...basicData, items: [itemData] });
 
                 // ✅ NEW: gán sellerId ngay nếu tìm được từ SKU
@@ -400,7 +488,9 @@ const updateOrdersFromXlsx = async (req, res) => {
                 results.push({
                     orderId,
                     status: 'New order created with address check',
-                    addressValid: validationResult.isValid
+                    addressValid: validationResult.isValid,
+                    baseImageFromListing: !!baseImageFromListing,
+                    asin: asin || null
                 });
 
                 // ✅ NEW: đơn mới -> chắc chắn tính base cost
@@ -565,19 +655,19 @@ const updateOrdersFromXlsx = async (req, res) => {
         try { fs.unlinkSync(filePath); } catch (_) { }
 
         return res.json({
-            message: 'Batch import completed',
+            message: 'Batch import completed with ASIN-Listing base image matching',
             results,
             seller_assignment: sellerAssignResults,
             base_cost_auto_computed: autoCompute,
-            base_cost_results: baseCostResults
+            base_cost_results: baseCostResults,
+            asin_listing_matches: asinToListingMap.size
         });
     } catch (error) {
         // đảm bảo xoá file tạm nếu có
         try { if (req?.file?.path) fs.unlinkSync(req.file.path); } catch (_e) { }
         res.status(500).json({ message: 'Batch import failed', error: error.message });
     }
-};
-
+}
 
 
 const uploadToCloudinary = (buffer, filename) => {
@@ -2142,7 +2232,7 @@ const updateItemTracking = async (req, res) => {
     try {
         const { orderId, orderItemId } = req.params;
 
-        // ✅ an toàn khi req.body undefined
+        // an toàn khi req.body undefined
         const body = req.body || {};
         let { fulfillment, tracking, status, note } = body;
 
@@ -2166,16 +2256,23 @@ const updateItemTracking = async (req, res) => {
         }
 
         // NEW RULE: có tracking -> ép Shipped
+        let nextStatus = status;
         if (tTracking !== undefined && tTracking.length > 0) {
-            status = "Shipped";
+            nextStatus = "Shipped";
         }
 
         const $set = {};
         if (tFulfillment !== undefined) $set["items.$[it].tracking_info.fulfillment"] = tFulfillment;
         if (tTracking !== undefined) $set["items.$[it].tracking_info.tracking"] = tTracking;
-        if (status !== undefined) $set["items.$[it].tracking_info.status"] = status;
+        if (nextStatus !== undefined) $set["items.$[it].tracking_info.status"] = nextStatus;
         if (note !== undefined) $set["items.$[it].tracking_info.note"] = String(note);
         $set["items.$[it].tracking_info.updated_at"] = new Date();
+
+        // ⭐ NEW: Nếu Fulfilled/Shipped -> set scale_status=Complete và scale_overall_status=Sent
+        if (nextStatus === "Fulfilled" || nextStatus === "Shipped") {
+            $set["items.$[it].scale_status"] = "Complete";
+            $set["scale_overall_status"] = "Sent";
+        }
 
         const docAfterItemUpdate = await OrderCustomProduct.findOneAndUpdate(
             { orderId },
@@ -2187,6 +2284,7 @@ const updateItemTracking = async (req, res) => {
             return res.status(404).json({ message: "Order not found" });
         }
 
+        // Đồng bộ lại order.status từ items (giữ logic cũ)
         const newOrderStatus = computeOrderStatusFromItems(docAfterItemUpdate.items);
         if (newOrderStatus !== docAfterItemUpdate.status) {
             await OrderCustomProduct.updateOne(
@@ -2198,9 +2296,10 @@ const updateItemTracking = async (req, res) => {
         const updatedItem = (docAfterItemUpdate.items || []).find(i => i.orderItemId === orderItemId);
 
         return res.json({
-            message: "Tracking updated (auto Shipped on tracking) & order status synced",
+            message: "Tracking updated (auto Shipped on tracking), item scaled -> Complete, order scale_overall_status -> Sent, & order status synced",
             orderId: docAfterItemUpdate.orderId,
             orderStatus: newOrderStatus,
+            scale_overall_status: (nextStatus === "Fulfilled" || nextStatus === "Shipped") ? "Sent" : docAfterItemUpdate.scale_overall_status,
             item: updatedItem
         });
     } catch (err) {
