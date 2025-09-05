@@ -611,7 +611,7 @@ const updateOrdersFromXlsx = async (req, res) => {
                 bufferForUpload === imageBuffer
                   ? imageName
                   : imageName.replace(/\.(png|jpg|jpeg)$/i, "") +
-                    "_compressed.jpg";
+                  "_compressed.jpg";
 
               const cloudinaryUrl = await uploadToCloudinary(
                 bufferForUpload,
@@ -777,7 +777,7 @@ const updateOrdersFromXlsx = async (req, res) => {
     // dọn file tạm
     try {
       fs.unlinkSync(filePath);
-    } catch (_) {}
+    } catch (_) { }
 
     return res.json({
       message: "Batch import completed with ASIN-Listing base image matching",
@@ -791,7 +791,7 @@ const updateOrdersFromXlsx = async (req, res) => {
     // đảm bảo xoá file tạm nếu có
     try {
       if (req?.file?.path) fs.unlinkSync(req.file.path);
-    } catch (_e) {}
+    } catch (_e) { }
     res
       .status(500)
       .json({ message: "Batch import failed", error: error.message });
@@ -967,12 +967,12 @@ const getFrontendOrders = async (req, res) => {
 
       ...(shopName && shopName.trim() !== ""
         ? [
-            {
-              $match: {
-                "shop.name": { $regex: new RegExp(shopName.trim(), "i") },
-              },
+          {
+            $match: {
+              "shop.name": { $regex: new RegExp(shopName.trim(), "i") },
             },
-          ]
+          },
+        ]
         : []),
 
       {
@@ -1113,10 +1113,10 @@ const getFrontendOrders = async (req, res) => {
         scale_overall_status: order.scale_overall_status,
         seller: order.seller
           ? {
-              _id: order.seller._id,
-              full_name: order.seller.full_name,
-              email: order.seller.email,
-            }
+            _id: order.seller._id,
+            full_name: order.seller.full_name,
+            email: order.seller.email,
+          }
           : null,
         amazon_finance_total: order.amazon_finance_total,
         amazon_total_quantity: order.amazon_total_quantity,
@@ -1766,9 +1766,9 @@ async function listCandidateVendors(pfItems = [], sizeValue, colorValue) {
 
     const vendorId = String(
       it?.vendor_id ||
-        it?.vendor?._id ||
-        (await getVendorIdByVendorProductId(vendorProductId)) ||
-        ""
+      it?.vendor?._id ||
+      (await getVendorIdByVendorProductId(vendorProductId)) ||
+      ""
     );
     if (vendorId) out.add(vendorId);
   }
@@ -1819,9 +1819,9 @@ async function selectBestVendorProduct(
     if (!vpId) continue;
     const vId = String(
       it?.vendor_id ||
-        it?.vendor?._id ||
-        (await getVendorIdByVendorProductId(vpId)) ||
-        ""
+      it?.vendor?._id ||
+      (await getVendorIdByVendorProductId(vpId)) ||
+      ""
     );
     resolved.push({ ...it, __vendorId: vId, __vendorProductId: vpId });
   }
@@ -1909,9 +1909,9 @@ async function buildVendorRank(preItems) {
       if (!vpId) continue;
       const vId = String(
         it?.vendor_id ||
-          it?.vendor?._id ||
-          (await getVendorIdByVendorProductId(vpId)) ||
-          ""
+        it?.vendor?._id ||
+        (await getVendorIdByVendorProductId(vpId)) ||
+        ""
       );
       if (!vId) continue;
       resolved.push({ ...it, __vendorId: vId, __vendorProductId: vpId });
@@ -2435,7 +2435,7 @@ const computeBaseCostForOrder = async (req, res) => {
           const minus =
             (out.shipping_international_economy || 0) +
             (out.shipping_international_additional_units || 0) *
-              (out.shipping_international_additional_rate || 0);
+            (out.shipping_international_additional_rate || 0);
           out.base_cost_total_for_item_including_shipping = Number(
             (out.base_cost_total_for_item_including_shipping - minus).toFixed(2)
           );
@@ -2463,9 +2463,8 @@ const computeBaseCostForOrder = async (req, res) => {
                 out.base_cost_total_for_item_including_shipping + expensive.eco
               ).toFixed(2)
             );
-            out.formula = `${out.formula || ""} | SPECIAL[${
-              expensive.shipProfile
-            }]: eco(${expensive.eco}) for expensive product`;
+            out.formula = `${out.formula || ""} | SPECIAL[${expensive.shipProfile
+              }]: eco(${expensive.eco}) for expensive product`;
           }
         }
         // additional (1) cho sp "rẻ hơn"
@@ -2481,9 +2480,8 @@ const computeBaseCostForOrder = async (req, res) => {
                 out.base_cost_total_for_item_including_shipping + cheap.add
               ).toFixed(2)
             );
-            out.formula = `${out.formula || ""} | SPECIAL[${
-              cheap.shipProfile
-            }]: add(${cheap.add}) for cheaper product`;
+            out.formula = `${out.formula || ""} | SPECIAL[${cheap.shipProfile
+              }]: add(${cheap.add}) for cheaper product`;
           }
         }
 
@@ -2567,7 +2565,7 @@ const computeBaseCostForOrder = async (req, res) => {
               return (
                 sum +
                 (out.shipping_international_additional_units || 0) *
-                  (out.shipping_international_additional_rate || 0)
+                (out.shipping_international_additional_rate || 0)
               );
             }, 0)
           ).toFixed(2)
@@ -2625,7 +2623,7 @@ const computeBaseCostForOrder = async (req, res) => {
       if (
         it.cost_breakdown &&
         typeof it.cost_breakdown.base_cost_total_for_item_including_shipping ===
-          "number"
+        "number"
       ) {
         orderTotalBaseCost +=
           it.cost_breakdown.base_cost_total_for_item_including_shipping;
