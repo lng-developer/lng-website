@@ -1,44 +1,68 @@
-const db = require('../models');
+const db = require("../models");
 const User = db.user;
 
-
 const getAllUsers = async (req, res) => {
-    const users = await User.find().populate('role_id');
+  const users = await User.find().populate("role_id");
+  res.json(users);
+};
+
+const getAllSeller = async (req, res) => {
+  try {
+    // role_id seller
+    const sellerRoleId = "6881d3fc9307f92c04dd8c8d";
+    const adminRoleId = "6881d3f69307f92c04dd8c8b";
+
+    const users = await User.find({
+      role_id: { $in: [sellerRoleId, adminRoleId] },
+    });
+
     res.json(users);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: "Get users failed", error: err.message });
+  }
 };
 
 const getUserById = async (req, res) => {
-    const user = await User.findById(req.params.id).populate('role_id');
-    res.json(user);
+  const user = await User.findById(req.params.id).populate("role_id");
+  res.json(user);
 };
 
 const createUser = async (req, res) => {
-    try {
-        let data = req.body;
+  try {
+    let data = req.body;
 
-        // Nếu chỉ gửi 1 object, bọc lại thành array để xử lý thống nhất
-        if (!Array.isArray(data)) {
-            data = [data];
-        }
-
-        // Tạo nhiều bản ghi (có thể chỉ là 1 phần tử)
-        const users = await User.insertMany(data);
-
-        res.status(201).json(users);
-    } catch (err) {
-        res.status(400).json({ message: err.message });
+    // Nếu chỉ gửi 1 object, bọc lại thành array để xử lý thống nhất
+    if (!Array.isArray(data)) {
+      data = [data];
     }
+
+    // Tạo nhiều bản ghi (có thể chỉ là 1 phần tử)
+    const users = await User.insertMany(data);
+
+    res.status(201).json(users);
+  } catch (err) {
+    res.status(400).json({ message: err.message });
+  }
 };
 
-
 const updateUser = async (req, res) => {
-    const user = await User.findByIdAndUpdate(req.params.id, req.body, { new: true });
-    res.json(user);
+  const user = await User.findByIdAndUpdate(req.params.id, req.body, {
+    new: true,
+  });
+  res.json(user);
 };
 
 const deleteUser = async (req, res) => {
-    await User.findByIdAndDelete(req.params.id);
-    res.status(204).send();
+  await User.findByIdAndDelete(req.params.id);
+  res.status(204).send();
 };
 
-module.exports = { getAllUsers, getUserById, createUser, updateUser, deleteUser };
+module.exports = {
+  getAllUsers,
+  getUserById,
+  createUser,
+  updateUser,
+  deleteUser,
+  getAllSeller,
+};

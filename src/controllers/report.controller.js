@@ -36,15 +36,18 @@ const importReportFromFile = async (req, res) => {
       bom: true,
       trim: true,
       relax_column_count: true,
+      // Nếu file có các ô chứa JSON: có thể cân nhắc thêm:
+      // quote: false, relax_quotes: true
     }).map(norm);
 
+    // Gom theo orderId
     const bucket = new Map();
 
     for (const r of rows) {
       const orderId = r["amazon-order-id"];
       if (!orderId) continue;
 
-      // qty chỉ để tham khảo (không nhân vào số tiền)
+      // qty chỉ để tham khảo (KHÔNG nhân vào tiền)
       const qty = num(r["quantity"]) || 0;
 
       const itemPrice = num(r["item-price"]);
@@ -53,17 +56,14 @@ const importReportFromFile = async (req, res) => {
       const shippingTax = num(r["shipping-tax"]);
       const discount = num(r["item-promotion-discount"]);
 
-      // fee/revenue TẠI DÒNG (đã là tổng theo qty)
-      const { fee, revenue } = (function compute() {
-        const f = 0.17 * (itemPrice + shippingPrice);
-        const rev =
-          itemPrice + shippingPrice - (itemTax + shippingTax + discount + f);
-        return { fee: f, revenue: rev };
-      })();
+      // Tính fee & revenue theo mỗi dòng (đã là tổng theo qty từ Amazon)
+      const fee = 0.17 * (itemPrice + shippingPrice);
+      const revenue =
+        itemPrice + shippingPrice - (itemTax + shippingTax + discount + fee);
 
       const acc = bucket.get(orderId) || {
         orderId,
-        quantity: 0, // chỉ để lưu tham khảo
+        quantity: 0,
         item_price: 0,
         item_tax: 0,
         shipping_price: 0,
@@ -71,10 +71,9 @@ const importReportFromFile = async (req, res) => {
         item_promotion_discount: 0,
         fee: 0,
         revenue: 0,
-        purchase_date: r["purchase-date"],
+        purchase_date_raw: r["purchase-date"], // giữ để set nếu order chưa có
       };
 
-      // ✅ CHỈ CỘNG DỒN, KHÔNG NHÂN qty
       acc.quantity += qty;
       acc.item_price += itemPrice;
       acc.item_tax += itemTax;
@@ -87,8 +86,9 @@ const importReportFromFile = async (req, res) => {
       bucket.set(orderId, acc);
     }
 
-    // bulk update như cũ
+    // Bulk updates (2 bước)
     const ops = [];
+
     for (const acc of bucket.values()) {
       const amazon_finance_total = {
         item_price: +acc.item_price.toFixed(2),
@@ -101,36 +101,53 @@ const importReportFromFile = async (req, res) => {
         computed_at: new Date(),
       };
 
-      const update = {
-        $set: {
-          amazon_finance_total,
-          amazon_total_quantity: acc.quantity, // tuỳ bạn có muốn lưu hay không
-        },
-      };
-
-      if (acc.purchase_date) {
-        const d = new Date(acc.purchase_date);
-        if (!isNaN(d)) update.$set.purchase_date = d;
-      }
-
+      // (A) Luôn ghi đè amazon_finance_total & amazon_total_quantity
       ops.push({
         updateOne: {
-          filter: {
-            orderId: acc.orderId,
-            amazon_finance_total: { $exists: false },
+          filter: { orderId: acc.orderId }, // ❗️chỉ đơn đã có
+          update: {
+            $set: {
+              amazon_finance_total,
+              amazon_total_quantity: acc.quantity,
+            },
+            $currentDate: { updatedAt: true }, // nếu schema có timestamps
           },
-          update,
-          upsert: false, // đổi true nếu muốn tạo skeleton nếu chưa có
+          upsert: false, // ❗️không tạo mới
         },
       });
+
+      // (B) CHỈ set purchase_date nếu order CHƯA có
+      if (acc.purchase_date_raw) {
+        const d = new Date(acc.purchase_date_raw);
+        if (!isNaN(d)) {
+          ops.push({
+            updateOne: {
+              filter: {
+                orderId: acc.orderId,
+                $or: [
+                  { purchase_date: { $exists: false } },
+                  { purchase_date: null },
+                ],
+              },
+              update: { $set: { purchase_date: d } },
+              upsert: false,
+            },
+          });
+        }
+      }
     }
 
-    if (ops.length) await OrderCustomProduct.bulkWrite(ops, { ordered: false });
+    let bulkResult = null;
+    if (ops.length) {
+      bulkResult = await OrderCustomProduct.bulkWrite(ops, { ordered: false });
+    }
 
     res.json({
-      message: "Imported order totals (no qty multiplication)",
+      message:
+        "Imported: overwrite amazon_finance_total only; purchase_date set-if-missing",
       ordersParsed: bucket.size,
-      ordersUpdated: ops.length,
+      opsCount: ops.length,
+      bulkResult,
     });
   } catch (err) {
     console.error(err);
