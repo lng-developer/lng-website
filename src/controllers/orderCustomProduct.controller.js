@@ -900,6 +900,7 @@ const getFrontendOrders = async (req, res) => {
       matchStage.$or = [
         { orderId: keyword },
         { "customer_infor.name": keyword },
+        { "items.sku": keyword }
       ];
     }
 
@@ -1193,6 +1194,7 @@ const getOrderStatistics = async (req, res) => {
       baseFilter.$or = [
         { orderId: keyword },
         { "customer_infor.name": keyword },
+        { "items.sku": keyword }
       ];
     }
 
