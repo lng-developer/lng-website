@@ -22,5 +22,11 @@ router.post(
   upload.single("file"),
   reportController.importReportFromFile
 );
+router.get(
+  "/order_cost/statistics",
+  authenticateToken,
+  authorizeRoles("Admin", "Seller"),
+  reportController.getOrderCostStatistics
+);
 
 module.exports = router;

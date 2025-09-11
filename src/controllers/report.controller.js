@@ -409,4 +409,222 @@ const getReportMatrix = async (req, res) => {
   }
 };
 
-module.exports = { importReportFromFile, getReportMatrix };
+const getOrderCostStatistics = async (req, res) => {
+  try {
+    const {
+      from,
+      to,
+      search = "",
+      sellerId,
+      shopId,
+      status,
+      sourceType,
+    } = req.query;
+
+    const fromDate = from ? new Date(from) : null;
+    const toDate = to ? new Date(to) : null;
+    if (fromDate) fromDate.setHours(0, 0, 0, 0);
+    if (toDate) toDate.setHours(23, 59, 59, 999);
+
+    const and = [{ amazon_finance_total: { $exists: true } }];
+    if (fromDate && toDate) {
+      and.push(
+        {
+          $expr: {
+            $gte: [{ $ifNull: ["$purchase_date", "$createdAt"] }, fromDate],
+          },
+        },
+        {
+          $expr: {
+            $lte: [{ $ifNull: ["$purchase_date", "$createdAt"] }, toDate],
+          },
+        }
+      );
+    }
+    if (search.trim()) {
+      const rx = new RegExp(search.trim(), "i");
+      and.push({
+        $or: [
+          { orderId: rx },
+          { "items.sku": rx },
+          { "items.asin": rx },
+          { "customer_infor.name": rx },
+        ],
+      });
+    }
+    if (sellerId) and.push({ sellerId });
+    if (shopId) and.push({ shopId });
+    if (status) and.push({ status });
+    if (sourceType) and.push({ source_type: sourceType });
+
+    const match = and.length ? { $and: and } : {};
+    const col = mongoose.connection.collection("ordercustomproducts");
+
+    const pipeline = [
+      { $match: match },
+      {
+        $set: {
+          _rev: {
+            $convert: {
+              input: { $ifNull: ["$amazon_finance_total.revenue", "$revenue"] },
+              to: "double",
+              onError: 0,
+              onNull: 0,
+            },
+          },
+          _fee: {
+            $convert: {
+              input: { $ifNull: ["$amazon_finance_total.fee", "$fee"] },
+              to: "double",
+              onError: 0,
+              onNull: 0,
+            },
+          },
+          _base: {
+            $convert: {
+              input: "$base_cost",
+              to: "double",
+              onError: 0,
+              onNull: 0,
+            },
+          },
+          _op: {
+            $convert: {
+              input: "$amazon_finance_total.opCost",
+              to: "double",
+              onError: 0,
+              onNull: 0,
+            },
+          },
+          _ref: {
+            $convert: {
+              input: "$amazon_finance_total.refund",
+              to: "double",
+              onError: 0,
+              onNull: 0,
+            },
+          },
+          _itax: {
+            $convert: {
+              input: "$amazon_finance_total.item_tax",
+              to: "double",
+              onError: 0,
+              onNull: 0,
+            },
+          },
+          _stax: {
+            $convert: {
+              input: "$amazon_finance_total.shipping_tax",
+              to: "double",
+              onError: 0,
+              onNull: 0,
+            },
+          },
+          _vendor: {
+            $convert: {
+              input: {
+                $ifNull: [
+                  "$vendor_cost",
+                  "$amazon_finance_total.shipping_price",
+                ],
+              },
+              to: "double",
+              onError: 0,
+              onNull: 0,
+            },
+          },
+          // 👇 NEW: lấy item_promotion_discount để làm diff
+          _promo: {
+            $convert: {
+              input: "$amazon_finance_total.item_promotion_discount",
+              to: "double",
+              onError: 0,
+              onNull: 0,
+            },
+          },
+        },
+      },
+      {
+        $set: {
+          profit1: {
+            $round: [
+              { $subtract: ["$_rev", { $add: ["$_base", "$_fee"] }] },
+              2,
+            ],
+          },
+          profit2: {
+            $round: [
+              {
+                $subtract: [
+                  "$_rev",
+                  { $add: ["$_base", "$_fee", "$_op", "$_ref"] },
+                ],
+              },
+              2,
+            ],
+          },
+          taxLine: { $add: ["$_itax", "$_stax"] },
+        },
+      },
+      {
+        $group: {
+          _id: null,
+          orders: { $sum: 1 },
+          revenue: { $sum: "$_rev" },
+          profit: { $sum: "$profit1" },
+          lngCost: { $sum: "$_op" },
+          vendorCost: { $sum: "$_vendor" },
+          refund: { $sum: "$_ref" },
+          tax: { $sum: "$taxLine" },
+          // 👇 NEW: tổng promotion
+          promo: { $sum: "$_promo" },
+          // optional
+          baseCost: { $sum: "$_base" },
+          fee: { $sum: "$_fee" },
+          profit2: { $sum: "$profit2" },
+        },
+      },
+      {
+        $project: {
+          _id: 0,
+          orders: 1,
+          revenue: { $round: ["$revenue", 2] },
+          profit: { $round: ["$profit", 2] },
+          lngCost: { $round: ["$lngCost", 2] },
+          vendorCost: { $round: ["$vendorCost", 2] },
+          // 👇 NEW: diff = tổng item_promotion_discount
+          diff: { $round: ["$promo", 2] },
+          refund: { $round: ["$refund", 2] },
+          tax: { $round: ["$tax", 2] },
+          baseCost: { $round: ["$baseCost", 2] },
+          fee: { $round: ["$fee", 2] },
+          profit2: { $round: ["$profit2", 2] },
+        },
+      },
+    ];
+
+    const [
+      stats = {
+        orders: 0,
+        revenue: 0,
+        profit: 0,
+        lngCost: 0,
+        vendorCost: 0,
+        diff: 0,
+        refund: 0,
+        tax: 0,
+      },
+    ] = await col.aggregate(pipeline, { allowDiskUse: true }).toArray();
+
+    res.json(stats);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ ok: false, message: "Failed to compute stats" });
+  }
+};
+
+module.exports = {
+  importReportFromFile,
+  getReportMatrix,
+  getOrderCostStatistics,
+};

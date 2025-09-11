@@ -173,7 +173,11 @@ const amazonFinanceTotalSchema = new mongoose.Schema(
 
     // Theo công thức bạn dùng khi import: fee = 17% * (item_price + shipping_price)
     fee: { type: Number, default: 0 }, // tổng fee 17%
-    revenue: { type: Number, default: 0 }, // tổng revenue đã tính
+    revenue: { type: Number, default: 0 },
+    opCost: { type: Number, default: 0 },
+    refund: { type: Number, default: 0 },
+    profit1: { type: Number, default: 0 },
+    profit2: { type: Number, default: 0 }, // tổng revenue đã tính
 
     currency: { type: String, default: "USD" }, // nếu muốn lưu
     computed_at: { type: Date, default: null }, // thời điểm tính
