@@ -923,7 +923,7 @@ const uploadToCloudinary = (buffer, filename) => {
 
 const getAllOrders = async (req, res) => {
   try {
-    const orders = await OrderCustomProduct.find().sort({ createdAt: -1 });
+    const orders = await OrderCustomProduct.find().sort({ purchase_date: -1 });
     res.json(orders);
   } catch (error) {
     res
@@ -1016,7 +1016,7 @@ const getFrontendOrders = async (req, res) => {
     }
 
     if (from && to) {
-      matchStage.createdAt = { $gte: new Date(from), $lte: new Date(to) };
+      matchStage.purchase_date = { $gte: new Date(from), $lte: new Date(to) };
     }
 
     if (isNoCostCenter === "true") {
@@ -1120,7 +1120,7 @@ const getFrontendOrders = async (req, res) => {
     const limitNum = isAll ? totalCount || 1 : parseInt(perPage, 10) || 10;
     const skip = isAll ? 0 : (pageNum - 1) * limitNum;
 
-    pipeline.push({ $sort: { createdAt: -1 } });
+    pipeline.push({ $sort: { purchase_date: -1 } });
     if (!isAll) pipeline.push({ $skip: skip }, { $limit: limitNum });
 
     const orders = await OrderCustomProduct.aggregate(pipeline);
@@ -1294,7 +1294,7 @@ const getOrderStatistics = async (req, res) => {
           .status(400)
           .json({ message: "Invalid date format in from or to" });
       }
-      baseFilter.createdAt = { $gte: new Date(from), $lte: new Date(to) };
+      baseFilter.purchase_date = { $gte: new Date(from), $lte: new Date(to) };
     }
 
     if (search) {
@@ -2316,7 +2316,7 @@ const computeBaseCostForOrder = async (req, res) => {
         ["EBM", "EBMA"].includes(configCode.toUpperCase()) &&
         pfItems.length > 1
       ) {
-        pfItems = pfItems.slice(2);
+        pfItems = pfItems.slice(3);
       }
 
       preItems.push({
@@ -2774,7 +2774,7 @@ const computeBaseCostForMany = async (req, res) => {
         { base_cost: { $in: [0, null] } },
       ],
     })
-      .sort({ createdAt: -1 })
+      .sort({ purchase_date: -1 })
       .limit(limit);
 
     const results = [];

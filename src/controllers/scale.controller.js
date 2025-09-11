@@ -181,11 +181,28 @@ const confirmScaleForItem = async (req, res) => {
     const item = order.items.find(i => i.orderItemId === orderItemId);
     if (!item) return res.status(404).json({ message: 'Order item not found' });
 
+    // ===== helper: kiểm tra fulfillment_file có ít nhất 1 URL hợp lệ =====
+    const hasAnyFulfillmentUrl = (ff) => {
+      if (!ff) return false;
+      if (ff instanceof Map) {
+        for (const v of ff.values()) if (v) return true;
+        return false;
+      }
+      if (typeof ff === 'object' && !Array.isArray(ff)) {
+        return Object.values(ff).some(Boolean);
+      }
+      if (typeof ff === 'string') return !!ff;
+      return false;
+    };
+
     if (d === 'reject') {
       item.scale_status = 'QC Rejected';
+      // Xoá sạch file in để tránh lẫn với vòng duyệt sau
       item.fulfillment_file = new Map();
       item.markModified('fulfillment_file');
       if (note) item.qc_note = note;
+
+      // Cập nhật trạng thái tổng thể
       order.scale_overall_status = 'QC Rejected';
       await order.save();
       return res.json({
@@ -196,16 +213,27 @@ const confirmScaleForItem = async (req, res) => {
       });
     }
 
-    // approve
-    if (!item.fulfillment_file) {
-      return res.status(400).json({ message: 'Missing fulfillment_file. Please upload scale first.' });
+    // ====== APPROVE ======
+    // Yêu cầu có ít nhất 1 nguồn in: fulfillment_file (front/back/...) hoặc svgFile (fallback)
+    const hasFF = hasAnyFulfillmentUrl(item.fulfillment_file);
+    const hasSvg = !!item.svgFile;
+    if (!hasFF && !hasSvg) {
+      return res.status(400).json({
+        message: 'Missing print files. Please upload fulfillment_file (front/back/...) or provide svgFile before approval.',
+      });
     }
 
     item.scale_status = 'Complete';
     if (note) item.qc_note = note;
+
+    // Nếu fulfillment_file là Map rỗng và bạn vừa mới nạp file trước đó ở API khác,
+    // có thể cần markModified để Mongoose ghi nhận (an toàn vẫn mark):
+    item.markModified('fulfillment_file');
+
+    // Tính trạng thái tổng thể (Ready nếu tất cả Complete)
     order.scale_overall_status = computeOverallScaleStatus(order);
 
-    // === Nếu order đã "Ready", xác định provider ===
+    // === Nếu order đã "Ready", xác định provider và gửi ===
     if (order.scale_overall_status === 'Ready') {
       let providerKey = String(provider || '').trim();
 
@@ -216,17 +244,17 @@ const confirmScaleForItem = async (req, res) => {
           providerKey = resolved.providerKey || providerKey; // có thể vẫn rỗng nếu không suy ra được
         }
       } catch (provErr) {
-        // Trường hợp có nhiều vendor khác nhau trong cùng order → yêu cầu client chỉ định rõ
+        // Có nhiều vendor khác nhau trong cùng order → yêu cầu client chỉ định rõ
         const status = provErr.status || 409;
         return res.status(status).json({
           message: 'Unable to auto-select provider because multiple vendors were detected for this order.',
           error: provErr.message,
           providers: provErr.providers || [],
-          hint: 'Please specify "provider" in request body, e.g., {"provider":"grabink"} or {"provider":"merchfox"}.'
+          hint: 'Please specify "provider" in request body, e.g., {"provider":"grabink"} or {"provider":"merchfox"} or {"provider":"merchize"}.'
         });
       }
 
-      // Fallback cuối cùng nếu vẫn chưa có providerKey
+      // Fallback cuối cùng
       if (!providerKey) providerKey = 'grabink';
 
       try {
@@ -241,7 +269,7 @@ const confirmScaleForItem = async (req, res) => {
           submission_response: result.response,
         });
       } catch (e) {
-        // mark Failed + lưu last_response theo providerKey
+        // mark Failed + lưu last_response theo providerKey (idempotent per vendor)
         const prev = order.vendor_submissions?.[providerKey] || {};
         const rec = {
           ...(prev || {}),
@@ -276,6 +304,7 @@ const confirmScaleForItem = async (req, res) => {
     return res.status(500).json({ message: 'Confirm failed', error: err.message });
   }
 };
+
 
 // Retry gửi đơn sang vendor cụ thể (auto-resolve nếu không truyền provider)
 const retrySendFulfillment = async (req, res) => {

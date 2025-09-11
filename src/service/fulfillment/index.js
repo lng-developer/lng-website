@@ -1,8 +1,9 @@
 // services/fulfillment/index.js
 const grabink = require('./providers/grabink');
 const merchfox = require('./providers/merchfox');
+const merchize = require('./providers/merchize'); // <<< NEW
 
-const PROVIDERS = [grabink, merchfox];
+const PROVIDERS = [grabink, merchfox, merchize]; // <<< NEW: thêm merchize
 const PROVIDER_MAP = new Map(PROVIDERS.map(p => [p.key, p]));
 
 /**
@@ -32,7 +33,7 @@ function writeSubmission(orderDoc, vendorKey, submission) {
 /**
  * Gửi đơn tới vendor cụ thể.
  * @param {Document} orderDoc - Mongoose doc
- * @param {string} vendorKey - 'grabink' | 'merchfox' | ...
+ * @param {string} vendorKey - 'grabink' | 'merchfox' | 'merchize' | ...
  */
 async function sendToVendor(orderDoc, vendorKey) {
     const provider = PROVIDER_MAP.get(vendorKey);
@@ -74,12 +75,24 @@ async function sendToVendor(orderDoc, vendorKey) {
  * Auto-route: chọn provider dựa vào order hoặc tham số mặc định.
  * Ưu tiên:
  *  1) explicit vendorKey truyền vào
- *  2) order.vendor (nếu bạn có trường này)
- *  3) fallback 'grabink'
+ *  2) order.vendor (nếu có)
+ *  3) provider.canHandle(orderDoc) === true (theo thứ tự trong PROVIDERS)
+ *  4) fallback 'grabink'
  */
 async function send(orderDoc, vendorKey) {
-    let key = vendorKey;
-    if (!key) key = orderDoc.vendor || 'grabink';
+    let key = vendorKey || orderDoc.vendor;
+
+    if (!key) {
+        const auto = PROVIDERS.find(p => {
+            try {
+                return typeof p.canHandle === 'function' ? !!p.canHandle(orderDoc) : false;
+            } catch {
+                return false;
+            }
+        });
+        key = auto?.key || 'grabink';
+    }
+
     return sendToVendor(orderDoc, key);
 }
 
