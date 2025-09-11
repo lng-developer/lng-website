@@ -86,6 +86,8 @@ const importReportFromFile = async (req, res) => {
       bucket.set(orderId, acc);
     }
 
+    // ... giữ nguyên phần đọc/parse file & gom bucket như bạn đã có ở trên ...
+
     // Bulk updates (2 bước)
     const ops = [];
 
@@ -101,22 +103,73 @@ const importReportFromFile = async (req, res) => {
         computed_at: new Date(),
       };
 
-      // (A) Luôn ghi đè amazon_finance_total & amazon_total_quantity
+      // (A) LUÔN ghi đè amazon_finance_total + quantity,
+      //     set mặc định refund/op_cost=0 nếu chưa có,
+      //     và tính profit1/profit2 dựa trên base_cost hiện có trong DB
       ops.push({
         updateOne: {
-          filter: { orderId: acc.orderId }, // ❗️chỉ đơn đã có
-          update: {
-            $set: {
-              amazon_finance_total,
-              amazon_total_quantity: acc.quantity,
+          filter: { orderId: acc.orderId }, // ❗️chỉ update đơn đã có trong hệ thống
+          // Dùng pipeline update để vừa set hằng số (từ file) vừa tính toán dựa trên trường hiện có trong DB
+          update: [
+            {
+              $set: {
+                amazon_finance_total: amazon_finance_total,
+                amazon_total_quantity: acc.quantity,
+
+                // mặc định nếu chưa có / null
+                refund: { $ifNull: ["$refund", 0] },
+                op_cost: { $ifNull: ["$op_cost", 0] },
+              },
             },
-            $currentDate: { updatedAt: true }, // nếu schema có timestamps
-          },
-          upsert: false, // ❗️không tạo mới
+            {
+              $set: {
+                // profit1 = revenue - (base_cost + fee)
+                profit1: {
+                  $round: [
+                    {
+                      $subtract: [
+                        amazon_finance_total.revenue,
+                        {
+                          $add: [
+                            { $ifNull: ["$base_cost", 0] },
+                            amazon_finance_total.fee,
+                          ],
+                        },
+                      ],
+                    },
+                    2,
+                  ],
+                },
+              },
+            },
+            {
+              $set: {
+                // profit2 = profit1 - (refund + op_cost)
+                profit2: {
+                  $round: [
+                    {
+                      $subtract: [
+                        "$profit1",
+                        {
+                          $add: [
+                            { $ifNull: ["$refund", 0] },
+                            { $ifNull: ["$op_cost", 0] },
+                          ],
+                        },
+                      ],
+                    },
+                    2,
+                  ],
+                },
+              },
+            },
+            { $currentDate: { updatedAt: true } }, // nếu schema có timestamps
+          ],
+          upsert: false, // ❗️không tạo mới order
         },
       });
 
-      // (B) CHỈ set purchase_date nếu order CHƯA có
+      // (B) CHỈ set purchase_date nếu order CHƯA có (không ghi đè)
       if (acc.purchase_date_raw) {
         const d = new Date(acc.purchase_date_raw);
         if (!isNaN(d)) {
@@ -144,7 +197,7 @@ const importReportFromFile = async (req, res) => {
 
     res.json({
       message:
-        "Imported: overwrite amazon_finance_total only; purchase_date set-if-missing",
+        "Imported: overwrite amazon_finance_total; profit fields computed; purchase_date set-if-missing",
       ordersParsed: bucket.size,
       opsCount: ops.length,
       bulkResult,
@@ -415,53 +468,134 @@ const getOrderCostStatistics = async (req, res) => {
       from,
       to,
       search = "",
-      sellerId,
-      shopId,
-      status,
-      sourceType,
+      statuses, // chuỗi "Pending,Shipped"
+      status, // fallback 1 giá trị
+      sellerId, // nếu muốn cho admin filter tường minh theo user khác
+      shopName,
+      platform,
+      isNoCostCenter,
+      financialStatus,
+      sevenDayAlert,
+      userNull, // chỉ Admin
+      noPsd,
+      shippingType,
+      openCase,
     } = req.query;
 
-    const fromDate = from ? new Date(from) : null;
-    const toDate = to ? new Date(to) : null;
-    if (fromDate) fromDate.setHours(0, 0, 0, 0);
-    if (toDate) toDate.setHours(23, 59, 59, 999);
+    // ===== RBAC =====
+    const role = req.user?.role || "";
+    const tokenUserId = req.user?.userId || "";
+    const isAdmin = /^admin$/i.test(role);
+    const isSeller = /^seller$/i.test(role);
 
-    const and = [{ amazon_finance_total: { $exists: true } }];
-    if (fromDate && toDate) {
-      and.push(
-        {
-          $expr: {
-            $gte: [{ $ifNull: ["$purchase_date", "$createdAt"] }, fromDate],
-          },
-        },
-        {
-          $expr: {
-            $lte: [{ $ifNull: ["$purchase_date", "$createdAt"] }, toDate],
-          },
-        }
-      );
+    const matchStage = {};
+
+    // Seller chỉ xem đơn của mình
+    if (isSeller) {
+      if (!mongoose.Types.ObjectId.isValid(tokenUserId)) {
+        return res.status(400).json({ message: "Invalid user id in token" });
+      }
+      matchStage.sellerId = new mongoose.Types.ObjectId(tokenUserId);
+    } else if (isAdmin) {
+      // Admin có thể xem đơn không có seller (nếu bật userNull)
+      if (userNull === "true") matchStage.sellerId = { $in: [null, undefined] };
+      // Hoặc xem theo sellerId chỉ định
+      if (sellerId && mongoose.Types.ObjectId.isValid(sellerId)) {
+        matchStage.sellerId = new mongoose.Types.ObjectId(sellerId);
+      }
     }
-    if (search.trim()) {
+
+    // statuses (nhiều)
+    const statusesArr =
+      (statuses &&
+        statuses
+          .split(",")
+          .map((s) => s.trim())
+          .filter(Boolean)) ||
+      (status ? [status] : []);
+    if (statusesArr.length) matchStage.status = { $in: statusesArr };
+
+    // search
+    if (search && search.trim()) {
       const rx = new RegExp(search.trim(), "i");
-      and.push({
-        $or: [
-          { orderId: rx },
-          { "items.sku": rx },
-          { "items.asin": rx },
-          { "customer_infor.name": rx },
-        ],
-      });
+      matchStage.$or = [
+        { orderId: rx },
+        { "customer_infor.name": rx },
+        { "items.sku": rx },
+        { "items.asin": rx },
+      ];
     }
-    if (sellerId) and.push({ sellerId });
-    if (shopId) and.push({ shopId });
-    if (status) and.push({ status });
-    if (sourceType) and.push({ source_type: sourceType });
 
-    const match = and.length ? { $and: and } : {};
+    // openCase
+    if (openCase === "true")
+      matchStage.case = { $exists: true, $not: { $size: 0 } };
+
+    // Date inclusive với purchase_date fallback createdAt
+    if (from || to) {
+      const fromDate = from ? new Date(from) : null;
+      const toDate = to ? new Date(to) : null;
+      const dateExpr = { $ifNull: ["$purchase_date", "$createdAt"] };
+      const bounds = [];
+      if (fromDate) bounds.push({ $gte: [dateExpr, fromDate] });
+      if (toDate) bounds.push({ $lte: [dateExpr, toDate] });
+      matchStage.$expr = { $and: bounds };
+    }
+
+    if (isNoCostCenter === "true") matchStage.base_cost = { $in: [null, 0] };
+    if (financialStatus) matchStage.financialStatus = financialStatus;
+    if (sevenDayAlert === "true") {
+      const today = new Date();
+      const d7 = new Date(today);
+      d7.setDate(today.getDate() + 7);
+      matchStage.deliveryDate = { $lte: d7 };
+    }
+    if (platform) matchStage.platform = platform;
+    if (noPsd === "true")
+      matchStage["items.snapshotImage"] = { $in: [null, ""] };
+
+    // shippingType: "A,B,C"
+    if (shippingType && shippingType.trim() !== "") {
+      const valid = [
+        "Second Day",
+        "Ground",
+        "Overnight",
+        "Economy",
+        "Standard",
+        "Expedited",
+      ];
+      const types = shippingType
+        .split(",")
+        .map((t) => t.trim())
+        .filter((t) => valid.includes(t));
+      if (types.length === 1) matchStage.shipping_type = types[0];
+      else if (types.length > 1) matchStage.shipping_type = { $in: types };
+    }
+
     const col = mongoose.connection.collection("ordercustomproducts");
 
+    // Pre lookup để lọc theo shopName (giống list)
+    const preStages = [
+      {
+        $lookup: {
+          from: "shops",
+          localField: "shopId",
+          foreignField: "_id",
+          as: "shop",
+        },
+      },
+      { $unwind: "$shop" },
+    ];
+    if (shopName && shopName.trim() !== "") {
+      preStages.push({
+        $match: { "shop.name": { $regex: new RegExp(shopName.trim(), "i") } },
+      });
+    }
+
     const pipeline = [
-      { $match: match },
+      ...preStages,
+      { $match: matchStage },
+
+      // Chuẩn hoá số
       {
         $set: {
           _rev: {
@@ -533,7 +667,6 @@ const getOrderCostStatistics = async (req, res) => {
               onNull: 0,
             },
           },
-          // 👇 NEW: lấy item_promotion_discount để làm diff
           _promo: {
             $convert: {
               input: "$amazon_finance_total.item_promotion_discount",
@@ -571,17 +704,12 @@ const getOrderCostStatistics = async (req, res) => {
           _id: null,
           orders: { $sum: 1 },
           revenue: { $sum: "$_rev" },
-          profit: { $sum: "$profit1" },
+          profit: { $sum: "$profit1" }, // nếu muốn profit2 => đổi sang "$profit2"
           lngCost: { $sum: "$_op" },
           vendorCost: { $sum: "$_vendor" },
           refund: { $sum: "$_ref" },
           tax: { $sum: "$taxLine" },
-          // 👇 NEW: tổng promotion
-          promo: { $sum: "$_promo" },
-          // optional
-          baseCost: { $sum: "$_base" },
-          fee: { $sum: "$_fee" },
-          profit2: { $sum: "$profit2" },
+          promo: { $sum: "$_promo" }, // Diff = tổng item_promotion_discount
         },
       },
       {
@@ -592,13 +720,9 @@ const getOrderCostStatistics = async (req, res) => {
           profit: { $round: ["$profit", 2] },
           lngCost: { $round: ["$lngCost", 2] },
           vendorCost: { $round: ["$vendorCost", 2] },
-          // 👇 NEW: diff = tổng item_promotion_discount
           diff: { $round: ["$promo", 2] },
           refund: { $round: ["$refund", 2] },
           tax: { $round: ["$tax", 2] },
-          baseCost: { $round: ["$baseCost", 2] },
-          fee: { $round: ["$fee", 2] },
-          profit2: { $round: ["$profit2", 2] },
         },
       },
     ];
