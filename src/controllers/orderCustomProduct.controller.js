@@ -19,7 +19,7 @@ const ConfigOptionMapping = db.configOptionMapping;
 const User = db.user;
 const SkuMappingConfig = db.SkuMappingConfig;
 const SkuMappingEntry = db.SkuMappingEntry
-const { applyRulesToSku } = require('../utils/skuMigrate');
+const { applyRulesToSku, buildRulesFromConfig } = require('../utils/skuMigrate');
 
 const mongoose = require("mongoose");
 
@@ -1177,6 +1177,7 @@ const getFrontendOrders = async (req, res) => {
         return {
           orderItemId: item.orderItemId || null,
           sku: item.sku,
+          mapped_sku: item.mapped_sku,
           title: item.title || "",
           quantity: item.quantity || 1,
           version3Data,
