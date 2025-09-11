@@ -122,6 +122,7 @@ const orderItemSchema = new mongoose.Schema(
   {
     orderItemId: String,
     sku: String,
+    mapped_sku: { type: String, default: null },
     title: String,
     quantity: Number,
 

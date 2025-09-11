@@ -16,6 +16,8 @@ const configOptionMappingRoutes = require("./configOptionMapping.routes");
 const QCRoutes = require("./qc.routes");
 const reportRoutes = require("./report.routes");
 const adsRoutes = require("./ads.routes");
+const skuMappingRoutes = require("./skuMapping.routes");
+
 
 module.exports = {
   roleRoutes,
@@ -36,4 +38,5 @@ module.exports = {
   QCRoutes,
   reportRoutes,
   adsRoutes,
+  skuMappingRoutes
 };
