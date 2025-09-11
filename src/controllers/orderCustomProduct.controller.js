@@ -17,6 +17,9 @@ const VendorCostCenter = db.vendorCostCenter;
 const VendorProduct = db.vendorProduct;
 const ConfigOptionMapping = db.configOptionMapping;
 const User = db.user;
+const SkuMappingConfig = db.SkuMappingConfig;
+const SkuMappingEntry = db.SkuMappingEntry
+const { applyRulesToSku } = require('../utils/skuMigrate');
 
 const mongoose = require("mongoose");
 
@@ -24,6 +27,16 @@ require("dotenv").config();
 
 const ALLOWED = ["New", "Fulfilled", "Shipped", "Cancelled"];
 const norm = (s) => (ALLOWED.includes(s) ? s : "New");
+
+async function loadActiveSkuMappingConfigs() {
+  const now = new Date();
+  const configs = await SkuMappingConfig.find({
+    is_active: true,
+    $or: [{ valid_from: null }, { valid_from: { $lte: now } }],
+    $or: [{ valid_to: null }, { valid_to: { $gte: now } }],
+  }).sort({ priority: 1, updatedAt: -1 }).lean();
+  return configs;
+}
 
 const importOrderJson = async (req, res) => {
   try {
@@ -255,45 +268,116 @@ const updateOrdersFromXlsx = async (req, res) => {
     const shopId = req.body.shopId;
     const type = req.body.type;
 
-    // ✅ NEW: cờ auto compute & tập order cần tính
+    // ✅ Cờ auto compute base-cost & cho phép override seller
     const autoCompute =
-      String(req.body?.autoComputeBaseCost ?? "true") !== "false";
+      String(req.body?.autoComputeBaseCost ?? 'true') !== 'false';
     const overrideSeller =
-      String(req.body?.overrideSeller ?? "false") === "true"; // ✅ Cho phép ghi đè seller nếu muốn
+      String(req.body?.overrideSeller ?? 'false') === 'true';
+
+    // ✅ Cờ dry-run cho SKU Mapping (chỉ preview, không ghi DB)
+    const skuMappingDryRun =
+      String(req.body?.skuMappingDryRun ?? 'false') === 'true';
+    const skuMappingPreviewLimit = Number(req.body?.skuMappingPreviewLimit || 20);
 
     const ordersToCompute = new Set();
     const results = [];
 
-    // ✅ NEW: gom SKU theo order để xử lý sellerId cuối cùng theo majority
+    // ✅ Gom SKU để xử lý majority seller
     /** @type {Map<string, string[]>} */
     const orderIdToSkus = new Map();
     /** @type {Set<string>} */
     const ordersTouched = new Set();
 
-    // ✅ NEW: Cache ASIN-to-Listing mapping để tránh query nhiều lần
+    // ✅ Cache ASIN→Listing image
     const asinToListingMap = new Map();
 
-    if (ext === ".txt") {
-      const raw = fs.readFileSync(filePath, "utf8");
-      const delimiter = raw.includes("\t") ? "\t" : ",";
-      const lines = raw.split("\n").filter((line) => line.trim() !== "");
+    // 🔶 SKU-MAPPING: nạp config active + batch queues
+    /** @type {Array<any>} */
+    const activeConfigs = await loadActiveSkuMappingConfigs();
+
+    /** @type {Array<any>} */
+    const pendingSkuMapLogs = [];   // ghi SkuMappingEntry (log)
+    /** @type {Array<any>} */
+    const pendingMappedSkuOps = []; // set items.$.mapped_sku
+    /** @type {Array<any>} */
+    const skuMappingSamples = [];   // trả preview khi dry-run
+
+    /**
+     * 🔶 SKU-MAPPING helper
+     * - Không đổi items[].sku gốc
+     * - Tạo log vào SkuMappingEntry (upsert)
+     * - Set items.$.mapped_sku = newSku (để xem nhanh trong order)
+     * - Áp theo config ưu tiên cao nhất
+     */
+    function considerLogMapping(orderId, orderItemId, sku) {
+      if (!sku || !activeConfigs || activeConfigs.length === 0) return;
+
+      for (const cfg of activeConfigs) {
+        const rules = buildRulesFromConfig(cfg);
+        const r = applyRulesToSku(sku, rules);
+        if (r.ok && r.changed) {
+          if (skuMappingSamples.length < skuMappingPreviewLimit) {
+            skuMappingSamples.push({
+              orderId,
+              orderItemId,
+              old: sku,
+              next: r.next,
+              config: { id: String(cfg._id), name: cfg.name, priority: cfg.priority },
+            });
+          }
+
+          // 1) Log mapping
+          pendingSkuMapLogs.push({
+            updateOne: {
+              filter: { orderId, orderItemId, oldSku: sku, newSku: r.next },
+              update: {
+                $setOnInsert: {
+                  config_id: cfg._id,
+                  rulesSnapshot: rules,
+                  source: 'import',
+                  operator: null,
+                  migratedAt: new Date(),
+                },
+              },
+              upsert: true,
+            },
+          });
+
+          // 2) Ghi mapped_sku trên order item
+          pendingMappedSkuOps.push({
+            updateOne: {
+              filter: { orderId, 'items.orderItemId': orderItemId },
+              update: { $set: { 'items.$.mapped_sku': r.next } },
+            },
+          });
+
+          break; // chỉ áp config ưu tiên cao nhất
+        }
+      }
+    }
+
+    // ====== đọc file TXT ======
+    if (ext === '.txt') {
+      const raw = fs.readFileSync(filePath, 'utf8');
+      const delimiter = raw.includes('\t') ? '\t' : ',';
+      const lines = raw.split('\n').filter((line) => line.trim() !== '');
       const headers = lines[0]
         .trim()
         .split(delimiter)
-        .map((h) => h.trim().replace(/-/g, "_"));
+        .map((h) => h.trim().replace(/-/g, '_'));
       rows = lines.slice(1).map((line) => {
         const values = line.trim().split(delimiter);
         const obj = {};
         headers.forEach((key, index) => {
-          obj[key] = values[index]?.trim() || "";
+          obj[key] = values[index]?.trim() || '';
         });
         return obj;
       });
     } else {
-      return res.status(400).json({ message: "Only .txt files are supported" });
+      return res.status(400).json({ message: 'Only .txt files are supported' });
     }
 
-    // ✅ NEW: Pre-fetch all unique ASINs from rows to build cache
+    // ✅ Pre-fetch Listing images theo ASIN
     const uniqueAsins = new Set();
     for (const row of rows) {
       const asin = row.asin?.trim();
@@ -304,7 +388,7 @@ const updateOrdersFromXlsx = async (req, res) => {
       const listings = await Listing.find({
         asin: { $in: Array.from(uniqueAsins) },
       })
-        .select("asin product_image")
+        .select('asin product_image')
         .lean();
 
       for (const listing of listings) {
@@ -317,8 +401,8 @@ const updateOrdersFromXlsx = async (req, res) => {
       );
     }
 
-    // ==== Flow cập nhật theo ship date ====
-    if (type === "Latest ship date") {
+    // ====== Flow cập nhật theo Latest ship date ======
+    if (type === 'Latest ship date') {
       for (const row of rows) {
         const orderId = row.amazon_order_id;
         const newStatus = row.order_status?.trim();
@@ -327,8 +411,8 @@ const updateOrdersFromXlsx = async (req, res) => {
         let existingOrder = await OrderCustomProduct.findOne({ orderId });
 
         if (existingOrder) {
-          if (newStatus === "Pending") {
-            results.push({ orderId, status: "skipped - pending" });
+          if (newStatus === 'Pending') {
+            results.push({ orderId, status: 'skipped - pending' });
             continue;
           }
 
@@ -338,15 +422,14 @@ const updateOrdersFromXlsx = async (req, res) => {
             await existingOrder.save();
             results.push({
               orderId,
-              status: "status updated",
+              status: 'status updated',
               from: oldStatus,
               to: newStatus,
             });
           } else {
-            results.push({ orderId, status: "skipped - same status" });
+            results.push({ orderId, status: 'skipped - same status' });
           }
 
-          // Kiểm tra địa chỉ nếu chưa có
           if (
             existingOrder.address_validation?.isValid === null &&
             existingOrder.address_validation?.smartyResponse === null
@@ -368,27 +451,24 @@ const updateOrdersFromXlsx = async (req, res) => {
       }
 
       return res.json({
-        message: "Update by latest ship date completed",
+        message: 'Update by latest ship date completed',
         results,
       });
     }
 
-    // ✅ Flow import mặc định (tạo/cập nhật đơn + import JSON + upload snapshot)
+    // ====== Flow import mặc định ======
     for (const row of rows) {
       const orderId = row.order_id;
       if (!orderId) continue;
 
-      // đánh dấu order đã chạm
       ordersTouched.add(orderId);
 
-      // gom sku để xử lý seller cuối cùng
       if (row.sku) {
         const arr = orderIdToSkus.get(orderId) || [];
         arr.push(row.sku);
         orderIdToSkus.set(orderId, arr);
       }
 
-      // ✅ NEW: Lấy ASIN và tìm base image từ Listing
       const asin = row.asin?.trim();
       let baseImageFromListing = null;
       if (asin && asinToListingMap.has(asin)) {
@@ -401,7 +481,6 @@ const updateOrdersFromXlsx = async (req, res) => {
         title: row.product_name,
         customized_url: row.customized_url,
         quantity: Number(row.quantity_purchased || 1),
-        // ✅ NEW: Thêm ASIN vào itemData
         asin: asin || null,
       };
 
@@ -433,7 +512,6 @@ const updateOrdersFromXlsx = async (req, res) => {
           (i) => i.orderItemId === itemData.orderItemId
         );
         if (!exists) {
-          // ✅ NEW: Set base image từ Listing nếu có
           if (baseImageFromListing) {
             itemData.baseImage = {
               imageUrl: baseImageFromListing,
@@ -444,7 +522,6 @@ const updateOrdersFromXlsx = async (req, res) => {
 
           existing.items.push(itemData);
 
-          // ✅ NEW: nếu chưa có sellerId hoặc cho phép override, thử gán theo SKU vừa thêm (tạm thời).
           if ((overrideSeller || !existing.sellerId) && itemData.sku) {
             const msnv = extractMSNVFromSKU(itemData.sku);
             if (msnv) {
@@ -456,15 +533,16 @@ const updateOrdersFromXlsx = async (req, res) => {
           await existing.save();
           results.push({
             orderId,
-            status: "item added",
+            status: 'item added',
             baseImageFromListing: !!baseImageFromListing,
             asin: asin || null,
           });
 
-          // ✅ NEW: có thay đổi item -> cần tính base cost
+          // 🔶 SKU-MAPPING
+          considerLogMapping(orderId, itemData.orderItemId, itemData.sku);
+
           if (autoCompute) ordersToCompute.add(orderId);
         } else {
-          // ✅ NEW: Item đã tồn tại, nhưng kiểm tra xem có cần update base image từ Listing không
           if (baseImageFromListing) {
             const existingItem = existing.items.find(
               (i) => i.orderItemId === itemData.orderItemId
@@ -472,7 +550,7 @@ const updateOrdersFromXlsx = async (req, res) => {
             if (
               existingItem &&
               (!existingItem.baseImage?.imageUrl ||
-                existingItem.baseImage.imageUrl === "")
+                existingItem.baseImage.imageUrl === '')
             ) {
               existingItem.baseImage = {
                 imageUrl: baseImageFromListing,
@@ -484,39 +562,60 @@ const updateOrdersFromXlsx = async (req, res) => {
 
               results.push({
                 orderId,
-                status: "item exists - base image updated from listing",
+                status: 'item exists - base image updated from listing',
                 baseImageFromListing: true,
                 asin: asin,
               });
+
+              // 🔶 SKU-MAPPING
+              considerLogMapping(
+                orderId,
+                existingItem.orderItemId,
+                existingItem.sku
+              );
             } else {
               results.push({
                 orderId,
-                status: "item exists",
+                status: 'item exists',
                 baseImageFromListing: false,
                 asin: asin || null,
               });
+
+              if (existingItem?.sku) {
+                considerLogMapping(
+                  orderId,
+                  existingItem.orderItemId,
+                  existingItem.sku
+                );
+              }
             }
           } else {
             results.push({
               orderId,
-              status: "item exists",
+              status: 'item exists',
               baseImageFromListing: false,
               asin: asin || null,
             });
+
+            const existingItem = existing.items.find(
+              (i) => i.orderItemId === itemData.orderItemId
+            );
+            if (existingItem?.sku) {
+              considerLogMapping(
+                orderId,
+                existingItem.orderItemId,
+                existingItem.sku
+              );
+            }
           }
           skipProcessingZip = true;
 
-          // ✅ NEW: đơn chưa có base_cost thì tính bù
-          if (
-            autoCompute &&
-            (!existing.base_cost || existing.base_cost === 0)
-          ) {
+          if (autoCompute && (!existing.base_cost || existing.base_cost === 0)) {
             ordersToCompute.add(orderId);
           }
         }
       } else {
         // NEW ORDER
-        // ✅ NEW: Set base image từ Listing nếu có
         if (baseImageFromListing) {
           itemData.baseImage = {
             imageUrl: baseImageFromListing,
@@ -530,7 +629,6 @@ const updateOrdersFromXlsx = async (req, res) => {
           items: [itemData],
         });
 
-        // ✅ NEW: gán sellerId ngay nếu tìm được từ SKU
         if (itemData.sku) {
           const msnv = extractMSNVFromSKU(itemData.sku);
           if (msnv) {
@@ -549,42 +647,40 @@ const updateOrdersFromXlsx = async (req, res) => {
 
         results.push({
           orderId,
-          status: "New order created with address check",
+          status: 'New order created with address check',
           addressValid: validationResult.isValid,
           baseImageFromListing: !!baseImageFromListing,
           asin: asin || null,
         });
 
-        // ✅ NEW: đơn mới -> chắc chắn tính base cost
+        // 🔶 SKU-MAPPING
+        considerLogMapping(orderId, itemData.orderItemId, itemData.sku);
+
         if (autoCompute) ordersToCompute.add(orderId);
       }
 
       if (skipProcessingZip) continue;
 
+      // ====== xử lý ZIP customized_url ======
       try {
         const url = row.customized_url;
         if (!url) {
-          results.push({ orderId, status: "no URL" });
+          results.push({ orderId, status: 'no URL' });
           continue;
         }
 
-        const zipResponse = await axios.get(url, {
-          responseType: "arraybuffer",
-        });
+        const zipResponse = await axios.get(url, { responseType: 'arraybuffer' });
         const zip = new AdmZip(Buffer.from(zipResponse.data));
 
         const allEntries = zip.getEntries();
         const imageEntries = allEntries.filter((entry) =>
           /\.(jpe?g|png)$/i.test(entry.entryName)
         );
-        const jsonEntry = allEntries.find((entry) =>
-          entry.entryName.endsWith(".json")
-        );
+        const jsonEntry = allEntries.find((entry) => entry.entryName.endsWith('.json'));
 
         const cloudinaryUrls = [];
         const skippedSnapshots = [];
 
-        // --- Upload ảnh ---
         for (const imageEntry of imageEntries) {
           try {
             const imageBuffer = imageEntry.getData();
@@ -610,8 +706,7 @@ const updateOrdersFromXlsx = async (req, res) => {
               const finalName =
                 bufferForUpload === imageBuffer
                   ? imageName
-                  : imageName.replace(/\.(png|jpg|jpeg)$/i, "") +
-                  "_compressed.jpg";
+                  : imageName.replace(/\.(png|jpg|jpeg)$/i, '') + '_compressed.jpg';
 
               const cloudinaryUrl = await uploadToCloudinary(
                 bufferForUpload,
@@ -619,7 +714,7 @@ const updateOrdersFromXlsx = async (req, res) => {
               );
               cloudinaryUrls.push(cloudinaryUrl);
             } catch (e) {
-              const msg = String(e?.message || "");
+              const msg = String(e?.message || '');
               if (/File size too large/i.test(msg)) {
                 try {
                   const lastTry = await sharp(bufferForUpload)
@@ -629,19 +724,15 @@ const updateOrdersFromXlsx = async (req, res) => {
 
                   if (lastTry.length <= MAX_CLOUDINARY_BYTES) {
                     const finalName =
-                      imageName.replace(/\.(png|jpg|jpeg)$/i, "") +
-                      "_compressed_last.jpg";
+                      imageName.replace(/\.(png|jpg|jpeg)$/i, '') + '_compressed_last.jpg';
                     const url = await uploadToCloudinary(lastTry, finalName);
                     cloudinaryUrls.push(url);
                     continue;
                   }
-                } catch (_) {
-                  /* ignore */
-                }
-
+                } catch (_) { }
                 skippedSnapshots.push({
                   image: imageName,
-                  reason: "cloudinary: file size too large",
+                  reason: 'cloudinary: file size too large',
                 });
                 continue;
               }
@@ -653,18 +744,17 @@ const updateOrdersFromXlsx = async (req, res) => {
             }
           } catch (innerErr) {
             skippedSnapshots.push({
-              image: imageEntry?.entryName || "<unknown>",
+              image: imageEntry?.entryName || '<unknown>',
               reason: `unexpected: ${innerErr?.message || innerErr}`,
             });
             continue;
           }
         }
 
-        // --- JSON ---
         if (!jsonEntry) {
           results.push({
             orderId,
-            status: "no JSON in ZIP",
+            status: 'no JSON in ZIP',
             snapshots: cloudinaryUrls,
             skippedSnapshots,
           });
@@ -691,12 +781,11 @@ const updateOrdersFromXlsx = async (req, res) => {
 
         await importOrderJson(fakeReq, fakeRes);
       } catch (err) {
-        results.push({ orderId, status: "failed", error: err.message });
+        results.push({ orderId, status: 'failed', error: err.message });
       }
     }
 
-    // ✅ NEW: SAU KHI IMPORT XONG — chốt sellerId theo majority SKU cho từng order
-    // - Chỉ gán nếu order chưa có sellerId hoặc khi overrideSeller = true
+    // ====== Chốt seller theo majority SKU ======
     const sellerAssignResults = [];
     for (const oid of ordersTouched) {
       const skus = orderIdToSkus.get(oid) || [];
@@ -705,7 +794,7 @@ const updateOrdersFromXlsx = async (req, res) => {
         sellerAssignResults.push({
           orderId: oid,
           seller: null,
-          reason: "no msnv parsed from skus",
+          reason: 'no msnv parsed from skus',
         });
         continue;
       }
@@ -716,20 +805,20 @@ const updateOrdersFromXlsx = async (req, res) => {
           orderId: oid,
           seller: null,
           msnv,
-          reason: "no user match by employee_id",
+          reason: 'no user match by employee_id',
         });
         continue;
       }
 
-      const orderDoc = await OrderCustomProduct.findOne({
-        orderId: oid,
-      }).select("_id sellerId");
+      const orderDoc = await OrderCustomProduct.findOne({ orderId: oid }).select(
+        '_id sellerId'
+      );
       if (!orderDoc) {
         sellerAssignResults.push({
           orderId: oid,
           seller: null,
           msnv,
-          reason: "order not found when assigning",
+          reason: 'order not found when assigning',
         });
         continue;
       }
@@ -739,7 +828,7 @@ const updateOrdersFromXlsx = async (req, res) => {
           orderId: oid,
           seller: String(orderDoc.sellerId),
           msnv,
-          action: "kept-existing",
+          action: 'kept-existing',
         });
         continue;
       }
@@ -750,16 +839,14 @@ const updateOrdersFromXlsx = async (req, res) => {
         orderId: oid,
         seller: String(sellerId),
         msnv,
-        action: "assigned",
+        action: 'assigned',
       });
     }
 
-    // ✅ NEW: chạy tính base cost cho các order đã gom
+    // ====== Tính base cost ======
     let baseCostResults = [];
     if (autoCompute && ordersToCompute.size > 0) {
       for (const oid of ordersToCompute) {
-        // Gọi trực tiếp API nội bộ computeBaseCostForOrder và collect kết quả
-        // eslint-disable-next-line no-await-in-loop
         const one = await new Promise((resolve) => {
           const fakeReq = { body: { orderId: oid } };
           const fakeRes = {
@@ -774,29 +861,48 @@ const updateOrdersFromXlsx = async (req, res) => {
       }
     }
 
+    // ====== Ghi logs & mapped_sku (trừ khi dry-run) ======
+    if (pendingSkuMapLogs.length > 0 && !skuMappingDryRun) {
+      try {
+        await SkuMappingEntry.bulkWrite(pendingSkuMapLogs, { ordered: false });
+      } catch (_) { }
+    }
+
+    if (pendingMappedSkuOps.length > 0 && !skuMappingDryRun) {
+      try {
+        await OrderCustomProduct.bulkWrite(pendingMappedSkuOps, { ordered: false });
+      } catch (_) { }
+    }
+
     // dọn file tạm
     try {
       fs.unlinkSync(filePath);
     } catch (_) { }
 
     return res.json({
-      message: "Batch import completed with ASIN-Listing base image matching",
+      message: 'Batch import completed with ASIN-Listing base image matching',
       results,
       seller_assignment: sellerAssignResults,
       base_cost_auto_computed: autoCompute,
       base_cost_results: baseCostResults,
       asin_listing_matches: asinToListingMap.size,
+      // 🔶 SKU-MAPPING: thống kê + preview
+      sku_mapping_configs_loaded: activeConfigs.length,
+      sku_mapping_logs_queued: pendingSkuMapLogs.length,
+      sku_mapping_item_updates: pendingMappedSkuOps.length,
+      sku_mapping_dry_run: skuMappingDryRun,
+      sku_mapping_samples: skuMappingSamples,
     });
   } catch (error) {
-    // đảm bảo xoá file tạm nếu có
     try {
       if (req?.file?.path) fs.unlinkSync(req.file.path);
-    } catch (_e) { }
-    res
+    } catch (_) { }
+    return res
       .status(500)
-      .json({ message: "Batch import failed", error: error.message });
+      .json({ message: 'Batch import failed', error: error.message });
   }
 };
+
 
 const uploadToCloudinary = (buffer, filename) => {
   return new Promise((resolve, reject) => {
@@ -1059,7 +1165,7 @@ const getFrontendOrders = async (req, res) => {
         const version3Data = surfaces.flatMap((surface) =>
           (surface.areas || []).map((area) => ({
             label: area.label || area.name || "",
-            value: area.optionValue || area.text || "",
+            value: area.optionValue || area.text || area.numberValue || "",
           }))
         );
 

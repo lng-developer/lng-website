@@ -24,6 +24,7 @@ const {
   QCRoutes,
   reportRoutes,
   adsRoutes,
+  skuMappingRoutes
 } = require("./src/routes");
 
 const app = express();
@@ -55,6 +56,8 @@ app.use("/api/fulfillment/qc", QCRoutes);
 app.use("/api/mapping", configOptionMappingRoutes);
 app.use("/api/report", reportRoutes);
 app.use("/api/ads", adsRoutes);
+app.use("/api/sku-mapping", skuMappingRoutes);
+
 
 // Error Handler
 app.use((err, req, res, next) => {
