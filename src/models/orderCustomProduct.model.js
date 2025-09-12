@@ -159,6 +159,11 @@ const orderItemSchema = new mongoose.Schema(
 
     cost_breakdown: itemCostBreakdownSchema,
     tracking_info: itemTrackingSchema,
+    listingId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Listing",
+      default: null,
+    },
   },
   { _id: false }
 );
