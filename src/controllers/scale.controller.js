@@ -97,6 +97,7 @@ function normalizeProviderKey(vendorDoc) {
 
   if (ft.includes('merchfox') || nm.includes('merchfox')) return 'merchfox';
   if (ft.includes('grabink') || nm.includes('grabink')) return 'grabink';
+  if (ft.includes('merchize') || nm.includes('merchize')) return 'merchize';
 
   // có thể bổ sung thêm provider khác ở đây
   return null;
@@ -310,16 +311,22 @@ const confirmScaleForItem = async (req, res) => {
 const retrySendFulfillment = async (req, res) => {
   try {
     const { orderId } = req.params;
-    let providerKey = String(req.query.provider || req.body?.provider || '').trim(); // optional
+    let providerKey = String(req.query.provider || req.body?.provider || '').trim().toLowerCase(); // optional
 
     const order = await OrderCustomProduct.findOne({ orderId });
     if (!order) return res.status(404).json({ message: 'Order not found' });
+
+    // Danh sách provider hợp lệ từ service (tránh hard-code)
+    const AVAILABLE_PROVIDERS = (FulfillmentService.PROVIDERS || []).map(p => p.key);
+    const providersHint = AVAILABLE_PROVIDERS.length
+      ? AVAILABLE_PROVIDERS.join(' | ')
+      : 'grabink | merchfox | merchize';
 
     // 1) Nếu không truyền provider, auto-resolve từ VendorProduct → Vendor
     if (!providerKey) {
       try {
         const resolved = await resolveProviderFromOrder(order, VendorProduct);
-        providerKey = resolved.providerKey || providerKey;
+        providerKey = (resolved.providerKey || '').toLowerCase();
       } catch (provErr) {
         // Trường hợp có nhiều vendor trong cùng đơn
         const status = provErr.status || 409;
@@ -327,13 +334,26 @@ const retrySendFulfillment = async (req, res) => {
           message: 'Unable to auto-select provider because multiple vendors were detected for this order.',
           error: provErr.message,
           providers: provErr.providers || [],
-          hint: 'Please specify "provider" in query/body, e.g., ?provider=grabink or ?provider=merchfox'
+          hint: `Please specify "provider" in query/body, e.g., ?provider=${providersHint}`
         });
       }
     }
 
-    // 2) Fallback nếu vẫn chưa xác định được
-    if (!providerKey) providerKey = 'grabink';
+    // 2) Không fallback về grabink nữa. Nếu chưa xác định được, yêu cầu client chỉ định rõ.
+    if (!providerKey) {
+      return res.status(409).json({
+        message: 'Unable to determine provider automatically.',
+        hint: `Please specify "provider" in query/body, e.g., ?provider=${providersHint}`
+      });
+    }
+
+    // 2.1) Validate provider hợp lệ
+    if (AVAILABLE_PROVIDERS.length && !AVAILABLE_PROVIDERS.includes(providerKey)) {
+      return res.status(400).json({
+        message: `Unknown provider: ${providerKey}`,
+        hint: `Valid providers: ${providersHint}`
+      });
+    }
 
     // 3) Kiểm tra điều kiện retry theo trạng thái tổng
     const okToSend =
@@ -348,7 +368,9 @@ const retrySendFulfillment = async (req, res) => {
 
     // 4) Idempotency theo provider
     const submissions = order.vendor_submissions || {};
-    const sub = submissions[providerKey] || (providerKey === 'grabink' ? order.grabink_submission : null);
+    const sub =
+      submissions[providerKey] ||
+      (providerKey === 'grabink' ? order.grabink_submission : null);
     const alreadySent = !!(sub?.sent);
     if (alreadySent) {
       return res.status(409).json({
@@ -372,6 +394,7 @@ const retrySendFulfillment = async (req, res) => {
     return res.status(500).json({ message: 'Retry failed', error: err.message });
   }
 };
+
 // ============================
 // LIST — khớp chuẩn STATISTICS
 // ============================

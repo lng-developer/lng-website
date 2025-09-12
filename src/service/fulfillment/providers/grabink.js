@@ -6,7 +6,7 @@ function mapShippingMethod(shipping_type = 'Standard') {
     const t = String(shipping_type || '').toLowerCase();
     if (t.includes('overnight')) return 'overnight';
     if (t.includes('second')) return 'second_day';
-    if (t.includes('expedited')) return 'expedited';
+    if (t.includes('expedited')) return 'Priority';
     if (t.includes('economy')) return 'economy';
     return 'standard';
 }
