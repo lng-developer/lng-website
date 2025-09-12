@@ -1,45 +1,71 @@
-const express = require('express');
+const express = require("express");
 const router = express.Router();
-const controller = require('../controllers/orderCustomProduct.controller');
-const { authenticateToken } = require('../middlewares/auth.middleware');
-
-// Upload file JSON
-router.post('/import-json-file', authenticateToken, controller.upload.single('file'), controller.importOrderFromFile);
+const controller = require("../controllers/orderCustomProduct.controller");
+const { authenticateToken } = require("../middlewares/auth.middleware");
 
 // API list orders (trả về full dữ liệu)
-router.get('/', authenticateToken, controller.getAllOrders);
+router.get("/", authenticateToken, controller.getAllOrders);
 
 // API dành riêng FE (tối ưu chỉ dữ liệu cần hiển thị)
-router.get('/fe', authenticateToken, controller.getFrontendOrders);
+router.get("/fe", authenticateToken, controller.getFrontendOrders);
 
-router.get('/statistic', authenticateToken, controller.getOrderStatistics);
+router.get("/statistic", authenticateToken, controller.getOrderStatistics);
 
 // ⬇️ TÍNH BASE COST
 // Tính cho 1 đơn: body { orderId: "..." }
-router.post('/compute-base-cost', authenticateToken, controller.computeBaseCostForOrder);
+router.post(
+  "/compute-base-cost",
+  authenticateToken,
+  controller.computeBaseCostForOrder
+);
 
 // Tính batch cho các đơn thiếu base_cost: body { limit: 50 } (tối đa 200)
-router.post('/compute-base-cost/batch', authenticateToken, controller.computeBaseCostForMany);
+router.post(
+  "/compute-base-cost/batch",
+  authenticateToken,
+  controller.computeBaseCostForMany
+);
 
 // API xem chi tiết đơn hàng113-2352267-7335428
-router.get('/:id', authenticateToken, controller.getOrderById);
+router.get("/:id", authenticateToken, controller.getOrderById);
 
-router.post('/update-from-xlsx', authenticateToken, controller.upload.single('file'), controller.updateOrdersFromXlsx);
+router.post(
+  "/update-from-xlsx",
+  authenticateToken,
+  controller.upload.single("file"),
+  controller.updateOrdersFromXlsx
+);
 
-router.put('/update-status', authenticateToken, controller.updateOrderStatus);
+router.put("/update-status", authenticateToken, controller.updateOrderStatus);
 
-router.put('/update-shipping-type', authenticateToken, controller.updateShippingType);
+router.put(
+  "/update-shipping-type",
+  authenticateToken,
+  controller.updateShippingType
+);
 
-router.put('/update-base-cost', authenticateToken, controller.updateBaseCost);
+router.put("/update-base-cost", authenticateToken, controller.updateBaseCost);
 
-router.put('/update-customer-info', authenticateToken, controller.updateCustomerInfo);
+router.put(
+  "/update-customer-info",
+  authenticateToken,
+  controller.updateCustomerInfo
+);
 
-router.put('/open-case', authenticateToken, controller.openCaseInOrder);
+router.put("/open-case", authenticateToken, controller.openCaseInOrder);
 
-router.put('/remove-case', authenticateToken, controller.removeCaseFromOrder);
+router.put("/remove-case", authenticateToken, controller.removeCaseFromOrder);
 
-router.put('/update-base-image', authenticateToken, controller.updateBaseImageUrl);
+router.put(
+  "/update-base-image",
+  authenticateToken,
+  controller.updateBaseImageUrl
+);
 
-router.put('/:orderId/items/:orderItemId/tracking', authenticateToken, controller.updateItemTracking);
+router.put(
+  "/:orderId/items/:orderItemId/tracking",
+  authenticateToken,
+  controller.updateItemTracking
+);
 
 module.exports = router;
