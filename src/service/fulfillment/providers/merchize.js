@@ -1,3 +1,47 @@
+// Ở đầu file (nếu thiếu)
+const axios = require('axios');
+
+// --- NEW: mockup picker (ưu tiên baseImage, rồi snapshot, rồi image) ---
+function pickMockup(item) {
+    return (
+        item?.baseImage?.imageUrl ||
+        item?.snapshotImage ||
+        item?.image ||
+        null
+    );
+}
+
+// --- NEW: build attributes cho Merchize ---
+function buildAttributes(item = {}) {
+    const attrs = [];
+
+    // product (tên sản phẩm hiển thị)
+    const productName =
+        item?.cost_breakdown?.itemDisplayName ||
+        item?.product_name ||
+        item?.title ||
+        item?.name ||
+        'Custom Product';
+    attrs.push({ name: 'product', option: String(productName) });
+
+    // Color
+    const color =
+        item?.color ||
+        item?.variant_color ||
+        item?.attributes?.color ||
+        item?.cost_breakdown?.colorValue;
+    if (color) attrs.push({ name: 'Color', option: String(color) });
+
+    // Size
+    const size =
+        item?.size ||
+        item?.variant_size ||
+        item?.attributes?.size ||
+        item?.cost_breakdown?.sizeValue;
+    if (size) attrs.push({ name: 'Size', option: String(size) });
+
+    return attrs;
+}
 // --- NEW: helper để resolve URL public cho asset nội bộ ---
 function resolveAssetUrl(keyOrUrl) {
     if (!keyOrUrl) return '';
@@ -79,8 +123,7 @@ function buildPayload(orderObj, options = {}) {
 
     const shipping = orderObj.customer_infor || {};
     return {
-        // order_id: String(orderObj.orderId || orderObj._id || ''),
-        order_id: "Test",
+        order_id: String(orderObj.orderId || orderObj._id || ''),
         identifier:
             orderObj?.shop_domain ||
             orderObj?.identifier ||
@@ -107,9 +150,9 @@ function buildLineItem(item = {}) {
 
     return {
         name: item?.cost_breakdown?.itemDisplayName || item?.title || item?.name || 'Custom Product',
-        product_id: item?.cost_breakdown?.merchize_product_id || undefined,
+        product_id: item?.cost_breakdown?.matchedSku || undefined,
         sku: item?.cost_breakdown?.matchedSku || item?.sku || undefined,
-        merchize_sku: item?.cost_breakdown?.merchize_sku || item?.vendorVariantSku || undefined,
+        merchize_sku: item?.cost_breakdown?.matchedSku || item?.vendorVariantSku || undefined,
         quantity: Number(item?.quantity || 1),
         price: Number(item?.price) || Number(item?.cost_breakdown?.unit_price) || undefined,
         currency: item?.currency || 'USD',
@@ -126,6 +169,8 @@ async function send(orderDoc, options = {}) {
             : orderDoc;
 
     const payload = buildPayload(orderObj, options);
+    console.log("Payload: ", payload);
+
 
     if (!payload.items?.length) {
         const err = new Error('No items matching allowed statuses to send.');
@@ -144,7 +189,7 @@ async function send(orderDoc, options = {}) {
 
     const baseURL =
         process.env.MERCHIZE_BASE_URL ||
-        'https://bo-group-1-2.merchize.com/4cwa17f/bo-api';
+        'https://bo-group-1-2.merchize.com/403c7ev/bo-api';
     const endpoint = `${baseURL.replace(/\/+$/, '')}/order/external/orders`;
     const token = process.env.MERCHIZE_ACCESS_TOKEN;
     if (!token) {
