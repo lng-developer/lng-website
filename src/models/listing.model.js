@@ -11,13 +11,23 @@ const listingSchema = new mongoose.Schema({
         style: String,
         sub_style: String,
         design_product: String,
-        variant: { type: String, default: 'All' }
+        variant: { type: String, default: 'All' },
     },
 
     psd: {
-        psd_id: String, // có thể là object key trong S3
-        url: String,    // ✅ link tải PSD
-        status: { type: String, enum: ['Available', 'Unavailable'], default: 'Unavailable' }
+        psd_id: String,  // trùng ASIN
+        url: String,     // link tải từ Wasabi (qua signed URL)
+        status: {
+            type: String,
+            enum: ['Available', 'Unavailable'],
+            default: 'Unavailable',
+        },
+        // 🔽 mới thêm
+        file_name: String,   // tên gốc khi upload
+        file_ext: { type: String, enum: ['.psd', '.zip', '.rar'], default: '.psd' },
+        mime: String,        // content-type thực tế
+        size: Number,        // dung lượng file (bytes)
+        archive: { type: Boolean, default: false }, // true nếu là zip/rar
     },
 
     store: { type: mongoose.Schema.Types.ObjectId, ref: 'Shop' },
@@ -26,8 +36,22 @@ const listingSchema = new mongoose.Schema({
 
     thread_color: String,
     thread_note: String,
-    asin_type: { type: String, enum: ['PODLovers', 'Normal', 'Outline', 'Style', 'Tool', 'Custom Image', 'Auto Fulfill', 'Other'], default: 'Normal' },
+    asin_type: {
+        type: String,
+        enum: [
+            'PODLovers',
+            'Normal',
+            'Outline',
+            'Style',
+            'Tool',
+            'Custom Image',
+            'Auto Fulfill',
+            'Other',
+        ],
+        default: 'Normal',
+    },
     other_config: String,
 }, { timestamps: true });
+
 
 module.exports = mongoose.model('Listing', listingSchema);
