@@ -320,21 +320,34 @@ const upsertListing = async (req, res) => {
       .json({ message: "Error upserting listing", error: error.message });
   }
 };
+const ALLOWED_EXTS = ['.psd', '.zip', '.rar'];
+const MIME_BY_EXT = {
+  '.psd': 'image/vnd.adobe.photoshop',
+  '.zip': 'application/zip',
+  '.rar': 'application/x-rar-compressed', // một số client có thể dùng 'application/vnd.rar'
+};
 
-// ==============================
-// Multer config (nhận PSD qua RAM)
-// ==============================
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 1024 * 1024 * 1024 }, // 1GB
   fileFilter: (req, file, cb) => {
-    const ok =
-      file.mimetype === "image/vnd.adobe.photoshop" ||
-      /\.psd$/i.test(file.originalname);
-    if (!ok) return cb(new Error("Chỉ chấp nhận PSD"));
+    const ext = (path.extname(file.originalname) || '').toLowerCase();
+    const isOk = ALLOWED_EXTS.includes(ext)
+      || file.mimetype === 'image/vnd.adobe.photoshop'
+      || file.mimetype === 'application/zip'
+      || file.mimetype === 'application/x-rar-compressed'
+      || file.mimetype === 'application/vnd.rar';
+
+    if (!isOk) return cb(new Error("Chỉ chấp nhận .psd, .zip, .rar"));
     cb(null, true);
   },
 });
+
+function buildDesignKeyByExt(asin, ext) {
+  ext = (ext || '.psd').toLowerCase();
+  // Quy ước: psd/<ASIN>/<ASIN><ext>
+  return `psd/${asin}/${asin}${ext}`;
+}
 
 // ==============================
 // Upload/Update PSD (overwrite theo ASIN)
@@ -351,62 +364,83 @@ const updatePSD = [
 
       if (!asin) return res.status(400).json({ message: "Thiếu asin" });
       if (!req.file?.buffer)
-        return res
-          .status(400)
-          .json({ message: "Thiếu file PSD (field: file)" });
+        return res.status(400).json({ message: "Thiếu file (field: file)" });
 
-      // Key cố định theo ASIN: psd/<ASIN>/<ASIN>.psd
-      const key = buildPsdKeyFromAsin(asin);
+      const originalName = req.file.originalname || `${asin}.psd`;
+      const ext = (path.extname(originalName) || ".psd").toLowerCase();
+
+      // Chỉ cho phép đúng bộ đuôi
+      if (!['.psd', '.zip', '.rar'].includes(ext)) {
+        return res.status(400).json({ message: "Chỉ chấp nhận .psd, .zip, .rar" });
+      }
+
+      // Key overwrite theo ASIN + đuôi
+      const key = ext === '.psd'
+        ? buildPsdKeyFromAsin(asin)                 // ví dụ: psd/<ASIN>/<ASIN>.psd
+        : buildDesignKeyByExt(asin, ext);           // ví dụ: psd/<ASIN>/<ASIN>.zip/.rar
+
+      // Content-Type đúng theo đuôi
+      const contentType = MIME_BY_EXT[ext] || 'application/octet-stream';
 
       // Upload (overwrite nếu tồn tại)
       const { url } = await uploadBufferToWasabi(req.file.buffer, {
         key,
-        contentType: "image/vnd.adobe.photoshop",
+        contentType,
       });
 
+      // Lưu metadata vào listing.psd
       const updated = await Listing.findOneAndUpdate(
         { asin },
         {
           $set: {
-            "psd.psd_id": asin, // trùng ASIN
-            "psd.url": url, // với bucket private, URL này không tải trực tiếp; dùng signed URL để tải
+            "psd.psd_id": asin,
+            "psd.url": url,            // với bucket private, dùng signed URL để tải
             "psd.status": status,
+            "psd.file_name": originalName,
+            "psd.file_ext": ext,       // '.psd' | '.zip' | '.rar'
+            "psd.mime": contentType,
+            "psd.size": req.file.size || null,
+            "psd.archive": ext === '.zip' || ext === '.rar',
             date_updated: new Date(),
           },
         },
         { upsert: true, new: true, setDefaultsOnInsert: true }
       );
 
-      return res.json({ message: "Cập nhật PSD thành công", listing: updated });
+      return res.json({
+        message: "Cập nhật file thiết kế thành công",
+        file_type: ext.replace('.', '').toUpperCase(),
+        key,
+        listing: updated,
+      });
     } catch (err) {
-      console.error("Error updating PSD:", err);
+      console.error("Error updating design file:", err);
       return res
         .status(500)
-        .json({ message: "Error updating PSD", error: err.message });
+        .json({ message: "Error updating design file", error: err.message });
     }
   },
 ];
 
 // ==============================
-// Lấy signed URL để download PSD
+// Lấy signed URL để download file thiết kế (PSD/ZIP/RAR)
 // ==============================
 const getPsdSignedUrl = async (req, res) => {
   try {
     const { asin } = req.params;
-    const expires = Math.max(
-      60,
-      Math.min(86400, Number(req.query.expires) || 3600)
-    ); // 1m–24h
+    const expires = Math.max(60, Math.min(86400, Number(req.query.expires) || 3600)); // 1m–24h
     const asAttachment = String(req.query.download || "") === "1";
 
     const listing = await Listing.findOne({ asin }).lean();
-    if (!listing)
-      return res.status(404).json({ message: "Listing không tồn tại" });
+    if (!listing) return res.status(404).json({ message: "Listing không tồn tại" });
 
-    // ✅ luôn build key từ ASIN theo quy ước lưu file
-    const key = buildPsdKeyFromAsin(asin);
+    // Ưu tiên đuôi đã lưu trong DB, fallback sang .psd
+    const ext = (listing.psd?.file_ext || ".psd").toLowerCase();
+    const key = ext === '.psd'
+      ? buildPsdKeyFromAsin(asin)
+      : buildDesignKeyByExt(asin, ext);
 
-    const filename = `${asin}${path.extname(key) || ".psd"}`;
+    const filename = `${asin}${ext}`;
     const url = await getSignedUrlForKey(key, {
       expiresIn: expires,
       asAttachment,
