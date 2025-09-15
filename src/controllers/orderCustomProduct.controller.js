@@ -44,17 +44,13 @@ async function loadActiveSkuMappingConfigs() {
   return configs;
 }
 
-// const db = require('../models');
-// const OrderCustomProduct = db.OrderCustomProduct;
-// const Listing = db.Listing;
-
-// const db = require('../models');
-// const OrderCustomProduct = db.OrderCustomProduct;
-// const Listing = db.Listing;
-
 const importOrderJson = async (req, res) => {
   try {
     const jsonData = req.body;
+
+    // chỉ dùng sellerId / shopId khi TẠO MỚI listing
+    const incomingSellerId = jsonData?.sellerId || null;
+    const incomingShopId = jsonData?.shopId || null;
 
     const order = await OrderCustomProduct.findOne({
       orderId: jsonData.orderId,
@@ -99,13 +95,26 @@ const importOrderJson = async (req, res) => {
           asin,
         });
       }
-      listingDoc = await Listing.create({
+
+      // 🔸 CHỈ THAY ĐỔI Ở ĐÂY: tạo mới Listing + gắn sellerId, shopId
+      //     + template.design_product='Design' & template.style='Sweatshirt'
+      const listingCreatePayload = {
         asin,
-        product_image: baseImageUrlForCreate, // ✅ bắt buộc, không để trống
+        product_image: baseImageUrlForCreate, // bắt buộc
         asin_type: "Normal",
         platform: "Amazon",
-      });
+        ...(incomingSellerId ? { seller: incomingSellerId } : {}),
+        ...(incomingShopId ? { store: incomingShopId } : {}),
+        template: {
+          design_product: "Design",
+          style: "Sweatshirt",
+          ...(jsonData?.template || {}), // client có thể override nếu muốn
+        },
+      };
+
+      listingDoc = await Listing.create(listingCreatePayload);
     }
+    // Nếu listing đã tồn tại theo ASIN: không cập nhật gì thêm
 
     // Gán listingId cho item (KHÔNG tạo item mới)
     if (!item.listingId || String(item.listingId) !== String(listingDoc._id)) {
@@ -314,16 +323,18 @@ const updateOrdersFromXlsx = async (req, res) => {
     const filePath = req.file.path;
     const ext = path.extname(req.file.originalname).toLowerCase();
     let rows = [];
-    const shopId = req.body.shopId;
+    const bodyShopId = req.body.shopId; // shopId gửi từ client
     const type = req.body.type;
 
-    // ✅ Cờ auto compute base-cost & cho phép override seller
+    // ✅ Auto compute base-cost
     const autoCompute =
       String(req.body?.autoComputeBaseCost ?? "true") !== "false";
+
+    // ✅ Cho phép override seller hiện tại
     const overrideSeller =
       String(req.body?.overrideSeller ?? "false") === "true";
 
-    // ✅ Cờ dry-run cho SKU Mapping (chỉ preview, không ghi DB)
+    // ✅ Dry-run SKU Mapping
     const skuMappingDryRun =
       String(req.body?.skuMappingDryRun ?? "false") === "true";
     const skuMappingPreviewLimit = Number(
@@ -333,33 +344,19 @@ const updateOrdersFromXlsx = async (req, res) => {
     const ordersToCompute = new Set();
     const results = [];
 
-    // ✅ Gom SKU để xử lý majority seller
-    /** @type {Map<string, string[]>} */
+    // ✅ Gom SKU xử lý majority
     const orderIdToSkus = new Map();
-    /** @type {Set<string>} */
     const ordersTouched = new Set();
 
     // ✅ Cache ASIN→Listing image
     const asinToListingMap = new Map();
 
-    // 🔶 SKU-MAPPING: nạp config active + batch queues
-    /** @type {Array<any>} */
+    // 🔶 SKU-MAPPING
     const activeConfigs = await loadActiveSkuMappingConfigs();
+    const pendingSkuMapLogs = [];
+    const pendingMappedSkuOps = [];
+    const skuMappingSamples = [];
 
-    /** @type {Array<any>} */
-    const pendingSkuMapLogs = []; // ghi SkuMappingEntry (log)
-    /** @type {Array<any>} */
-    const pendingMappedSkuOps = []; // set items.$.mapped_sku
-    /** @type {Array<any>} */
-    const skuMappingSamples = []; // trả preview khi dry-run
-
-    /**
-     * 🔶 SKU-MAPPING helper
-     * - Không đổi items[].sku gốc
-     * - Tạo log vào SkuMappingEntry (upsert)
-     * - Set items.$.mapped_sku = newSku (để xem nhanh trong order)
-     * - Áp theo config ưu tiên cao nhất
-     */
     function considerLogMapping(orderId, orderItemId, sku) {
       if (!sku || !activeConfigs || activeConfigs.length === 0) return;
 
@@ -380,8 +377,7 @@ const updateOrdersFromXlsx = async (req, res) => {
               },
             });
           }
-
-          // 1) Log mapping
+          // log
           pendingSkuMapLogs.push({
             updateOne: {
               filter: { orderId, orderItemId, oldSku: sku, newSku: r.next },
@@ -397,21 +393,19 @@ const updateOrdersFromXlsx = async (req, res) => {
               upsert: true,
             },
           });
-
-          // 2) Ghi mapped_sku trên order item
+          // update mapped_sku trên item
           pendingMappedSkuOps.push({
             updateOne: {
               filter: { orderId, "items.orderItemId": orderItemId },
               update: { $set: { "items.$.mapped_sku": r.next } },
             },
           });
-
-          break; // chỉ áp config ưu tiên cao nhất
+          break;
         }
       }
     }
 
-    // ====== đọc file TXT ======
+    // ====== Đọc file TXT ======
     if (ext === ".txt") {
       const raw = fs.readFileSync(filePath, "utf8");
       const delimiter = raw.includes("\t") ? "\t" : ",";
@@ -432,20 +426,18 @@ const updateOrdersFromXlsx = async (req, res) => {
       return res.status(400).json({ message: "Only .txt files are supported" });
     }
 
-    // ✅ Pre-fetch Listing images theo ASIN
+    // ✅ Prefetch Listing images theo ASIN
     const uniqueAsins = new Set();
     for (const row of rows) {
       const asin = row.asin?.trim();
       if (asin) uniqueAsins.add(asin);
     }
-
     if (uniqueAsins.size > 0) {
       const listings = await Listing.find({
         asin: { $in: Array.from(uniqueAsins) },
       })
         .select("asin product_image")
         .lean();
-
       for (const listing of listings) {
         if (listing.asin && listing.product_image) {
           asinToListingMap.set(listing.asin, listing.product_image);
@@ -463,14 +455,12 @@ const updateOrdersFromXlsx = async (req, res) => {
         const newStatus = row.order_status?.trim();
         if (!orderId || !newStatus) continue;
 
-        let existingOrder = await OrderCustomProduct.findOne({ orderId });
-
+        const existingOrder = await OrderCustomProduct.findOne({ orderId });
         if (existingOrder) {
           if (newStatus === "Pending") {
             results.push({ orderId, status: "skipped - pending" });
             continue;
           }
-
           if (existingOrder.status !== newStatus) {
             const oldStatus = existingOrder.status;
             existingOrder.status = newStatus;
@@ -494,17 +484,18 @@ const updateOrdersFromXlsx = async (req, res) => {
             );
             existingOrder.address_validation = validationResult;
             await existingOrder.save();
-
             results.push({
               orderId,
               addressChecked: true,
               addressValid: validationResult.isValid,
             });
           }
-          continue;
         }
       }
 
+      try {
+        fs.unlinkSync(filePath);
+      } catch (_) {}
       return res.json({
         message: "Update by latest ship date completed",
         results,
@@ -517,7 +508,6 @@ const updateOrdersFromXlsx = async (req, res) => {
       if (!orderId) continue;
 
       ordersTouched.add(orderId);
-
       if (row.sku) {
         const arr = orderIdToSkus.get(orderId) || [];
         arr.push(row.sku);
@@ -525,10 +515,8 @@ const updateOrdersFromXlsx = async (req, res) => {
       }
 
       const asin = row.asin?.trim();
-      let baseImageFromListing = null;
-      if (asin && asinToListingMap.has(asin)) {
-        baseImageFromListing = asinToListingMap.get(asin);
-      }
+      const baseImageFromListing =
+        asin && asinToListingMap.has(asin) ? asinToListingMap.get(asin) : null;
 
       const itemData = {
         orderItemId: row.order_item_id,
@@ -541,7 +529,7 @@ const updateOrdersFromXlsx = async (req, res) => {
 
       const basicData = {
         orderId,
-        shopId,
+        shopId: bodyShopId, // mặc định gán theo body khi tạo mới
         purchase_date: row.purchase_date,
         customer_infor: {
           email: row.buyer_email,
@@ -559,6 +547,10 @@ const updateOrdersFromXlsx = async (req, res) => {
         base_cost: 0,
       };
 
+      // sẽ truyền xuống importOrderJson
+      let currentSellerIdForThisOrder = null;
+      let currentShopIdForThisOrder = null;
+
       const existing = await OrderCustomProduct.findOne({ orderId });
       let skipProcessingZip = false;
 
@@ -566,6 +558,7 @@ const updateOrdersFromXlsx = async (req, res) => {
         const exists = existing.items.some(
           (i) => i.orderItemId === itemData.orderItemId
         );
+
         if (!exists) {
           if (baseImageFromListing) {
             itemData.baseImage = {
@@ -575,17 +568,38 @@ const updateOrdersFromXlsx = async (req, res) => {
             };
           }
 
+          // Thêm item
           existing.items.push(itemData);
 
-          if ((overrideSeller || !existing.sellerId) && itemData.sku) {
+          // ✅ set/override seller theo cờ overrideSeller
+          if (itemData.sku) {
             const msnv = extractMSNVFromSKU(itemData.sku);
             if (msnv) {
-              const sellerId = await findSellerIdByEmployeeId(msnv);
-              if (sellerId) existing.sellerId = sellerId;
+              const parsedSellerId = await findSellerIdByEmployeeId(msnv);
+              if (parsedSellerId) {
+                if (overrideSeller || !existing.sellerId) {
+                  existing.sellerId = parsedSellerId;
+                }
+              }
             }
           }
 
+          // ❗ shopId: không override nếu đã có
+          if (!existing.shopId && bodyShopId) {
+            existing.shopId = bodyShopId;
+          }
+
           await existing.save();
+
+          currentSellerIdForThisOrder = existing?.sellerId
+            ? String(existing.sellerId)
+            : null;
+          currentShopIdForThisOrder = existing?.shopId
+            ? String(existing.shopId)
+            : bodyShopId
+            ? String(bodyShopId)
+            : null;
+
           results.push({
             orderId,
             status: "item added",
@@ -593,15 +607,17 @@ const updateOrdersFromXlsx = async (req, res) => {
             asin: asin || null,
           });
 
-          // 🔶 SKU-MAPPING
+          // SKU mapping
           considerLogMapping(orderId, itemData.orderItemId, itemData.sku);
 
           if (autoCompute) ordersToCompute.add(orderId);
         } else {
+          // Item đã tồn tại
+          const existingItem = existing.items.find(
+            (i) => i.orderItemId === itemData.orderItemId
+          );
+
           if (baseImageFromListing) {
-            const existingItem = existing.items.find(
-              (i) => i.orderItemId === itemData.orderItemId
-            );
             if (
               existingItem &&
               (!existingItem.baseImage?.imageUrl ||
@@ -619,10 +635,9 @@ const updateOrdersFromXlsx = async (req, res) => {
                 orderId,
                 status: "item exists - base image updated from listing",
                 baseImageFromListing: true,
-                asin: asin,
+                asin,
               });
 
-              // 🔶 SKU-MAPPING
               considerLogMapping(
                 orderId,
                 existingItem.orderItemId,
@@ -635,7 +650,6 @@ const updateOrdersFromXlsx = async (req, res) => {
                 baseImageFromListing: false,
                 asin: asin || null,
               });
-
               if (existingItem?.sku) {
                 considerLogMapping(
                   orderId,
@@ -651,10 +665,6 @@ const updateOrdersFromXlsx = async (req, res) => {
               baseImageFromListing: false,
               asin: asin || null,
             });
-
-            const existingItem = existing.items.find(
-              (i) => i.orderItemId === itemData.orderItemId
-            );
             if (existingItem?.sku) {
               considerLogMapping(
                 orderId,
@@ -663,6 +673,17 @@ const updateOrdersFromXlsx = async (req, res) => {
               );
             }
           }
+
+          // seller/shop để truyền xuống JSON
+          currentSellerIdForThisOrder = existing?.sellerId
+            ? String(existing.sellerId)
+            : null;
+          currentShopIdForThisOrder = existing?.shopId
+            ? String(existing.shopId)
+            : bodyShopId
+            ? String(bodyShopId)
+            : null;
+
           skipProcessingZip = true;
 
           if (
@@ -687,15 +708,25 @@ const updateOrdersFromXlsx = async (req, res) => {
           items: [itemData],
         });
 
+        // ✅ sellerId theo SKU khi tạo mới
         if (itemData.sku) {
           const msnv = extractMSNVFromSKU(itemData.sku);
           if (msnv) {
-            const sellerId = await findSellerIdByEmployeeId(msnv);
-            if (sellerId) newOrder.sellerId = sellerId;
+            const parsedSellerId = await findSellerIdByEmployeeId(msnv);
+            if (parsedSellerId) newOrder.sellerId = parsedSellerId;
           }
         }
 
         await newOrder.save();
+
+        currentSellerIdForThisOrder = newOrder?.sellerId
+          ? String(newOrder.sellerId)
+          : null;
+        currentShopIdForThisOrder = newOrder?.shopId
+          ? String(newOrder.shopId)
+          : bodyShopId
+          ? String(bodyShopId)
+          : null;
 
         const validationResult = await validateAddressWithSmarty(
           basicData.customer_infor
@@ -711,9 +742,7 @@ const updateOrdersFromXlsx = async (req, res) => {
           asin: asin || null,
         });
 
-        // 🔶 SKU-MAPPING
         considerLogMapping(orderId, itemData.orderItemId, itemData.sku);
-
         if (autoCompute) ordersToCompute.add(orderId);
       }
 
@@ -829,7 +858,14 @@ const updateOrdersFromXlsx = async (req, res) => {
         jsonData.cloudinarySnapshots = cloudinaryUrls;
         jsonData.skippedSnapshots = skippedSnapshots;
 
-        const fakeReq = { body: jsonData };
+        // 👇 TRUYỀN sellerId + shopId xuống importOrderJson
+        const fakeReq = {
+          body: {
+            ...jsonData,
+            sellerId: currentSellerIdForThisOrder || null,
+            shopId: currentShopIdForThisOrder || null,
+          },
+        };
         const fakeRes = {
           status: (code) => ({
             json: (msg) =>
@@ -849,7 +885,7 @@ const updateOrdersFromXlsx = async (req, res) => {
       }
     }
 
-    // ====== Chốt seller theo majority SKU ======
+    // ====== Chốt seller theo majority SKU (tôn trọng cờ overrideSeller) ======
     const sellerAssignResults = [];
     for (const oid of ordersTouched) {
       const skus = orderIdToSkus.get(oid) || [];
@@ -903,7 +939,7 @@ const updateOrdersFromXlsx = async (req, res) => {
         orderId: oid,
         seller: String(sellerId),
         msnv,
-        action: "assigned",
+        action: orderDoc.sellerId ? "overridden" : "assigned",
       });
     }
 
@@ -931,7 +967,6 @@ const updateOrdersFromXlsx = async (req, res) => {
         await SkuMappingEntry.bulkWrite(pendingSkuMapLogs, { ordered: false });
       } catch (_) {}
     }
-
     if (pendingMappedSkuOps.length > 0 && !skuMappingDryRun) {
       try {
         await OrderCustomProduct.bulkWrite(pendingMappedSkuOps, {
@@ -952,7 +987,7 @@ const updateOrdersFromXlsx = async (req, res) => {
       base_cost_auto_computed: autoCompute,
       base_cost_results: baseCostResults,
       asin_listing_matches: asinToListingMap.size,
-      // 🔶 SKU-MAPPING: thống kê + preview
+      // SKU-MAPPING
       sku_mapping_configs_loaded: activeConfigs.length,
       sku_mapping_logs_queued: pendingSkuMapLogs.length,
       sku_mapping_item_updates: pendingMappedSkuOps.length,

@@ -1,19 +1,19 @@
 // controllers/orderFulfillment.controller.js
-const multer = require('multer');
-const mongoose = require('mongoose');
-const db = require('../models');
-const cloudinary = require('../utils/cloudinary');
-const FulfillmentService = require('../service/fulfillment'); // <<< NEW
+const multer = require("multer");
+const mongoose = require("mongoose");
+const db = require("../models");
+const cloudinary = require("../utils/cloudinary");
+const FulfillmentService = require("../service/fulfillment"); // <<< NEW
 const OrderCustomProduct = db.orderCustomProduct;
 const VendorProduct = db.vendorProduct;
-
+const Listing = db.listing;
 const upload = multer({ storage: multer.memoryStorage() });
 
 // ============ Helpers (giữ nguyên) ============
 function uploadStreamToCloudinary(buffer, opts = {}) {
   return new Promise((resolve, reject) => {
     const stream = cloudinary.uploader.upload_stream(
-      { resource_type: 'image', overwrite: true, ...opts },
+      { resource_type: "image", overwrite: true, ...opts },
       (err, result) => (err ? reject(err) : resolve(result))
     );
     stream.end(buffer);
@@ -22,82 +22,99 @@ function uploadStreamToCloudinary(buffer, opts = {}) {
 
 function computeOverallScaleStatus(orderDoc) {
   const items = orderDoc.items || [];
-  if (items.length === 0) return 'Need Scale';
-  const statuses = items.map(i => i.scale_status || 'Need Scale');
-  const allComplete = statuses.every(s => s === 'Complete');
-  const anyPendingOrComplete = statuses.some(s => s === 'Pending' || s === 'Complete');
-  const anyRejected = statuses.some(s => s === 'QC Rejected');
-  if (anyRejected) return 'QC Rejected';
-  if (allComplete) return 'Ready';
-  if (anyPendingOrComplete) return 'Pending';
-  return 'Need Scale';
+  if (items.length === 0) return "Need Scale";
+  const statuses = items.map((i) => i.scale_status || "Need Scale");
+  const allComplete = statuses.every((s) => s === "Complete");
+  const anyPendingOrComplete = statuses.some(
+    (s) => s === "Pending" || s === "Complete"
+  );
+  const anyRejected = statuses.some((s) => s === "QC Rejected");
+  if (anyRejected) return "QC Rejected";
+  if (allComplete) return "Ready";
+  if (anyPendingOrComplete) return "Pending";
+  return "Need Scale";
 }
 
 // ============ Controllers ============
 
 const uploadFulfillmentFileForItem = [
-  upload.array('files'),
+  upload.array("files"),
   async (req, res) => {
     try {
       const { orderId, orderItemId } = req.params;
       const { meta } = req.body;
 
-      if (!req.files?.length) return res.status(400).json({ message: 'Missing files' });
+      if (!req.files?.length)
+        return res.status(400).json({ message: "Missing files" });
 
       let positions = [];
-      try { positions = JSON.parse(meta); }
-      catch { return res.status(400).json({ message: 'Invalid meta JSON' }); }
+      try {
+        positions = JSON.parse(meta);
+      } catch {
+        return res.status(400).json({ message: "Invalid meta JSON" });
+      }
 
       if (positions.length !== req.files.length) {
-        return res.status(400).json({ message: 'Files count not match positions' });
+        return res
+          .status(400)
+          .json({ message: "Files count not match positions" });
       }
 
       const order = await OrderCustomProduct.findOne({ orderId });
-      if (!order) return res.status(404).json({ message: 'Order not found' });
+      if (!order) return res.status(404).json({ message: "Order not found" });
 
-      const item = order.items.find(i => i.orderItemId === orderItemId);
-      if (!item) return res.status(404).json({ message: 'Order item not found' });
+      const item = order.items.find((i) => i.orderItemId === orderItemId);
+      if (!item)
+        return res.status(404).json({ message: "Order item not found" });
 
       const ff = item.fulfillment_file;
       if (!ff) item.fulfillment_file = new Map();
-      else if (typeof ff === 'string') item.fulfillment_file = new Map();
-      else if (!(ff instanceof Map)) item.fulfillment_file = new Map(Object.entries(ff));
+      else if (typeof ff === "string") item.fulfillment_file = new Map();
+      else if (!(ff instanceof Map))
+        item.fulfillment_file = new Map(Object.entries(ff));
 
       for (let i = 0; i < req.files.length; i++) {
         const file = req.files[i];
-        const pos = String(positions[i]?.position || '').trim().toLowerCase();
-        if (!pos) return res.status(400).json({ message: `Missing position for file index ${i}` });
+        const pos = String(positions[i]?.position || "")
+          .trim()
+          .toLowerCase();
+        if (!pos)
+          return res
+            .status(400)
+            .json({ message: `Missing position for file index ${i}` });
 
         const public_id = `fulfillment_files/${orderId}-${orderItemId}-${pos}`;
         const up = await uploadStreamToCloudinary(file.buffer, { public_id });
         item.fulfillment_file.set(pos, up.secure_url);
       }
 
-      item.scale_status = 'Pending';
+      item.scale_status = "Pending";
       order.scale_overall_status = computeOverallScaleStatus(order);
-      item.markModified('fulfillment_file');
+      item.markModified("fulfillment_file");
       await order.save();
 
       return res.json({
-        message: 'Uploaded fulfillment files successfully',
+        message: "Uploaded fulfillment files successfully",
         fulfillment_file: Object.fromEntries(item.fulfillment_file),
         item_scale_status: item.scale_status,
         order_scale_overall_status: order.scale_overall_status,
       });
     } catch (err) {
-      return res.status(500).json({ message: 'Upload failed', error: err.message });
+      return res
+        .status(500)
+        .json({ message: "Upload failed", error: err.message });
     }
-  }
+  },
 ];
 
 // Chuẩn hóa provider từ Vendor.fulfillment_type hoặc Vendor.name
 function normalizeProviderKey(vendorDoc) {
-  const ft = String(vendorDoc?.fulfillment_type || '').toLowerCase();
-  const nm = String(vendorDoc?.name || '').toLowerCase();
+  const ft = String(vendorDoc?.fulfillment_type || "").toLowerCase();
+  const nm = String(vendorDoc?.name || "").toLowerCase();
 
-  if (ft.includes('merchfox') || nm.includes('merchfox')) return 'merchfox';
-  if (ft.includes('grabink') || nm.includes('grabink')) return 'grabink';
-  if (ft.includes('merchize') || nm.includes('merchize')) return 'merchize';
+  if (ft.includes("merchfox") || nm.includes("merchfox")) return "merchfox";
+  if (ft.includes("grabink") || nm.includes("grabink")) return "grabink";
+  if (ft.includes("merchize") || nm.includes("merchize")) return "merchize";
 
   // có thể bổ sung thêm provider khác ở đây
   return null;
@@ -112,12 +129,16 @@ function normalizeProviderKey(vendorDoc) {
 async function resolveProviderFromOrder(orderDoc, VendorProductModel) {
   const idObjs = [];
 
-  for (const it of (orderDoc.items || [])) {
+  for (const it of orderDoc.items || []) {
     const raw = it?.cost_breakdown?.vendorProductId;
     if (!raw) continue;
 
     // Nếu đã là ObjectId thì dùng luôn, nếu là string thì validate + new
-    if (typeof raw === 'object' && raw !== null && raw._bsontype === 'ObjectID') {
+    if (
+      typeof raw === "object" &&
+      raw !== null &&
+      raw._bsontype === "ObjectID"
+    ) {
       idObjs.push(raw);
       continue;
     }
@@ -129,17 +150,20 @@ async function resolveProviderFromOrder(orderDoc, VendorProductModel) {
   }
 
   if (idObjs.length === 0) {
-    return { providerKey: null, reasons: ['No valid vendorProductId found on items'] };
+    return {
+      providerKey: null,
+      reasons: ["No valid vendorProductId found on items"],
+    };
   }
 
   // Lấy VendorProduct + populate vendor_id
   const vps = await VendorProductModel.find({ _id: { $in: idObjs } })
-    .select('vendor_id')
-    .populate({ path: 'vendor_id', select: 'name fulfillment_type status' })
+    .select("vendor_id")
+    .populate({ path: "vendor_id", select: "name fulfillment_type status" })
     .lean();
 
   if (!vps?.length) {
-    return { providerKey: null, reasons: ['No VendorProduct matched in DB'] };
+    return { providerKey: null, reasons: ["No VendorProduct matched in DB"] };
   }
 
   // Gom provider
@@ -151,36 +175,42 @@ async function resolveProviderFromOrder(orderDoc, VendorProductModel) {
 
   if (provSet.size > 1) {
     const many = [...provSet];
-    const err = new Error(`Multiple providers detected in order: ${many.join(', ')}`);
+    const err = new Error(
+      `Multiple providers detected in order: ${many.join(", ")}`
+    );
     err.status = 409;
-    err.code = 'MULTIPLE_VENDORS_IN_ORDER';
+    err.code = "MULTIPLE_VENDORS_IN_ORDER";
     err.providers = many;
     throw err;
   }
 
   if (provSet.size === 0) {
-    return { providerKey: null, reasons: ['Vendor present but cannot map to a provider'] };
+    return {
+      providerKey: null,
+      reasons: ["Vendor present but cannot map to a provider"],
+    };
   }
 
   return { providerKey: [...provSet][0], reasons: [] };
 }
-
 
 const confirmScaleForItem = async (req, res) => {
   try {
     const { orderId, orderItemId } = req.params;
     const { decision, note, provider } = req.body || {}; // provider optional
 
-    const d = String(decision || '').toLowerCase();
-    if (!['approve', 'reject'].includes(d)) {
-      return res.status(400).json({ message: 'Invalid decision. Must be "approve" or "reject".' });
+    const d = String(decision || "").toLowerCase();
+    if (!["approve", "reject"].includes(d)) {
+      return res
+        .status(400)
+        .json({ message: 'Invalid decision. Must be "approve" or "reject".' });
     }
 
     const order = await OrderCustomProduct.findOne({ orderId });
-    if (!order) return res.status(404).json({ message: 'Order not found' });
+    if (!order) return res.status(404).json({ message: "Order not found" });
 
-    const item = order.items.find(i => i.orderItemId === orderItemId);
-    if (!item) return res.status(404).json({ message: 'Order item not found' });
+    const item = order.items.find((i) => i.orderItemId === orderItemId);
+    if (!item) return res.status(404).json({ message: "Order item not found" });
 
     // ===== helper: kiểm tra fulfillment_file có ít nhất 1 URL hợp lệ =====
     const hasAnyFulfillmentUrl = (ff) => {
@@ -189,25 +219,25 @@ const confirmScaleForItem = async (req, res) => {
         for (const v of ff.values()) if (v) return true;
         return false;
       }
-      if (typeof ff === 'object' && !Array.isArray(ff)) {
+      if (typeof ff === "object" && !Array.isArray(ff)) {
         return Object.values(ff).some(Boolean);
       }
-      if (typeof ff === 'string') return !!ff;
+      if (typeof ff === "string") return !!ff;
       return false;
     };
 
-    if (d === 'reject') {
-      item.scale_status = 'QC Rejected';
+    if (d === "reject") {
+      item.scale_status = "QC Rejected";
       // Xoá sạch file in để tránh lẫn với vòng duyệt sau
       item.fulfillment_file = new Map();
-      item.markModified('fulfillment_file');
+      item.markModified("fulfillment_file");
       if (note) item.qc_note = note;
 
       // Cập nhật trạng thái tổng thể
-      order.scale_overall_status = 'QC Rejected';
+      order.scale_overall_status = "QC Rejected";
       await order.save();
       return res.json({
-        message: 'Scale rejected. Item set to QC Rejected.',
+        message: "Scale rejected. Item set to QC Rejected.",
         item_scale_status: item.scale_status,
         qc_note: item.qc_note,
         order_scale_overall_status: order.scale_overall_status,
@@ -220,23 +250,24 @@ const confirmScaleForItem = async (req, res) => {
     const hasSvg = !!item.svgFile;
     if (!hasFF && !hasSvg) {
       return res.status(400).json({
-        message: 'Missing print files. Please upload fulfillment_file (front/back/...) or provide svgFile before approval.',
+        message:
+          "Missing print files. Please upload fulfillment_file (front/back/...) or provide svgFile before approval.",
       });
     }
 
-    item.scale_status = 'Complete';
+    item.scale_status = "Complete";
     if (note) item.qc_note = note;
 
     // Nếu fulfillment_file là Map rỗng và bạn vừa mới nạp file trước đó ở API khác,
     // có thể cần markModified để Mongoose ghi nhận (an toàn vẫn mark):
-    item.markModified('fulfillment_file');
+    item.markModified("fulfillment_file");
 
     // Tính trạng thái tổng thể (Ready nếu tất cả Complete)
     order.scale_overall_status = computeOverallScaleStatus(order);
 
     // === Nếu order đã "Ready", xác định provider và gửi ===
-    if (order.scale_overall_status === 'Ready') {
-      let providerKey = String(provider || '').trim();
+    if (order.scale_overall_status === "Ready") {
+      let providerKey = String(provider || "").trim();
 
       try {
         // Nếu client không chỉ định provider, tự suy ra từ VendorProduct → Vendor
@@ -248,15 +279,16 @@ const confirmScaleForItem = async (req, res) => {
         // Có nhiều vendor khác nhau trong cùng order → yêu cầu client chỉ định rõ
         const status = provErr.status || 409;
         return res.status(status).json({
-          message: 'Unable to auto-select provider because multiple vendors were detected for this order.',
+          message:
+            "Unable to auto-select provider because multiple vendors were detected for this order.",
           error: provErr.message,
           providers: provErr.providers || [],
-          hint: 'Please specify "provider" in request body, e.g., {"provider":"grabink"} or {"provider":"merchfox"} or {"provider":"merchize"}.'
+          hint: 'Please specify "provider" in request body, e.g., {"provider":"grabink"} or {"provider":"merchfox"} or {"provider":"merchize"}.',
         });
       }
 
       // Fallback cuối cùng
-      if (!providerKey) providerKey = 'grabink';
+      if (!providerKey) providerKey = "grabink";
 
       try {
         const result = await FulfillmentService.send(order, providerKey);
@@ -281,11 +313,11 @@ const confirmScaleForItem = async (req, res) => {
         order.vendor_submissions = order.vendor_submissions || {};
         order.vendor_submissions[providerKey] = rec;
 
-        if (providerKey === 'grabink') {
+        if (providerKey === "grabink") {
           order.grabink_submission = rec; // backward-compat
         }
 
-        order.scale_overall_status = 'Failed';
+        order.scale_overall_status = "Failed";
         await order.save();
         return res.status(502).json({
           message: `Approved but sending order to ${providerKey} failed. Overall status set to Failed.`,
@@ -297,44 +329,50 @@ const confirmScaleForItem = async (req, res) => {
     // Chưa đủ Complete (đơn nhiều item)
     await order.save();
     return res.json({
-      message: 'Item approved. Waiting for other items to be approved.',
+      message: "Item approved. Waiting for other items to be approved.",
       item_scale_status: item.scale_status,
       order_scale_overall_status: order.scale_overall_status,
     });
   } catch (err) {
-    return res.status(500).json({ message: 'Confirm failed', error: err.message });
+    return res
+      .status(500)
+      .json({ message: "Confirm failed", error: err.message });
   }
 };
-
 
 // Retry gửi đơn sang vendor cụ thể (auto-resolve nếu không truyền provider)
 const retrySendFulfillment = async (req, res) => {
   try {
     const { orderId } = req.params;
-    let providerKey = String(req.query.provider || req.body?.provider || '').trim().toLowerCase(); // optional
+    let providerKey = String(req.query.provider || req.body?.provider || "")
+      .trim()
+      .toLowerCase(); // optional
 
     const order = await OrderCustomProduct.findOne({ orderId });
-    if (!order) return res.status(404).json({ message: 'Order not found' });
+    if (!order) return res.status(404).json({ message: "Order not found" });
 
     // Danh sách provider hợp lệ từ service (tránh hard-code)
-    const AVAILABLE_PROVIDERS = (FulfillmentService.PROVIDERS || []).map(p => p.key);
+    const AVAILABLE_PROVIDERS = (FulfillmentService.PROVIDERS || []).map(
+      (p) => p.key
+    );
     const providersHint = AVAILABLE_PROVIDERS.length
-      ? AVAILABLE_PROVIDERS.join(' | ')
-      : 'grabink | merchfox | merchize';
+      ? AVAILABLE_PROVIDERS.join(" | ")
+      : "grabink | merchfox | merchize";
 
     // 1) Nếu không truyền provider, auto-resolve từ VendorProduct → Vendor
     if (!providerKey) {
       try {
         const resolved = await resolveProviderFromOrder(order, VendorProduct);
-        providerKey = (resolved.providerKey || '').toLowerCase();
+        providerKey = (resolved.providerKey || "").toLowerCase();
       } catch (provErr) {
         // Trường hợp có nhiều vendor trong cùng đơn
         const status = provErr.status || 409;
         return res.status(status).json({
-          message: 'Unable to auto-select provider because multiple vendors were detected for this order.',
+          message:
+            "Unable to auto-select provider because multiple vendors were detected for this order.",
           error: provErr.message,
           providers: provErr.providers || [],
-          hint: `Please specify "provider" in query/body, e.g., ?provider=${providersHint}`
+          hint: `Please specify "provider" in query/body, e.g., ?provider=${providersHint}`,
         });
       }
     }
@@ -342,27 +380,31 @@ const retrySendFulfillment = async (req, res) => {
     // 2) Không fallback về grabink nữa. Nếu chưa xác định được, yêu cầu client chỉ định rõ.
     if (!providerKey) {
       return res.status(409).json({
-        message: 'Unable to determine provider automatically.',
-        hint: `Please specify "provider" in query/body, e.g., ?provider=${providersHint}`
+        message: "Unable to determine provider automatically.",
+        hint: `Please specify "provider" in query/body, e.g., ?provider=${providersHint}`,
       });
     }
 
     // 2.1) Validate provider hợp lệ
-    if (AVAILABLE_PROVIDERS.length && !AVAILABLE_PROVIDERS.includes(providerKey)) {
+    if (
+      AVAILABLE_PROVIDERS.length &&
+      !AVAILABLE_PROVIDERS.includes(providerKey)
+    ) {
       return res.status(400).json({
         message: `Unknown provider: ${providerKey}`,
-        hint: `Valid providers: ${providersHint}`
+        hint: `Valid providers: ${providersHint}`,
       });
     }
 
     // 3) Kiểm tra điều kiện retry theo trạng thái tổng
     const okToSend =
-      (order.scale_overall_status === 'Ready' || order.scale_overall_status === 'Failed');
+      order.scale_overall_status === "Ready" ||
+      order.scale_overall_status === "Failed";
     if (!okToSend) {
       return res.status(409).json({
-        message: 'Order is not ready to send.',
+        message: "Order is not ready to send.",
         scale_overall_status: order.scale_overall_status,
-        provider: providerKey
+        provider: providerKey,
       });
     }
 
@@ -370,14 +412,14 @@ const retrySendFulfillment = async (req, res) => {
     const submissions = order.vendor_submissions || {};
     const sub =
       submissions[providerKey] ||
-      (providerKey === 'grabink' ? order.grabink_submission : null);
-    const alreadySent = !!(sub?.sent);
+      (providerKey === "grabink" ? order.grabink_submission : null);
+    const alreadySent = !!sub?.sent;
     if (alreadySent) {
       return res.status(409).json({
         message: `Order already sent to ${providerKey}.`,
         provider: providerKey,
         last_response: sub?.last_response || null,
-        sent_at: sub?.sent_at || null
+        sent_at: sub?.sent_at || null,
       });
     }
 
@@ -388,10 +430,12 @@ const retrySendFulfillment = async (req, res) => {
         ? `Order already sent to ${result.vendorKey}.`
         : `Order sent to ${result.vendorKey}.`,
       provider: result.vendorKey,
-      submission_response: result.response
+      submission_response: result.response,
     });
   } catch (err) {
-    return res.status(500).json({ message: 'Retry failed', error: err.message });
+    return res
+      .status(500)
+      .json({ message: "Retry failed", error: err.message });
   }
 };
 
@@ -407,27 +451,36 @@ const getScaleList = async (req, res) => {
       to,
       scale_status,
       search,
-      shopName
+      shopName,
     } = req.query;
 
-    const KNOWN = ['Need Scale', 'Pending', 'Ready', 'Sent', 'Failed', 'QC Rejected'];
+    const KNOWN = [
+      "Need Scale",
+      "Pending",
+      "Ready",
+      "Sent",
+      "Failed",
+      "QC Rejected",
+    ];
 
-    const canon = s => {
-      const t = String(s || '').trim();
-      if (!t) return '';
-      if (/^complete$/i.test(t)) return 'Ready';
-      if (/^qc\s*reject(?:ed)?$/i.test(t)) return 'QC Rejected';
+    const canon = (s) => {
+      const t = String(s || "").trim();
+      if (!t) return "";
+      if (/^complete$/i.test(t)) return "Ready";
+      if (/^qc\s*reject(?:ed)?$/i.test(t)) return "QC Rejected";
       return t;
     };
 
     // ===== RBAC =====
-    const role = req.user?.role || '';
-    const userId = req.user?.userId || '';
+    const role = req.user?.role || "";
+    const userId = req.user?.userId || "";
     const isAdmin = /^admin$/i.test(role);
     const isSeller = /^seller$/i.test(role);
 
     if (!isAdmin && !isSeller) {
-      return res.status(403).json({ message: 'Access denied: insufficient permissions' });
+      return res
+        .status(403)
+        .json({ message: "Access denied: insufficient permissions" });
     }
 
     // 1) Match theo thời gian + seller filter
@@ -437,7 +490,7 @@ const getScaleList = async (req, res) => {
     }
     if (isSeller) {
       if (!mongoose.Types.ObjectId.isValid(userId)) {
-        return res.status(400).json({ message: 'Invalid user id in token' });
+        return res.status(400).json({ message: "Invalid user id in token" });
       }
       initialMatch.sellerId = new mongoose.Types.ObjectId(userId);
     }
@@ -449,84 +502,111 @@ const getScaleList = async (req, res) => {
       // Join shop
       {
         $lookup: {
-          from: 'shops',
-          localField: 'shopId',
-          foreignField: '_id',
-          as: 'shop'
-        }
+          from: "shops",
+          localField: "shopId",
+          foreignField: "_id",
+          as: "shop",
+        },
       },
-      { $unwind: { path: '$shop', preserveNullAndEmptyArrays: true } },
+      { $unwind: { path: "$shop", preserveNullAndEmptyArrays: true } },
 
       // populate seller
       {
         $lookup: {
-          from: 'users',
-          localField: 'sellerId',
-          foreignField: '_id',
-          as: 'seller'
-        }
+          from: "users",
+          localField: "sellerId",
+          foreignField: "_id",
+          as: "seller",
+        },
       },
-      { $unwind: { path: '$seller', preserveNullAndEmptyArrays: true } },
+      { $unwind: { path: "$seller", preserveNullAndEmptyArrays: true } },
 
       // Filter shopName
       ...(shopName && shopName.trim()
-        ? [{ $match: { 'shop.name': { $regex: new RegExp(shopName.trim(), 'i') } } }]
+        ? [
+            {
+              $match: {
+                "shop.name": { $regex: new RegExp(shopName.trim(), "i") },
+              },
+            },
+          ]
         : []),
 
       // Filter search (mở rộng thêm seller)
-      ...((() => {
+      ...(() => {
         if (!search || !search.trim()) return [];
-        const keyword = new RegExp(search.trim(), 'i');
-        return [{
-          $match: {
-            $or: [
-              { orderId: keyword },
-              { 'items.sku': keyword },
-              { 'items.orderItemId': keyword },
-              { 'customer_infor.email': keyword },
-              { 'customer_infor.name': keyword },
-              { 'seller.full_name': keyword },
-              { 'seller.email': keyword }
-            ]
-          }
-        }];
-      })()),
+        const keyword = new RegExp(search.trim(), "i");
+        return [
+          {
+            $match: {
+              $or: [
+                { orderId: keyword },
+                { "items.sku": keyword },
+                { "items.orderItemId": keyword },
+                { "customer_infor.email": keyword },
+                { "customer_infor.name": keyword },
+                { "seller.full_name": keyword },
+                { "seller.email": keyword },
+              ],
+            },
+          },
+        ];
+      })(),
 
       // Chuẩn hoá bucket
       {
         $addFields: {
           hasPendingItem: {
             $anyElementTrue: {
-              $map: { input: '$items', as: 'it', in: { $eq: ['$$it.scale_status', 'Pending'] } }
-            }
+              $map: {
+                input: "$items",
+                as: "it",
+                in: { $eq: ["$$it.scale_status", "Pending"] },
+              },
+            },
           },
           overall_status_bucket: {
             $let: {
-              vars: { s: { $ifNull: ['$scale_overall_status', 'Need Scale'] } },
-              in: { $cond: [{ $in: ['$$s', KNOWN] }, '$$s', 'Other'] }
-            }
-          }
-        }
-      }
+              vars: { s: { $ifNull: ["$scale_overall_status", "Need Scale"] } },
+              in: { $cond: [{ $in: ["$$s", KNOWN] }, "$$s", "Other"] },
+            },
+          },
+        },
+      },
     ];
 
     // 3) Áp filter theo bucket
     let onlyPending = false;
-    if (scale_status && String(scale_status).trim() !== '') {
+    if (scale_status && String(scale_status).trim() !== "") {
       if (/^all$/i.test(scale_status.trim())) {
-        pipeline.push({ $match: { overall_status_bucket: { $in: ['Need Scale', 'Pending', 'Sent', 'QC Rejected'] } } });
+        pipeline.push({
+          $match: {
+            overall_status_bucket: {
+              $in: ["Need Scale", "Pending", "Sent", "QC Rejected"],
+            },
+          },
+        });
       } else {
-        const wanted = String(scale_status).split(',').map(canon).filter(Boolean);
-        const valid = wanted.filter(v => KNOWN.includes(v));
+        const wanted = String(scale_status)
+          .split(",")
+          .map(canon)
+          .filter(Boolean);
+        const valid = wanted.filter((v) => KNOWN.includes(v));
         if (valid.length > 0) {
           pipeline.push({ $match: { overall_status_bucket: { $in: valid } } });
-          onlyPending = (valid.length === 1 && valid[0] === 'Pending');
+          onlyPending = valid.length === 1 && valid[0] === "Pending";
         } else {
-          pipeline.push({ $match: { overall_status_bucket: '__NO_MATCH__' } });
+          pipeline.push({ $match: { overall_status_bucket: "__NO_MATCH__" } });
         }
       }
     } else {
-      pipeline.push({ $match: { overall_status_bucket: { $in: ['Need Scale', 'Pending', 'Sent', 'QC Rejected'] } } });
+      pipeline.push({
+        $match: {
+          overall_status_bucket: {
+            $in: ["Need Scale", "Pending", "Sent", "QC Rejected"],
+          },
+        },
+      });
     }
 
     if (onlyPending) {
@@ -536,22 +616,22 @@ const getScaleList = async (req, res) => {
     // 5) Join Case
     pipeline.push({
       $lookup: {
-        from: 'cases',
-        localField: 'case',
-        foreignField: '_id',
-        as: 'case'
-      }
+        from: "cases",
+        localField: "case",
+        foreignField: "_id",
+        as: "case",
+      },
     });
 
     // --- Count ---
-    const countPipeline = [...pipeline, { $count: 'total' }];
+    const countPipeline = [...pipeline, { $count: "total" }];
     const countResult = await OrderCustomProduct.aggregate(countPipeline);
     const totalCount = countResult?.[0]?.total || 0;
 
     // --- Paginate ---
-    const isAll = String(perPage).toLowerCase() === 'all';
+    const isAll = String(perPage).toLowerCase() === "all";
     const pageNum = parseInt(page, 10) || 1;
-    const limitNum = isAll ? (totalCount || 1) : (parseInt(perPage, 10) || 10);
+    const limitNum = isAll ? totalCount || 1 : parseInt(perPage, 10) || 10;
     const skip = isAll ? 0 : (pageNum - 1) * limitNum;
 
     pipeline.push({ $sort: { createdAt: -1 } });
@@ -562,7 +642,7 @@ const getScaleList = async (req, res) => {
     // === Map vendor product name (giữ nguyên logic cũ) ===
     const vendorIdSet = new Set();
     for (const o of orders) {
-      for (const it of (o.items || [])) {
+      for (const it of o.items || []) {
         const vId = it?.cost_breakdown?.vendorProductId;
         if (vId) vendorIdSet.add(String(vId));
       }
@@ -579,39 +659,66 @@ const getScaleList = async (req, res) => {
 
       if (idObjs.length > 0) {
         const vps = await VendorProduct.find({ _id: { $in: idObjs } })
-          .select('product_name vendor_id')
-          .populate({ path: 'vendor_id', select: 'name' })
+          .select("product_name vendor_id")
+          .populate({ path: "vendor_id", select: "name" })
           .lean();
 
         vendorFullNameMap = new Map(
-          (vps || []).map(vp => {
-            const vendorName = vp?.vendor_id?.name || '';
-            const productName = vp?.product_name || '';
+          (vps || []).map((vp) => {
+            const vendorName = vp?.vendor_id?.name || "";
+            const productName = vp?.product_name || "";
             return [String(vp._id), `${vendorName} - ${productName}`.trim()];
           })
         );
       }
     }
 
-    const result = orders.map(order => {
-      const items = (order.items || []).map(item => {
+    const listingIdSet = new Set();
+    for (const o of orders) {
+      for (const it of o.items || []) {
+        const lid = it?.listingId;
+        if (lid) listingIdSet.add(String(lid));
+      }
+    }
+
+    // --- NEW: Query Listing 1 lần và map theo _id ---
+    let listingMap = new Map();
+    if (listingIdSet.size > 0) {
+      const ids = [];
+      for (const id of listingIdSet) {
+        if (mongoose.Types.ObjectId.isValid(id)) {
+          ids.push(new mongoose.Types.ObjectId(id));
+        }
+      }
+      if (ids.length > 0) {
+        const listings = await Listing.find({ _id: { $in: ids } })
+          .select("asin_type product_image psd") // chỉ lấy các trường cần
+          .lean();
+        listingMap = new Map(listings.map((l) => [String(l._id), l]));
+      }
+    }
+
+    const result = orders.map((order) => {
+      const items = (order.items || []).map((item) => {
         const surfaces = item.version3Data?.customizationInfo?.surfaces || [];
-        const version3Data = surfaces.flatMap(surface =>
-          (surface.areas || []).map(area => ({
-            label: area.label || area.name || '',
-            value: area.optionValue || area.text || ''
+        const version3Data = surfaces.flatMap((surface) =>
+          (surface.areas || []).map((area) => ({
+            label: area.label || area.name || "",
+            value: area.optionValue || area.text || "",
           }))
         );
 
         const vendorProductId = item?.cost_breakdown?.vendorProductId || null;
         const vendorProductDisplayName = vendorProductId
-          ? (vendorFullNameMap.get(String(vendorProductId)) || null)
+          ? vendorFullNameMap.get(String(vendorProductId)) || null
           : null;
-
+        const ldoc = item?.listingId
+          ? listingMap.get(String(item.listingId))
+          : null;
         return {
           orderItemId: item.orderItemId || null,
           sku: item.sku,
-          title: item.title || '',
+          title: item.title || "",
           quantity: item.quantity || 1,
           version3Data,
           baseImageUrl: item.baseImage?.imageUrl || null,
@@ -623,17 +730,25 @@ const getScaleList = async (req, res) => {
             vendorProductId,
             vendorProductDisplayName,
             sizeValue: item?.cost_breakdown?.sizeValue || null,
-            colorValue: item?.cost_breakdown?.colorValue || null
+            colorValue: item?.cost_breakdown?.colorValue || null,
           },
           tracking_info: {
             fulfillment: item?.tracking_info?.fulfillment,
             status: item?.tracking_info?.status,
             tracking: item?.tracking_info?.tracking,
-            note: item?.tracking_info?.note
+            note: item?.tracking_info?.note,
           },
           fulfillment_file: item.fulfillment_file,
           scale_status: item.scale_status,
-          qc_note: item.qc_note
+          qc_note: item.qc_note,
+          listingId: item.listingId,
+          listing: ldoc
+            ? {
+                asin_type: ldoc.asin_type || null,
+                product_image: ldoc.product_image || null,
+                psd: ldoc.psd || null,
+              }
+            : null,
         };
       });
 
@@ -642,7 +757,7 @@ const getScaleList = async (req, res) => {
         merchantId: order.merchantId || null,
         marketplaceId: order.marketplaceId || null,
         customer_infor: order.customer_infor,
-        status: order.status || '',
+        status: order.status || "",
         customized_url: order.customized_url,
         purchase_date: order.purchase_date,
         createdAt: order.createdAt,
@@ -654,8 +769,12 @@ const getScaleList = async (req, res) => {
         address_validation: order.address_validation?.isValid,
         scale_overall_status: order.scale_overall_status,
         seller: order.seller
-          ? { _id: order.seller._id, full_name: order.seller.full_name, email: order.seller.email }
-          : null
+          ? {
+              _id: order.seller._id,
+              full_name: order.seller.full_name,
+              email: order.seller.email,
+            }
+          : null,
       };
     });
 
@@ -663,38 +782,49 @@ const getScaleList = async (req, res) => {
       data: result,
       totalCount,
       totalPages: isAll ? 1 : Math.ceil(totalCount / limitNum),
-      currentPage: pageNum
+      currentPage: pageNum,
     });
-
   } catch (error) {
-    console.error('❌ getScaleList error:', error);
+    console.error("❌ getScaleList error:", error);
     res.status(500).json({
-      message: 'Failed to retrieve scale list',
-      error: error.message
+      message: "Failed to retrieve scale list",
+      error: error.message,
     });
   }
 };
-
-
-
-
 
 // ============================
 // STATISTICS — giữ nguyên chuẩn
 // ============================
 const getScaleStatistics = async (req, res) => {
   try {
-    const { from, to, search, shopName, breakdown, timeseries = 'false' } = req.query;
-    const KNOWN = ['Need Scale', 'Pending', 'Ready', 'Sent', 'Failed', 'QC Rejected'];
+    const {
+      from,
+      to,
+      search,
+      shopName,
+      breakdown,
+      timeseries = "false",
+    } = req.query;
+    const KNOWN = [
+      "Need Scale",
+      "Pending",
+      "Ready",
+      "Sent",
+      "Failed",
+      "QC Rejected",
+    ];
 
     // ===== RBAC =====
-    const role = req.user?.role || '';
-    const userId = req.user?.userId || '';
+    const role = req.user?.role || "";
+    const userId = req.user?.userId || "";
     const isAdmin = /^admin$/i.test(role);
     const isSeller = /^seller$/i.test(role);
 
     if (!isAdmin && !isSeller) {
-      return res.status(403).json({ message: 'Access denied: insufficient permissions' });
+      return res
+        .status(403)
+        .json({ message: "Access denied: insufficient permissions" });
     }
 
     const matchStage = {};
@@ -703,20 +833,20 @@ const getScaleStatistics = async (req, res) => {
     }
     if (isSeller) {
       if (!mongoose.Types.ObjectId.isValid(userId)) {
-        return res.status(400).json({ message: 'Invalid user id in token' });
+        return res.status(400).json({ message: "Invalid user id in token" });
       }
       matchStage.sellerId = new mongoose.Types.ObjectId(userId);
     }
 
     let searchOr = null;
-    if (search && search.trim() !== '') {
-      const keyword = new RegExp(search.trim(), 'i');
+    if (search && search.trim() !== "") {
+      const keyword = new RegExp(search.trim(), "i");
       searchOr = [
         { orderId: keyword },
-        { 'items.sku': keyword },
-        { 'items.orderItemId': keyword },
-        { 'customer_infor.email': keyword },
-        { 'customer_infor.name': keyword }
+        { "items.sku": keyword },
+        { "items.orderItemId": keyword },
+        { "customer_infor.email": keyword },
+        { "customer_infor.name": keyword },
       ];
     }
 
@@ -724,32 +854,42 @@ const getScaleStatistics = async (req, res) => {
       { $match: matchStage },
       {
         $lookup: {
-          from: 'shops',
-          localField: 'shopId',
-          foreignField: '_id',
-          as: 'shop'
-        }
+          from: "shops",
+          localField: "shopId",
+          foreignField: "_id",
+          as: "shop",
+        },
       },
-      { $unwind: { path: '$shop', preserveNullAndEmptyArrays: true } },
+      { $unwind: { path: "$shop", preserveNullAndEmptyArrays: true } },
       ...(shopName && shopName.trim()
-        ? [{ $match: { 'shop.name': { $regex: new RegExp(shopName.trim(), 'i') } } }]
+        ? [
+            {
+              $match: {
+                "shop.name": { $regex: new RegExp(shopName.trim(), "i") },
+              },
+            },
+          ]
         : []),
       ...(searchOr ? [{ $match: { $or: searchOr } }] : []),
       {
         $addFields: {
           hasPendingItem: {
             $anyElementTrue: {
-              $map: { input: '$items', as: 'it', in: { $eq: ['$$it.scale_status', 'Pending'] } }
-            }
+              $map: {
+                input: "$items",
+                as: "it",
+                in: { $eq: ["$$it.scale_status", "Pending"] },
+              },
+            },
           },
           overall_status_bucket: {
             $let: {
-              vars: { s: { $ifNull: ['$scale_overall_status', 'Need Scale'] } },
-              in: { $cond: [{ $in: ['$$s', KNOWN] }, '$$s', 'Other'] }
-            }
-          }
-        }
-      }
+              vars: { s: { $ifNull: ["$scale_overall_status", "Need Scale"] } },
+              in: { $cond: [{ $in: ["$$s", KNOWN] }, "$$s", "Other"] },
+            },
+          },
+        },
+      },
     ];
 
     // Overall counts (Pending chỉ tính khi có item Pending)
@@ -757,25 +897,31 @@ const getScaleStatistics = async (req, res) => {
       ...basePipeline,
       {
         $group: {
-          _id: '$overall_status_bucket',
+          _id: "$overall_status_bucket",
           orders: { $sum: 1 },
           pendingAdj: {
             $sum: {
               $cond: [
-                { $and: [{ $eq: ['$overall_status_bucket', 'Pending'] }, '$hasPendingItem'] },
-                1, 0
-              ]
-            }
-          }
-        }
+                {
+                  $and: [
+                    { $eq: ["$overall_status_bucket", "Pending"] },
+                    "$hasPendingItem",
+                  ],
+                },
+                1,
+                0,
+              ],
+            },
+          },
+        },
       },
       {
         $group: {
           _id: null,
-          totalOrders: { $sum: '$orders' },
-          byStatus: { $push: { k: '$_id', v: '$orders' } },
-          pendingAdj: { $sum: '$pendingAdj' }
-        }
+          totalOrders: { $sum: "$orders" },
+          byStatus: { $push: { k: "$_id", v: "$orders" } },
+          pendingAdj: { $sum: "$pendingAdj" },
+        },
       },
       {
         $project: {
@@ -783,50 +929,50 @@ const getScaleStatistics = async (req, res) => {
           totalOrders: 1,
           counts: {
             $mergeObjects: [
-              { $arrayToObject: '$byStatus' },
-              { Pending: '$pendingAdj' }
-            ]
-          }
-        }
-      }
+              { $arrayToObject: "$byStatus" },
+              { Pending: "$pendingAdj" },
+            ],
+          },
+        },
+      },
     ];
 
     const [overallRaw] = await OrderCustomProduct.aggregate(overallPipeline);
 
     const normalizeCounts = (c = {}) => {
       const counts = {
-        'Need Scale': c['Need Scale'] || 0,
-        'Pending': c['Pending'] || 0,
-        'Ready': c['Ready'] || 0,
-        'Sent': c['Sent'] || 0,
-        'Failed': c['Failed'] || 0,
-        'QC Rejected': c['QC Rejected'] || 0,
-        'Other': c['Other'] || 0
+        "Need Scale": c["Need Scale"] || 0,
+        Pending: c["Pending"] || 0,
+        Ready: c["Ready"] || 0,
+        Sent: c["Sent"] || 0,
+        Failed: c["Failed"] || 0,
+        "QC Rejected": c["QC Rejected"] || 0,
+        Other: c["Other"] || 0,
       };
       // All = Need Scale + Pending + Sent + QC Rejected (theo quy ước của bạn)
-      counts['All'] = counts['Need Scale'] + counts['Pending'] + counts['Sent'] + counts['QC Rejected'];
+      counts["All"] =
+        counts["Need Scale"] +
+        counts["Pending"] +
+        counts["Sent"] +
+        counts["QC Rejected"];
       return counts;
     };
 
     const overall = {
       totalOrders: overallRaw?.totalOrders || 0,
-      counts: normalizeCounts(overallRaw?.counts || {})
+      counts: normalizeCounts(overallRaw?.counts || {}),
     };
 
     // giữ nguyên nếu bạn chưa cần breakdown/timeseries
     return res.json({ overall, breakdown: [], timeseries: [] });
-
   } catch (error) {
-    console.error('❌ getScaleStatistics error:', error);
+    console.error("❌ getScaleStatistics error:", error);
     return res.status(500).json({
-      message: 'Failed to retrieve scale statistics by scale_overall_status',
-      error: error.message
+      message: "Failed to retrieve scale statistics by scale_overall_status",
+      error: error.message,
     });
   }
 };
-
-
-
 
 /**
  * CS cập nhật ghi chú cho 1 item
@@ -839,35 +985,37 @@ const updateCSNoteForItem = async (req, res) => {
     let { cs_note } = req.body || {};
 
     // Chuẩn hóa & validate đơn giản
-    cs_note = typeof cs_note === 'string' ? cs_note.trim() : '';
+    cs_note = typeof cs_note === "string" ? cs_note.trim() : "";
     if (cs_note.length > 2000) {
-      return res.status(400).json({ message: 'cs_note vượt quá 2000 ký tự.' });
+      return res.status(400).json({ message: "cs_note vượt quá 2000 ký tự." });
     }
 
     const order = await OrderCustomProduct.findOne({ orderId });
-    if (!order) return res.status(404).json({ message: 'Order not found' });
+    if (!order) return res.status(404).json({ message: "Order not found" });
 
-    const item = order.items.find(i => i.orderItemId === orderItemId);
-    if (!item) return res.status(404).json({ message: 'Order item not found' });
+    const item = order.items.find((i) => i.orderItemId === orderItemId);
+    if (!item) return res.status(404).json({ message: "Order item not found" });
 
     item.cs_note = cs_note; // ghi đè hoặc xóa (nếu rỗng)
     await order.save();
 
     return res.json({
-      message: 'CS note updated.',
+      message: "CS note updated.",
       orderId,
       orderItemId,
-      cs_note: item.cs_note
+      cs_note: item.cs_note,
     });
   } catch (err) {
-    return res.status(500).json({ message: 'Update CS note failed', error: err.message });
+    return res
+      .status(500)
+      .json({ message: "Update CS note failed", error: err.message });
   }
 };
 
 module.exports = {
   uploadFulfillmentFileForItem,
   confirmScaleForItem,
-  retrySendGrabink: retrySendFulfillment,    // giờ đã hỗ trợ ?provider=
+  retrySendGrabink: retrySendFulfillment, // giờ đã hỗ trợ ?provider=
   updateCSNoteForItem,
   getScaleList,
   getScaleStatistics,

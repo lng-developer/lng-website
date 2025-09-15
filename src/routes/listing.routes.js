@@ -32,4 +32,6 @@ router.get(
   listingController.getListingStatistics
 );
 
+router.put("/:id", authenticateToken, listingController.updateListing);
+
 module.exports = router;

@@ -2,6 +2,7 @@
 const db = require("../models");
 const multer = require("multer");
 const Listing = db.listing;
+const OrderCustomProduct = db.orderCustomProduct;
 const XLSX = require("xlsx");
 const fs = require("fs");
 const path = require("path");
@@ -22,7 +23,7 @@ const getListings = async (req, res) => {
       page = 1,
       perPage = 10,
       asinType,
-      asinTypeMode, // 👈 thêm param mới
+      asinTypeMode, // excludeOutline | onlyOutline
       seller,
       platform,
       sort = "createdAt", // createdAt | updatedAt | total_sales | seller_name
@@ -36,19 +37,19 @@ const getListings = async (req, res) => {
 
     const filter = {};
 
-    // filter asin_type
+    // asin_type filters
     if (asinType) filter.asin_type = asinType;
     if (asinTypeMode === "excludeOutline") {
-      filter.asin_type = { $ne: "outline" };
+      filter.asin_type = { $ne: "Outline" };
     } else if (asinTypeMode === "onlyOutline") {
-      filter.asin_type = "outline";
+      filter.asin_type = "Outline";
     }
 
     if (seller) filter.seller = seller;
     if (platform) filter.platform = platform;
     if (store) filter.store = store;
 
-    // filter psd.status (1 hoặc nhiều)
+    // psd.status (1 hoặc nhiều)
     if (psdStatus) {
       const statuses = psdStatus
         .split(",")
@@ -61,7 +62,7 @@ const getListings = async (req, res) => {
       }
     }
 
-    // filter theo date range
+    // date range cho listing (createdAt)
     if (from || to) {
       filter.createdAt = {};
       if (from) filter.createdAt.$gte = new Date(from);
@@ -74,28 +75,76 @@ const getListings = async (req, res) => {
       filter.$or = [{ asin: regex }, { "template.design_product": regex }];
     }
 
-    const skip = (Number(page) - 1) * Number(perPage);
+    const pageNum = Math.max(parseInt(page, 10) || 1, 1);
+    const limitNum = Math.max(parseInt(perPage, 10) || 10, 1);
+    const skip = (pageNum - 1) * limitNum;
+
     const total = await Listing.countDocuments(filter);
 
+    // sort trên Listing (trừ seller_name và total_sales sẽ xử lý sau)
+    const mongoSort =
+      sort === "seller_name" || sort === "total_sales"
+        ? { createdAt: order === "asc" ? 1 : -1 } // tạm thời; sẽ resort trong memory
+        : { [sort]: order === "asc" ? 1 : -1 };
+
     let listings = await Listing.find(filter)
-      .sort({
-        [sort === "seller_name" ? "createdAt" : sort]: order === "asc" ? 1 : -1,
-      })
+      .sort(mongoSort)
       .skip(skip)
-      .limit(Number(perPage))
+      .limit(limitNum)
       .populate({ path: "seller", select: "full_name" })
       .populate({ path: "store", select: "name" })
       .lean();
 
+    // ===== TÍNH total_sales CHO CÁC LISTING TRONG TRANG HIỆN TẠI =====
+    const listingIds = listings.map((l) => l._id).filter(Boolean);
+    let salesMap = new Map();
+
+    if (listingIds.length > 0) {
+      const agg = await OrderCustomProduct.aggregate([
+        // chỉ lấy các đơn có ít nhất 1 item có listingId trong danh sách
+        { $match: { "items.listingId": { $in: listingIds } } },
+        { $unwind: "$items" },
+        { $match: { "items.listingId": { $in: listingIds } } },
+        // gom theo (listingId, orderId) để mỗi order chỉ được tính 1 lần cho mỗi listing
+        {
+          $group: {
+            _id: { listingId: "$items.listingId", orderId: "$orderId" },
+          },
+        },
+        // đếm số order duy nhất cho từng listingId
+        {
+          $group: {
+            _id: "$_id.listingId",
+            orders: { $sum: 1 },
+          },
+        },
+      ]);
+
+      salesMap = new Map(agg.map((x) => [String(x._id), x.orders]));
+    }
+
+    // gán total_sales vào từng listing
+    listings = listings.map((l) => ({
+      ...l,
+      total_sales: salesMap.get(String(l._id)) || 0,
+    }));
+
+    // ===== RESORT TRONG MEMORY (nếu cần) =====
     if (sort === "seller_name") {
       listings.sort((a, b) => {
         const A = (a.seller?.full_name || "").toString();
         const B = (b.seller?.full_name || "").toString();
         return order === "asc" ? A.localeCompare(B) : B.localeCompare(A);
       });
+    } else if (sort === "total_sales") {
+      listings.sort((a, b) =>
+        order === "asc"
+          ? a.total_sales - b.total_sales
+          : b.total_sales - a.total_sales
+      );
     }
 
-    return res.json({ total, listings });
+    return res.json({ total, listings, page: pageNum, perPage: limitNum });
   } catch (error) {
     return res
       .status(500)
@@ -105,7 +154,16 @@ const getListings = async (req, res) => {
 
 const getPsdStatistics = async (req, res) => {
   try {
-    const { from, to, store, seller, platform, asinType, search } = req.query;
+    const {
+      from,
+      to,
+      store,
+      seller,
+      platform,
+      asinType,
+      search,
+      asinTypeMode,
+    } = req.query;
 
     // ===== baseFilter: KHÔNG có điều kiện psd.status =====
     const baseFilter = {};
@@ -118,6 +176,11 @@ const getPsdStatistics = async (req, res) => {
     if (seller) baseFilter.seller = seller;
     if (platform) baseFilter.platform = platform;
     if (asinType) baseFilter.asin_type = asinType;
+    if (asinTypeMode === "excludeOutline") {
+      baseFilter.asin_type = { $ne: "Outline" };
+    } else if (asinTypeMode === "onlyOutline") {
+      baseFilter.asin_type = "Outline";
+    }
 
     if (search) {
       const regex = new RegExp(search, "i");
@@ -374,6 +437,18 @@ const deleteListing = async (req, res) => {
   }
 };
 
+const updateListing = async (req, res) => {
+  try {
+    const { id } = req.params;
+    await Listing.findByIdAndUpdate(id, req.body, { new: true });
+    res.json({ message: "Listing updated" });
+  } catch (error) {
+    res
+      .status(500)
+      .json({ message: "Error update listing", error: error.message });
+  }
+};
+
 // ==============================
 // Excel import
 // ==============================
@@ -500,4 +575,5 @@ module.exports = {
   getPsdSignedUrl,
   getPsdStatistics,
   getListingStatistics,
+  updateListing,
 };
