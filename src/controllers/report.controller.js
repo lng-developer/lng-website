@@ -20,8 +20,6 @@ const norm = (row) =>
     ])
   );
 
-// POST /api/report/import-file
-// body: { filePath: "/abs/path/to/file.csv" }
 const importReportFromFile = async (req, res) => {
   try {
     if (!req.file?.buffer) {
@@ -36,27 +34,24 @@ const importReportFromFile = async (req, res) => {
       bom: true,
       trim: true,
       relax_column_count: true,
-      // Nếu file có các ô chứa JSON: có thể cân nhắc thêm:
-      // quote: false, relax_quotes: true
     }).map(norm);
 
     // Gom theo orderId
     const bucket = new Map();
 
     for (const r of rows) {
-      const orderId = r["amazon-order-id"];
+      const orderId = r["amazon-order-id"]?.trim();
       if (!orderId) continue;
 
-      // qty chỉ để tham khảo (KHÔNG nhân vào tiền)
-      const qty = num(r["quantity"]) || 0;
-
+      // Amazon report đã là số tiền tổng của dòng (không nhân quantity)
+      const qty = num(r["quantity"]);
       const itemPrice = num(r["item-price"]);
       const itemTax = num(r["item-tax"]);
       const shippingPrice = num(r["shipping-price"]);
       const shippingTax = num(r["shipping-tax"]);
       const discount = num(r["item-promotion-discount"]);
 
-      // Tính fee & revenue theo mỗi dòng (đã là tổng theo qty từ Amazon)
+      // fee 17% theo item+shipping (giả định)
       const fee = 0.17 * (itemPrice + shippingPrice);
       const revenue =
         itemPrice + shippingPrice - (itemTax + shippingTax + discount + fee);
@@ -71,7 +66,7 @@ const importReportFromFile = async (req, res) => {
         item_promotion_discount: 0,
         fee: 0,
         revenue: 0,
-        purchase_date_raw: r["purchase-date"], // giữ để set nếu order chưa có
+        purchase_date_raw: r["purchase-date"], // dùng để set nếu order chưa có
       };
 
       acc.quantity += qty;
@@ -86,13 +81,12 @@ const importReportFromFile = async (req, res) => {
       bucket.set(orderId, acc);
     }
 
-    // ... giữ nguyên phần đọc/parse file & gom bucket như bạn đã có ở trên ...
-
-    // Bulk updates (2 bước)
+    // ===== Bulk updates bằng native driver để tránh validation của Mongoose =====
+    const col = mongoose.connection.collection("ordercustomproducts");
     const ops = [];
 
     for (const acc of bucket.values()) {
-      const amazon_finance_total = {
+      const aft = {
         item_price: +acc.item_price.toFixed(2),
         item_tax: +acc.item_tax.toFixed(2),
         shipping_price: +acc.shipping_price.toFixed(2),
@@ -103,38 +97,35 @@ const importReportFromFile = async (req, res) => {
         computed_at: new Date(),
       };
 
-      // (A) LUÔN ghi đè amazon_finance_total + quantity,
-      //     set mặc định refund/op_cost=0 nếu chưa có,
-      //     và tính profit1/profit2 dựa trên base_cost hiện có trong DB
+      // (A) Ghi đè amazon_finance_total.*, set default opCost/refund, tính profit1/profit2 (đều NẰM TRONG amazon_finance_total)
       ops.push({
         updateOne: {
-          filter: { orderId: acc.orderId }, // ❗️chỉ update đơn đã có trong hệ thống
-          // Dùng pipeline update để vừa set hằng số (từ file) vừa tính toán dựa trên trường hiện có trong DB
+          filter: { orderId: acc.orderId }, // chỉ update đơn có sẵn
           update: [
             {
               $set: {
-                amazon_finance_total: amazon_finance_total,
                 amazon_total_quantity: acc.quantity,
-
-                // mặc định nếu chưa có / null
-                refund: { $ifNull: ["$refund", 0] },
-                op_cost: { $ifNull: ["$op_cost", 0] },
+                // merge giữ field cũ nếu có (opCost/refund cũ...), nhưng overwrite các field from file
+                amazon_finance_total: {
+                  $mergeObjects: ["$amazon_finance_total", aft],
+                },
               },
             },
             {
               $set: {
+                "amazon_finance_total.opCost": {
+                  $ifNull: ["$amazon_finance_total.opCost", 0],
+                },
+                "amazon_finance_total.refund": {
+                  $ifNull: ["$amazon_finance_total.refund", 0],
+                },
                 // profit1 = revenue - (base_cost + fee)
-                profit1: {
+                "amazon_finance_total.profit1": {
                   $round: [
                     {
                       $subtract: [
-                        amazon_finance_total.revenue,
-                        {
-                          $add: [
-                            { $ifNull: ["$base_cost", 0] },
-                            amazon_finance_total.fee,
-                          ],
-                        },
+                        aft.revenue,
+                        { $add: [{ $ifNull: ["$base_cost", 0] }, aft.fee] },
                       ],
                     },
                     2,
@@ -144,16 +135,16 @@ const importReportFromFile = async (req, res) => {
             },
             {
               $set: {
-                // profit2 = profit1 - (refund + op_cost)
-                profit2: {
+                // profit2 = profit1 - (opCost + refund)
+                "amazon_finance_total.profit2": {
                   $round: [
                     {
                       $subtract: [
-                        "$profit1",
+                        "$amazon_finance_total.profit1",
                         {
                           $add: [
-                            { $ifNull: ["$refund", 0] },
-                            { $ifNull: ["$op_cost", 0] },
+                            { $ifNull: ["$amazon_finance_total.refund", 0] },
+                            { $ifNull: ["$amazon_finance_total.opCost", 0] },
                           ],
                         },
                       ],
@@ -163,13 +154,12 @@ const importReportFromFile = async (req, res) => {
                 },
               },
             },
-            { $currentDate: { updatedAt: true } }, // nếu schema có timestamps
           ],
-          upsert: false, // ❗️không tạo mới order
+          upsert: false,
         },
       });
 
-      // (B) CHỈ set purchase_date nếu order CHƯA có (không ghi đè)
+      // (B) Set purchase_date nếu đang thiếu
       if (acc.purchase_date_raw) {
         const d = new Date(acc.purchase_date_raw);
         if (!isNaN(d)) {
@@ -190,9 +180,18 @@ const importReportFromFile = async (req, res) => {
       }
     }
 
+    // Cho phép dry-run để test
+    if (req.query.dryRun === "true") {
+      return res.json({
+        message: "DRY-RUN: no writes executed",
+        ordersParsed: bucket.size,
+        opsCount: ops.length,
+      });
+    }
+
     let bulkResult = null;
     if (ops.length) {
-      bulkResult = await OrderCustomProduct.bulkWrite(ops, { ordered: false });
+      bulkResult = await col.bulkWrite(ops, { ordered: false });
     }
 
     res.json({
