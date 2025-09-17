@@ -318,12 +318,12 @@ async function findSellerIdByEmployeeId(msnv) {
   return user?._id || null;
 }
 
-function mapSkuIfAny(sku) {
+function mapSkuIfAny(sku, activeConfigs = []) {
   if (!sku || !activeConfigs || activeConfigs.length === 0) return null;
   for (const cfg of activeConfigs) {
     const rules = buildRulesFromConfig(cfg);
     const r = applyRulesToSku(sku, rules);
-    if (r.ok && r.changed) return r.next; // ưu tiên mapped
+    if (r.ok && r.changed) return r.next;
   }
   return null;
 }
@@ -359,7 +359,7 @@ const updateOrdersFromXlsx = async (req, res) => {
     const ordersTouched = new Set();
     function pushSkuForMajority(orderId, sku) {
       if (!orderId || !sku) return;
-      const preferred = mapSkuIfAny(sku) || sku;
+      const preferred = mapSkuIfAny(sku, activeConfigs) || sku;
       const arr = orderIdToPreferredSkus.get(orderId) || [];
       arr.push(preferred);
       orderIdToPreferredSkus.set(orderId, arr);
