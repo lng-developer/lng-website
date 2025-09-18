@@ -16,6 +16,7 @@ const configOptionMapping = require("./configOptionMapping.controller");
 const QCController = require("./qc.controller");
 const reportController = require("./report.controller");
 const adsController = require("./ads.controller");
+const APOController = require("./APO.controller");
 
 module.exports = {
   roleController,
@@ -36,4 +37,5 @@ module.exports = {
   QCController,
   reportController,
   adsController,
+  APOController,
 };

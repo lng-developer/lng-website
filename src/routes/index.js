@@ -17,7 +17,7 @@ const QCRoutes = require("./qc.routes");
 const reportRoutes = require("./report.routes");
 const adsRoutes = require("./ads.routes");
 const skuMappingRoutes = require("./skuMapping.routes");
-
+const APORoutes = require("./APO.routes");
 
 module.exports = {
   roleRoutes,
@@ -38,5 +38,6 @@ module.exports = {
   QCRoutes,
   reportRoutes,
   adsRoutes,
-  skuMappingRoutes
+  skuMappingRoutes,
+  APORoutes,
 };
