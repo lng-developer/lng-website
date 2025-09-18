@@ -146,7 +146,7 @@ const orderItemSchema = new mongoose.Schema(
 
     scale_status: {
       type: String,
-      enum: ["Need Scale", "Pending", "Complete", "QC Rejected"],
+      enum: ["Need Scale", "Pending", "Complete", "QC Rejected", "Cancelled"],
       default: "Need Scale",
     },
 
@@ -255,7 +255,7 @@ const orderCustomProductSchema = new mongoose.Schema({
   },
   scale_overall_status: {
     type: String,
-    enum: ["Need Scale", "Pending", "Ready", "Sent", "Failed", "QC Rejected"],
+    enum: ["Need Scale", "Pending", "Ready", "Sent", "Failed", "QC Rejected", "Cancelled"],
     default: "Need Scale",
     index: true,
   },
