@@ -2,6 +2,7 @@ const { v4: uuidv4 } = require("uuid");
 const path = require("path");
 const INGEST_TOKEN = process.env.INGEST_TOKEN || "lng_2025";
 const DATA_DIR = process.env.DATA_DIR || path.resolve("./data");
+const fs = require("fs");
 
 // ========= tiny utils =========
 function ymd(d = new Date()) {
