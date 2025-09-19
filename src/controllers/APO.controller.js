@@ -37,73 +37,30 @@ function assertAuth(req) {
   }
 }
 
-const importOrder = async (req, res) => {
+// ========= HANDLERS =========
+
+// Import NEW Orders
+const importOrders = async (req, res) => {
   try {
     assertAuth(req);
-
-    const ct = req.headers["content-type"] || "";
-    if (ct.includes("multipart/form-data")) {
-      // ---- multipart (file) mode ----
-      const kindField = req.body.kind;
-      if (!kindField)
-        return res.status(400).json({ ok: false, message: "kind required" });
-
-      const metaJson = req.body.meta || "{}";
-      let meta;
-      try {
-        meta = JSON.parse(metaJson);
-      } catch {
-        meta = {};
-      }
-
-      const shopId = sanitizeName(meta.shopId || "unknown");
-      const today = ymd();
-
-      const file = req.files && req.files[0] ? req.files[0] : null;
-      if (!file)
-        return res.status(400).json({ ok: false, message: "file required" });
-
-      const origName = sanitizeName(
-        file.originalname || `${kindField}-${uuidv4()}.txt`
-      );
-
-      let subdir = "";
-      if (kindField === "orders/import-new-tsv") subdir = "orders_new";
-      else if (kindField === "orders/report-all-tsv") subdir = "orders_all";
-      else if (kindField === "ads/spend-tsv") subdir = "ads_spend";
-      else subdir = "unknown";
-
-      const dir = path.join(DATA_DIR, shopId, subdir, today);
-      const savedPath = saveBufferFile(dir, origName, file.buffer);
-
-      // TODO: bạn có thể parse TSV -> upsert DB ở đây (async queue càng tốt)
-      return res.json({
-        ok: true,
-        kind: kindField,
-        file: path.relative(process.cwd(), savedPath),
-        meta,
-        size: file.size,
-      });
-    }
-
-    // ---- JSON mode (ít dùng) ----
-    const { kind, data, meta } = req.body || {};
-    if (!kind)
-      return res.status(400).json({ ok: false, message: "kind required" });
-
-    const shopId = sanitizeName(meta?.shopId || "unknown");
+    const shopId = sanitizeName(req.body.shopId || "unknown");
     const today = ymd();
-    const dir = path.join(DATA_DIR, shopId, "json", today);
-    const filename = `${kind}-${uuidv4()}.json`;
-    const savedPath = saveTextFile(
-      dir,
-      filename,
-      JSON.stringify({ data, meta }, null, 2)
+
+    const file = req.files?.[0];
+    if (!file)
+      return res.status(400).json({ ok: false, message: "file required" });
+
+    const origName = sanitizeName(
+      file.originalname || `import-${uuidv4()}.txt`
     );
+    const dir = path.join(DATA_DIR, shopId, "orders_new", today);
+    const savedPath = saveBufferFile(dir, origName, file.buffer);
+
     return res.json({
       ok: true,
-      kind,
+      type: "importOrders",
       file: path.relative(process.cwd(), savedPath),
+      size: file.size,
     });
   } catch (e) {
     res
@@ -112,4 +69,62 @@ const importOrder = async (req, res) => {
   }
 };
 
-module.exports = { importOrder };
+// Report ALL Orders
+const reportOrders = async (req, res) => {
+  try {
+    assertAuth(req);
+    const shopId = sanitizeName(req.body.shopId || "unknown");
+    const today = ymd();
+
+    const file = req.files?.[0];
+    if (!file)
+      return res.status(400).json({ ok: false, message: "file required" });
+
+    const origName = sanitizeName(
+      file.originalname || `report-${uuidv4()}.txt`
+    );
+    const dir = path.join(DATA_DIR, shopId, "orders_all", today);
+    const savedPath = saveBufferFile(dir, origName, file.buffer);
+
+    return res.json({
+      ok: true,
+      type: "reportOrders",
+      file: path.relative(process.cwd(), savedPath),
+      size: file.size,
+    });
+  } catch (e) {
+    res
+      .status(e.status || 500)
+      .json({ ok: false, message: e.message || "error" });
+  }
+};
+
+// Ads Spend
+const adsSpend = async (req, res) => {
+  try {
+    assertAuth(req);
+    const shopId = sanitizeName(req.body.shopId || "unknown");
+    const today = ymd();
+
+    const file = req.files?.[0];
+    if (!file)
+      return res.status(400).json({ ok: false, message: "file required" });
+
+    const origName = sanitizeName(file.originalname || `ads-${uuidv4()}.tsv`);
+    const dir = path.join(DATA_DIR, shopId, "ads_spend", today);
+    const savedPath = saveBufferFile(dir, origName, file.buffer);
+
+    return res.json({
+      ok: true,
+      type: "adsSpend",
+      file: path.relative(process.cwd(), savedPath),
+      size: file.size,
+    });
+  } catch (e) {
+    res
+      .status(e.status || 500)
+      .json({ ok: false, message: e.message || "error" });
+  }
+};
+
+module.exports = { importOrders, reportOrders, adsSpend };
