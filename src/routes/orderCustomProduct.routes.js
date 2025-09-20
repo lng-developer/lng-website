@@ -31,7 +31,6 @@ router.get("/:id", authenticateToken, controller.getOrderById);
 
 router.post(
   "/update-from-xlsx",
-  authenticateToken,
   controller.upload.single("file"),
   controller.updateOrdersFromXlsx
 );
