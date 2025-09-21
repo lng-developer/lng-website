@@ -51,10 +51,11 @@ const importReportFromFile = async (req, res) => {
       const shippingTax = num(r["shipping-tax"]);
       const discount = num(r["item-promotion-discount"]);
 
-      // fee 17% theo item+shipping (giả định)
+      // revenue = itemPrice + shippingPrice (không trừ thuế/discount/fee)
+      const revenue = itemPrice + shippingPrice;
+
+      // fee 17% theo (item + shipping)
       const fee = 0.17 * (itemPrice + shippingPrice);
-      const revenue =
-        itemPrice + shippingPrice - (itemTax + shippingTax + discount + fee);
 
       const acc = bucket.get(orderId) || {
         orderId,
@@ -100,17 +101,18 @@ const importReportFromFile = async (req, res) => {
       // (A) Ghi đè amazon_finance_total.*, set default opCost/refund, tính profit1/profit2 (đều NẰM TRONG amazon_finance_total)
       ops.push({
         updateOne: {
-          filter: { orderId: acc.orderId }, // chỉ update đơn có sẵn
+          filter: { orderId: acc.orderId }, // chỉ update đơn đã có sẵn
           update: [
+            // GỘP và GHI ĐÈ các field từ file (aft nằm sau nên override field cũ)
             {
               $set: {
                 amazon_total_quantity: acc.quantity,
-                // merge giữ field cũ nếu có (opCost/refund cũ...), nhưng overwrite các field from file
                 amazon_finance_total: {
                   $mergeObjects: ["$amazon_finance_total", aft],
                 },
               },
             },
+            // Bổ sung mặc định nếu thiếu + tính profit1: revenue - (base_cost + fee)
             {
               $set: {
                 "amazon_finance_total.opCost": {
@@ -119,7 +121,6 @@ const importReportFromFile = async (req, res) => {
                 "amazon_finance_total.refund": {
                   $ifNull: ["$amazon_finance_total.refund", 0],
                 },
-                // profit1 = revenue - (base_cost + fee)
                 "amazon_finance_total.profit1": {
                   $round: [
                     {
@@ -133,9 +134,9 @@ const importReportFromFile = async (req, res) => {
                 },
               },
             },
+            // profit2 = profit1 - (opCost + refund)
             {
               $set: {
-                // profit2 = profit1 - (opCost + refund)
                 "amazon_finance_total.profit2": {
                   $round: [
                     {
@@ -155,7 +156,7 @@ const importReportFromFile = async (req, res) => {
               },
             },
           ],
-          upsert: false,
+          upsert: false, // Không tạo order mới ở đây; chỉ ghi đè order đã tồn tại
         },
       });
 
@@ -196,7 +197,7 @@ const importReportFromFile = async (req, res) => {
 
     res.json({
       message:
-        "Imported: overwrite amazon_finance_total; profit fields computed; purchase_date set-if-missing",
+        "Imported: overwrite amazon_finance_total; profit fields computed with new revenue; purchase_date set-if-missing",
       ordersParsed: bucket.size,
       opsCount: ops.length,
       bulkResult,
