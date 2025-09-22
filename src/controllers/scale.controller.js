@@ -442,6 +442,17 @@ const retrySendFulfillment = async (req, res) => {
 // ============================
 // LIST — khớp chuẩn STATISTICS
 // ============================
+
+// ===== Helper: chấp nhận role là string hoặc array, không phân biệt hoa/thường
+function hasRole(userRole, target) {
+  if (!userRole) return false;
+  const norm = (s) => String(s || '').trim().toLowerCase();
+  const wanted = norm(target);
+  return Array.isArray(userRole)
+    ? userRole.some(r => norm(r) === wanted)
+    : norm(userRole) === wanted;
+}
+
 const getScaleList = async (req, res) => {
   try {
     const {
@@ -472,23 +483,27 @@ const getScaleList = async (req, res) => {
     };
 
     // ===== RBAC =====
-    const role = req.user?.role || "";
     const userId = req.user?.userId || "";
-    const isAdmin = /^admin$/i.test(role);
-    const isSeller = /^seller$/i.test(role);
+    const userRole = req.user?.role; // string hoặc array
+    const isAdmin = hasRole(userRole, 'Admin');
+    const isSeller = hasRole(userRole, 'Seller');
+    const isCS = hasRole(userRole, 'Customer Service');
 
-    if (!isAdmin && !isSeller) {
+    // Cho phép Admin, Seller, Customer Service
+    if (!(isAdmin || isSeller || isCS)) {
       return res
         .status(403)
         .json({ message: "Access denied: insufficient permissions" });
     }
 
-    // 1) Match theo thời gian + seller filter
+    // 1) Match theo thời gian + seller filter (CHỈ filter khi là Seller thuần)
     const initialMatch = {};
     if (from && to) {
       initialMatch.createdAt = { $gte: new Date(from), $lte: new Date(to) };
     }
-    if (isSeller) {
+
+    const shouldRestrictToSeller = isSeller && !isAdmin && !isCS;
+    if (shouldRestrictToSeller) {
       if (!mongoose.Types.ObjectId.isValid(userId)) {
         return res.status(400).json({ message: "Invalid user id in token" });
       }
@@ -524,12 +539,12 @@ const getScaleList = async (req, res) => {
       // Filter shopName
       ...(shopName && shopName.trim()
         ? [
-            {
-              $match: {
-                "shop.name": { $regex: new RegExp(shopName.trim(), "i") },
-              },
+          {
+            $match: {
+              "shop.name": { $regex: new RegExp(shopName.trim(), "i") },
             },
-          ]
+          },
+        ]
         : []),
 
       // Filter search (mở rộng thêm seller)
@@ -744,10 +759,10 @@ const getScaleList = async (req, res) => {
           listingId: item.listingId,
           listing: ldoc
             ? {
-                asin_type: ldoc.asin_type || null,
-                product_image: ldoc.product_image || null,
-                psd: ldoc.psd || null,
-              }
+              asin_type: ldoc.asin_type || null,
+              product_image: ldoc.product_image || null,
+              psd: ldoc.psd || null,
+            }
             : null,
         };
       });
@@ -770,10 +785,10 @@ const getScaleList = async (req, res) => {
         scale_overall_status: order.scale_overall_status,
         seller: order.seller
           ? {
-              _id: order.seller._id,
-              full_name: order.seller.full_name,
-              email: order.seller.email,
-            }
+            _id: order.seller._id,
+            full_name: order.seller.full_name,
+            email: order.seller.email,
+          }
           : null,
       };
     });
@@ -792,6 +807,9 @@ const getScaleList = async (req, res) => {
     });
   }
 };
+
+module.exports = { getScaleList };
+
 
 // ============================
 // STATISTICS — giữ nguyên chuẩn
@@ -863,12 +881,12 @@ const getScaleStatistics = async (req, res) => {
       { $unwind: { path: "$shop", preserveNullAndEmptyArrays: true } },
       ...(shopName && shopName.trim()
         ? [
-            {
-              $match: {
-                "shop.name": { $regex: new RegExp(shopName.trim(), "i") },
-              },
+          {
+            $match: {
+              "shop.name": { $regex: new RegExp(shopName.trim(), "i") },
             },
-          ]
+          },
+        ]
         : []),
       ...(searchOr ? [{ $match: { $or: searchOr } }] : []),
       {
