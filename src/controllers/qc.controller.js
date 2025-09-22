@@ -2,7 +2,8 @@
 const mongoose = require("mongoose");
 const db = require("../models");
 const OrderCustomProduct = db.orderCustomProduct;
-const VendorProduct = db.vendorProduct; // đảm bảo đã export trong models/index.js
+const VendorProduct = db.vendorProduct;
+const Listing = db.listing;
 
 const getQCList = async (req, res) => {
   try {
@@ -109,12 +110,12 @@ const getQCList = async (req, res) => {
       // 3) Filter theo shopName nếu có
       ...(shopName && shopName.trim() !== ""
         ? [
-            {
-              $match: {
-                "shop.name": { $regex: new RegExp(shopName.trim(), "i") },
-              },
+          {
+            $match: {
+              "shop.name": { $regex: new RegExp(shopName.trim(), "i") },
             },
-          ]
+          },
+        ]
         : []),
 
       // 4) Join Case (nhiều)
@@ -208,10 +209,37 @@ const getQCList = async (req, res) => {
       }
     }
 
+    const listingIdSet = new Set();
+    for (const o of orders) {
+      for (const it of o.items || []) {
+        const lid = it?.listingId;
+        if (lid) listingIdSet.add(String(lid));
+      }
+    }
+
+    let listingMap = new Map();
+    if (listingIdSet.size > 0) {
+      const ids = [];
+      for (const id of listingIdSet) {
+        if (mongoose.Types.ObjectId.isValid(id)) {
+          ids.push(new mongoose.Types.ObjectId(id));
+        }
+      }
+      if (ids.length > 0) {
+        const listings = await Listing.find({ _id: { $in: ids } })
+          .select("asin_type product_image psd") // chỉ lấy các trường cần
+          .lean();
+        listingMap = new Map(listings.map((l) => [String(l._id), l]));
+      }
+    }
+
     // --- Shape output ---
     const result = orders.map((order) => {
       const items = (order.items || []).map((item) => {
         const surfaces = item.version3Data?.customizationInfo?.surfaces || [];
+        const ldoc = item?.listingId
+          ? listingMap.get(String(item.listingId))
+          : null;
         const version3Data = surfaces.flatMap((surface) =>
           (surface.areas || []).map((area) => ({
             label: area.label || area.name || "",
@@ -251,6 +279,14 @@ const getQCList = async (req, res) => {
           fulfillment_file: item.fulfillment_file,
           scale_status: item.scale_status,
           qc_note: item.qc_note,
+          listingId: item.listingId,
+          listing: ldoc
+            ? {
+              asin_type: ldoc.asin_type || null,
+              product_image: ldoc.product_image || null,
+              psd: ldoc.psd || null,
+            }
+            : null,
         };
       });
 
@@ -272,10 +308,10 @@ const getQCList = async (req, res) => {
         scale_overall_status: order.scale_overall_status,
         seller: order.seller
           ? {
-              _id: order.seller._id,
-              full_name: order.seller.full_name,
-              email: order.seller.email,
-            }
+            _id: order.seller._id,
+            full_name: order.seller.full_name,
+            email: order.seller.email,
+          }
           : null,
       };
     });
@@ -357,12 +393,12 @@ const getQCStatistics = async (req, res) => {
 
       ...(shopName && shopName.trim()
         ? [
-            {
-              $match: {
-                "shop.name": { $regex: new RegExp(shopName.trim(), "i") },
-              },
+          {
+            $match: {
+              "shop.name": { $regex: new RegExp(shopName.trim(), "i") },
             },
-          ]
+          },
+        ]
         : []),
 
       ...(searchOr ? [{ $match: { $or: searchOr } }] : []),
