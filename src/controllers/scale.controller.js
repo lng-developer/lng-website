@@ -808,8 +808,6 @@ const getScaleList = async (req, res) => {
   }
 };
 
-module.exports = { getScaleList };
-
 
 // ============================
 // STATISTICS — giữ nguyên chuẩn
@@ -824,6 +822,7 @@ const getScaleStatistics = async (req, res) => {
       breakdown,
       timeseries = "false",
     } = req.query;
+
     const KNOWN = [
       "Need Scale",
       "Pending",
@@ -834,28 +833,33 @@ const getScaleStatistics = async (req, res) => {
     ];
 
     // ===== RBAC =====
-    const role = req.user?.role || "";
+    const userRole = req.user?.role; // string hoặc array
     const userId = req.user?.userId || "";
-    const isAdmin = /^admin$/i.test(role);
-    const isSeller = /^seller$/i.test(role);
 
-    if (!isAdmin && !isSeller) {
-      return res
-        .status(403)
-        .json({ message: "Access denied: insufficient permissions" });
+    const isAdmin = hasRole(userRole, 'Admin');
+    const isSeller = hasRole(userRole, 'Seller');
+    const isCS = hasRole(userRole, 'Customer Service');
+
+    // Chỉ cho phép Admin, Seller, Customer Service
+    if (!(isAdmin || isSeller || isCS)) {
+      return res.status(403).json({ message: "Access denied: insufficient permissions" });
     }
 
+    // Match theo thời gian + giới hạn seller (chỉ khi là Seller thuần)
     const matchStage = {};
     if (from && to) {
       matchStage.createdAt = { $gte: new Date(from), $lte: new Date(to) };
     }
-    if (isSeller) {
+
+    const shouldRestrictToSeller = isSeller && !isAdmin && !isCS;
+    if (shouldRestrictToSeller) {
       if (!mongoose.Types.ObjectId.isValid(userId)) {
         return res.status(400).json({ message: "Invalid user id in token" });
       }
       matchStage.sellerId = new mongoose.Types.ObjectId(userId);
     }
 
+    // Search mở rộng
     let searchOr = null;
     if (search && search.trim() !== "") {
       const keyword = new RegExp(search.trim(), "i");
@@ -865,9 +869,13 @@ const getScaleStatistics = async (req, res) => {
         { "items.orderItemId": keyword },
         { "customer_infor.email": keyword },
         { "customer_infor.name": keyword },
+        // có thể thêm seller nếu cần:
+        // { "seller.full_name": keyword },
+        // { "seller.email": keyword },
       ];
     }
 
+    // Base pipeline
     const basePipeline = [
       { $match: matchStage },
       {
@@ -879,6 +887,18 @@ const getScaleStatistics = async (req, res) => {
         },
       },
       { $unwind: { path: "$shop", preserveNullAndEmptyArrays: true } },
+
+      // (Tuỳ chọn) nếu cần search theo seller.* thì join users:
+      // {
+      //   $lookup: {
+      //     from: "users",
+      //     localField: "sellerId",
+      //     foreignField: "_id",
+      //     as: "seller",
+      //   },
+      // },
+      // { $unwind: { path: "$seller", preserveNullAndEmptyArrays: true } },
+
       ...(shopName && shopName.trim()
         ? [
           {
@@ -888,7 +908,9 @@ const getScaleStatistics = async (req, res) => {
           },
         ]
         : []),
+
       ...(searchOr ? [{ $match: { $or: searchOr } }] : []),
+
       {
         $addFields: {
           hasPendingItem: {
@@ -910,7 +932,7 @@ const getScaleStatistics = async (req, res) => {
       },
     ];
 
-    // Overall counts (Pending chỉ tính khi có item Pending)
+    // Overall counts (Pending chỉ tính khi order thực sự có item Pending)
     const overallPipeline = [
       ...basePipeline,
       {
@@ -948,7 +970,7 @@ const getScaleStatistics = async (req, res) => {
           counts: {
             $mergeObjects: [
               { $arrayToObject: "$byStatus" },
-              { Pending: "$pendingAdj" },
+              { Pending: "$pendingAdj" }, // overwrite Pending bằng pendingAdj
             ],
           },
         },
@@ -967,7 +989,7 @@ const getScaleStatistics = async (req, res) => {
         "QC Rejected": c["QC Rejected"] || 0,
         Other: c["Other"] || 0,
       };
-      // All = Need Scale + Pending + Sent + QC Rejected (theo quy ước của bạn)
+      // All = Need Scale + Pending + Sent + QC Rejected (theo quy ước bạn đang dùng)
       counts["All"] =
         counts["Need Scale"] +
         counts["Pending"] +
@@ -981,7 +1003,7 @@ const getScaleStatistics = async (req, res) => {
       counts: normalizeCounts(overallRaw?.counts || {}),
     };
 
-    // giữ nguyên nếu bạn chưa cần breakdown/timeseries
+    // Giữ nguyên nếu hiện chưa cần breakdown / timeseries
     return res.json({ overall, breakdown: [], timeseries: [] });
   } catch (error) {
     console.error("❌ getScaleStatistics error:", error);
@@ -991,7 +1013,6 @@ const getScaleStatistics = async (req, res) => {
     });
   }
 };
-
 /**
  * CS cập nhật ghi chú cho 1 item
  * PUT /api/scale/orders/:orderId/items/:orderItemId/cs-note
