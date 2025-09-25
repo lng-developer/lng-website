@@ -1068,14 +1068,10 @@ async function getVendorProductIdsByVendorName(vendorName) {
     { name: new RegExp(`^${vendorName}$`, "i") },
     { _id: 1 }
   ).lean();
-
   if (!vdoc?._id) return [];
-
-  // dùng distinct để tránh query & memory quá nặng
   const vpIds = await VendorProduct.distinct("_id", { vendor_id: vdoc._id });
-  return vpIds;
+  return vpIds || [];
 }
-
 
 const getFrontendOrders = async (req, res) => {
   try {
@@ -1090,7 +1086,7 @@ const getFrontendOrders = async (req, res) => {
       sevenDayAlert,
       platform,
       search,
-      userNull, // chỉ Admin mới được dùng
+      userNull, // only admin can use
       noPsd,
       shippingType,
       shopName,
@@ -1102,8 +1098,9 @@ const getFrontendOrders = async (req, res) => {
     const userId = req.user?.userId || "";
     const isAdmin = /^admin$/i.test(role);
     const isSeller = /^seller$/i.test(role);
+    const isProduction = /^production$/i.test(role);
 
-    if (!isAdmin && !isSeller) {
+    if (!isAdmin && !isSeller && !isProduction) {
       return res
         .status(403)
         .json({ message: "Access denied: insufficient permissions" });
@@ -1111,20 +1108,11 @@ const getFrontendOrders = async (req, res) => {
 
     const matchStage = {};
 
-    // ===== SPECIAL CASE: user được xem theo vendor LNG Groups =====
-    const LNG_VENDOR_GUARD_USER_ID = "68b93ed3f02eed8dec002ef0";
-    const LNG_VENDOR_NAME = "LNG Groups";
-    let appliedVendorGuard = false;
-
-    if (isSeller && String(userId) === LNG_VENDOR_GUARD_USER_ID) {
-      // lấy danh sách VendorProduct thuộc vendor "LNG Groups"
-      const vdoc = await Vendor.findOne(
-        { name: new RegExp(`^${LNG_VENDOR_NAME}$`, "i") },
-        { _id: 1 }
-      ).lean();
-
-      if (!vdoc?._id) {
-        // Không tìm thấy vendor -> trả rỗng, tránh lộ data
+    // Production role => filter by vendor "LNG Groups"
+    if (isProduction) {
+      const vpIds = await getVendorProductIdsByVendorName("LNG Groups");
+      if (!vpIds || vpIds.length === 0) {
+        // safe: return empty result if vendor or vp not found
         return res.json({
           data: [],
           totalCount: 0,
@@ -1132,41 +1120,25 @@ const getFrontendOrders = async (req, res) => {
           currentPage: 1,
         });
       }
-
-      const vpIds = await VendorProduct.distinct("_id", {
-        vendor_id: vdoc._id,
-      });
-
-      if (!vpIds?.length) {
-        return res.json({
-          data: [],
-          totalCount: 0,
-          totalPages: 1,
-          currentPage: 1,
-        });
-      }
-
       matchStage["items.cost_breakdown.vendorProductId"] = {
         $in: vpIds.map((id) => new mongoose.Types.ObjectId(id)),
       };
-
-      appliedVendorGuard = true;
     }
 
-    // Chặn Seller cố tình lọc đơn người khác / đơn chưa có seller (trừ khi là user LNG guard)
-    if (isSeller && !appliedVendorGuard) {
+    // Seller: only see own orders (unless production role)
+    if (isSeller && !isProduction) {
       if (!mongoose.Types.ObjectId.isValid(userId)) {
         return res.status(400).json({ message: "Invalid user id in token" });
       }
       matchStage.sellerId = new mongoose.Types.ObjectId(userId);
     } else if (isAdmin) {
-      // Admin có thể dùng userNull
+      // Admin can use userNull to filter orders without seller
       if (userNull === "true") {
         matchStage.sellerId = { $in: [null, undefined] };
       }
     }
 
-    // ====== các filter còn lại giữ nguyên ======
+    // Other filters
     if (statuses && statuses.trim() !== "") {
       const statusArray = statuses
         .split(",")
@@ -1190,6 +1162,11 @@ const getFrontendOrders = async (req, res) => {
     }
 
     if (from && to) {
+      if (isNaN(Date.parse(from)) || isNaN(Date.parse(to))) {
+        return res
+          .status(400)
+          .json({ message: "Invalid date format in from or to" });
+      }
       matchStage.purchase_date = { $gte: new Date(from), $lte: new Date(to) };
     }
 
@@ -1208,9 +1185,7 @@ const getFrontendOrders = async (req, res) => {
       matchStage.deliveryDate = { $lte: sevenDaysLater };
     }
 
-    if (platform) {
-      matchStage.platform = platform;
-    }
+    if (platform) matchStage.platform = platform;
 
     if (noPsd === "true") {
       matchStage["items.snapshotImage"] = { $in: [null, ""] };
@@ -1229,14 +1204,11 @@ const getFrontendOrders = async (req, res) => {
         .split(",")
         .map((t) => t.trim())
         .filter((t) => validShippingTypes.includes(t));
-      if (types.length === 1) {
-        matchStage.shipping_type = types[0];
-      } else if (types.length > 1) {
-        matchStage.shipping_type = { $in: types };
-      }
+      if (types.length === 1) matchStage.shipping_type = types[0];
+      else if (types.length > 1) matchStage.shipping_type = { $in: types };
     }
 
-    // ===== Pipeline chính =====
+    // ===== Pipeline =====
     const pipeline = [
       {
         $lookup: {
@@ -1267,7 +1239,6 @@ const getFrontendOrders = async (req, res) => {
         },
       },
 
-      // populate seller
       {
         $lookup: {
           from: "users",
@@ -1300,7 +1271,7 @@ const getFrontendOrders = async (req, res) => {
 
     const orders = await OrderCustomProduct.aggregate(pipeline);
 
-    // --- NEW: Thu thập listingIds từ items ---
+    // collect listingIds once
     const listingIdSet = new Set();
     for (const o of orders) {
       for (const it of o.items || []) {
@@ -1309,14 +1280,12 @@ const getFrontendOrders = async (req, res) => {
       }
     }
 
-    // --- NEW: Query Listing 1 lần và map theo _id ---
+    // query listings
     let listingMap = new Map();
     if (listingIdSet.size > 0) {
       const ids = [];
       for (const id of listingIdSet) {
-        if (mongoose.Types.ObjectId.isValid(id)) {
-          ids.push(new mongoose.Types.ObjectId(id));
-        }
+        if (mongoose.Types.ObjectId.isValid(id)) ids.push(new mongoose.Types.ObjectId(id));
       }
       if (ids.length > 0) {
         const listings = await Listing.find({ _id: { $in: ids } })
@@ -1326,7 +1295,7 @@ const getFrontendOrders = async (req, res) => {
       }
     }
 
-    // --- map vendor product name (giữ nguyên logic cũ) ---
+    // map vendor product names
     const vendorIdSet = new Set();
     for (const o of orders) {
       for (const it of o.items || []) {
@@ -1339,16 +1308,13 @@ const getFrontendOrders = async (req, res) => {
     if (vendorIdSet.size > 0) {
       const idObjs = [];
       for (const id of vendorIdSet) {
-        if (mongoose.Types.ObjectId.isValid(id))
-          idObjs.push(new mongoose.Types.ObjectId(id));
+        if (mongoose.Types.ObjectId.isValid(id)) idObjs.push(new mongoose.Types.ObjectId(id));
       }
-
       if (idObjs.length > 0) {
         const vps = await VendorProduct.find({ _id: { $in: idObjs } })
           .select("product_name vendor_id")
           .populate({ path: "vendor_id", select: "name" })
           .lean();
-
         vendorFullNameMap = new Map(
           (vps || []).map((vp) => {
             const vendorName = vp?.vendor_id?.name || "";
@@ -1360,18 +1326,27 @@ const getFrontendOrders = async (req, res) => {
       }
     }
 
-    // --- build kết quả ---
+    // build result (include download_url/download_links)
     const result = orders.map((order) => {
       const items = (order.items || []).map((item) => {
+        const ffRaw = item.fulfillment_file || item.fulfilment_file || {};
+        const fileUrls = [];
+        if (ffRaw && typeof ffRaw === "object") {
+          for (const v of Object.values(ffRaw)) {
+            if (typeof v === "string" && /^https?:\/\//i.test(v)) {
+              fileUrls.push(v);
+            } else if (v && typeof v === "object") {
+              if (typeof v.url === "string" && /^https?:\/\//i.test(v.url)) fileUrls.push(v.url);
+            }
+          }
+        }
+        const download_url = fileUrls[0] || null;
+
         const surfaces = item.version3Data?.customizationInfo?.surfaces || [];
         const version3Data = surfaces.flatMap((surface) =>
           (surface.areas || []).map((area) => ({
             label: area.label || area.name || "",
-            value:
-              area.optionValue ||
-              area.text ||
-              area.numberValue ||
-              "",
+            value: area.optionValue || area.text || area.numberValue || "",
           }))
         );
 
@@ -1380,10 +1355,7 @@ const getFrontendOrders = async (req, res) => {
           ? vendorFullNameMap.get(String(vendorProductId)) || null
           : null;
 
-        // ghép dữ liệu Listing theo listingId
-        const ldoc = item?.listingId
-          ? listingMap.get(String(item.listingId))
-          : null;
+        const ldoc = item?.listingId ? listingMap.get(String(item.listingId)) : null;
 
         return {
           orderItemId: item.orderItemId || null,
@@ -1398,7 +1370,9 @@ const getFrontendOrders = async (req, res) => {
           asin: item.asin,
           customized_url: item.customized_url,
 
-          // expose listing info (chỉ vài trường)
+          download_url,
+          download_links: fileUrls,
+
           listingId: item.listingId || null,
           listing: ldoc
             ? {
@@ -1488,8 +1462,9 @@ const getOrderStatistics = async (req, res) => {
     const userId = req.user?.userId || "";
     const isAdmin = /^admin$/i.test(role);
     const isSeller = /^seller$/i.test(role);
+    const isProduction = /^production$/i.test(role);
 
-    if (!isAdmin && !isSeller) {
+    if (!isAdmin && !isSeller && !isProduction) {
       return res
         .status(403)
         .json({ message: "Access denied: insufficient permissions" });
@@ -1497,14 +1472,10 @@ const getOrderStatistics = async (req, res) => {
 
     const baseFilter = {};
 
-    // SPECIAL CASE: user LNG Groups xem theo vendor
-    const LNG_VENDOR_GUARD_USER_ID = "68b93ed3f02eed8dec002ef0";
-    const LNG_VENDOR_NAME = "LNG Groups";
-
-    if (isSeller && String(userId) === LNG_VENDOR_GUARD_USER_ID) {
-      const vpIds = await getVendorProductIdsByVendorName(LNG_VENDOR_NAME);
-      if (vpIds.length === 0) {
-        // Không có gì để đếm -> trả về 0 hết
+    // Production role => stats only for vendor "LNG Groups"
+    if (isProduction) {
+      const vpIds = await getVendorProductIdsByVendorName("LNG Groups");
+      if (!vpIds || vpIds.length === 0) {
         return res.json({
           all: 0,
           new: 0,
@@ -1520,20 +1491,18 @@ const getOrderStatistics = async (req, res) => {
       baseFilter["items.cost_breakdown.vendorProductId"] = {
         $in: vpIds.map((id) => new mongoose.Types.ObjectId(id)),
       };
-    } else if (isSeller) {
-      // Seller thường: chỉ thấy đơn của họ
+    }
+
+    // Seller: only their orders (unless production)
+    if (isSeller && !isProduction) {
       if (!mongoose.Types.ObjectId.isValid(userId)) {
         return res.status(400).json({ message: "Invalid user id in token" });
       }
       baseFilter.sellerId = new mongoose.Types.ObjectId(userId);
-    } else {
-      // Admin có thể lọc đơn chưa có seller
-      if (userNull === "true") {
-        baseFilter.sellerId = { $in: [null, undefined] };
-      }
+    } else if (isAdmin) {
+      if (userNull === "true") baseFilter.sellerId = { $in: [null, undefined] };
     }
 
-    // ==== các filter còn lại giữ nguyên ====
     if (from && to) {
       if (isNaN(Date.parse(from)) || isNaN(Date.parse(to))) {
         return res
@@ -1581,8 +1550,8 @@ const getOrderStatistics = async (req, res) => {
     }
 
     if (shopName) {
-      const resFillter = await Shop.findOne({ name: shopName }, { _id: 1 });
-      if (resFillter?._id) baseFilter.shopId = resFillter._id;
+      const resFilter = await Shop.findOne({ name: shopName }, { _id: 1 }).lean();
+      if (resFilter?._id) baseFilter.shopId = resFilter._id;
     }
 
     const [
@@ -1628,6 +1597,7 @@ const getOrderStatistics = async (req, res) => {
       openCase: openCaseCount,
     });
   } catch (error) {
+    console.error("❌ getOrderStatistics error:", error);
     res.status(500).json({
       message: "Failed to retrieve order statistics",
       error: error.message,
