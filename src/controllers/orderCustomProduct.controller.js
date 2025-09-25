@@ -1502,7 +1502,7 @@ const getOrderStatistics = async (req, res) => {
 
     // Production role => stats only for vendor "LNG Groups"
     if (isProduction) {
-      const vpIds = await getVendorProductIdsByVendorName("LNG Groups");
+      const vpIds = await getVendorProductIdsByVendorName("LNG Group");
       console.log("getOrderStatistics: production vpIds length:", vpIds.length);
 
       if (!vpIds || vpIds.length === 0) {
