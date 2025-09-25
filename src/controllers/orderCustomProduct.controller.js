@@ -20,6 +20,7 @@ const User = db.user;
 const SkuMappingConfig = db.SkuMappingConfig;
 const SkuMappingEntry = db.SkuMappingEntry;
 const Listing = db.listing;
+const Vendor = db.vendor;
 const {
   applyRulesToSku,
   buildRulesFromConfig,
@@ -511,7 +512,7 @@ const updateOrdersFromXlsx = async (req, res) => {
 
       try {
         fs.unlinkSync(filePath);
-      } catch (_) {}
+      } catch (_) { }
       return res.json({
         message: "Update by latest ship date completed",
         results,
@@ -612,8 +613,8 @@ const updateOrdersFromXlsx = async (req, res) => {
           currentShopIdForThisOrder = existing?.shopId
             ? String(existing.shopId)
             : bodyShopId
-            ? String(bodyShopId)
-            : null;
+              ? String(bodyShopId)
+              : null;
 
           results.push({
             orderId,
@@ -696,8 +697,8 @@ const updateOrdersFromXlsx = async (req, res) => {
           currentShopIdForThisOrder = existing?.shopId
             ? String(existing.shopId)
             : bodyShopId
-            ? String(bodyShopId)
-            : null;
+              ? String(bodyShopId)
+              : null;
 
           skipProcessingZip = true;
 
@@ -741,8 +742,8 @@ const updateOrdersFromXlsx = async (req, res) => {
         currentShopIdForThisOrder = newOrder?.shopId
           ? String(newOrder.shopId)
           : bodyShopId
-          ? String(bodyShopId)
-          : null;
+            ? String(bodyShopId)
+            : null;
 
         const validationResult = await validateAddressWithSmarty(
           basicData.customer_infor
@@ -814,7 +815,7 @@ const updateOrdersFromXlsx = async (req, res) => {
                 bufferForUpload === imageBuffer
                   ? imageName
                   : imageName.replace(/\.(png|jpg|jpeg)$/i, "") +
-                    "_compressed.jpg";
+                  "_compressed.jpg";
 
               const cloudinaryUrl = await uploadToCloudinary(
                 bufferForUpload,
@@ -838,7 +839,7 @@ const updateOrdersFromXlsx = async (req, res) => {
                     cloudinaryUrls.push(url);
                     continue;
                   }
-                } catch (_) {}
+                } catch (_) { }
                 skippedSnapshots.push({
                   image: imageName,
                   reason: "cloudinary: file size too large",
@@ -981,20 +982,20 @@ const updateOrdersFromXlsx = async (req, res) => {
     if (pendingSkuMapLogs.length > 0 && !skuMappingDryRun) {
       try {
         await SkuMappingEntry.bulkWrite(pendingSkuMapLogs, { ordered: false });
-      } catch (_) {}
+      } catch (_) { }
     }
     if (pendingMappedSkuOps.length > 0 && !skuMappingDryRun) {
       try {
         await OrderCustomProduct.bulkWrite(pendingMappedSkuOps, {
           ordered: false,
         });
-      } catch (_) {}
+      } catch (_) { }
     }
 
     // dọn file tạm
     try {
       fs.unlinkSync(filePath);
-    } catch (_) {}
+    } catch (_) { }
 
     return res.json({
       message: "Batch import completed with ASIN-Listing base image matching",
@@ -1013,7 +1014,7 @@ const updateOrdersFromXlsx = async (req, res) => {
   } catch (error) {
     try {
       if (req?.file?.path) fs.unlinkSync(req.file.path);
-    } catch (_) {}
+    } catch (_) { }
     return res
       .status(500)
       .json({ message: "Batch import failed", error: error.message });
@@ -1062,6 +1063,20 @@ const getOrderById = async (req, res) => {
   }
 };
 
+async function getVendorProductIdsByVendorName(vendorName) {
+  const vdoc = await Vendor.findOne(
+    { name: new RegExp(`^${vendorName}$`, "i") },
+    { _id: 1 }
+  ).lean();
+
+  if (!vdoc?._id) return [];
+
+  // dùng distinct để tránh query & memory quá nặng
+  const vpIds = await VendorProduct.distinct("_id", { vendor_id: vdoc._id });
+  return vpIds;
+}
+
+
 const getFrontendOrders = async (req, res) => {
   try {
     const {
@@ -1096,19 +1111,62 @@ const getFrontendOrders = async (req, res) => {
 
     const matchStage = {};
 
-    // Chặn Seller cố tình lọc đơn người khác / đơn chưa có seller
-    if (isSeller) {
+    // ===== SPECIAL CASE: user được xem theo vendor LNG Groups =====
+    const LNG_VENDOR_GUARD_USER_ID = "68b93ed3f02eed8dec002ef0";
+    const LNG_VENDOR_NAME = "LNG Groups";
+    let appliedVendorGuard = false;
+
+    if (isSeller && String(userId) === LNG_VENDOR_GUARD_USER_ID) {
+      // lấy danh sách VendorProduct thuộc vendor "LNG Groups"
+      const vdoc = await Vendor.findOne(
+        { name: new RegExp(`^${LNG_VENDOR_NAME}$`, "i") },
+        { _id: 1 }
+      ).lean();
+
+      if (!vdoc?._id) {
+        // Không tìm thấy vendor -> trả rỗng, tránh lộ data
+        return res.json({
+          data: [],
+          totalCount: 0,
+          totalPages: 1,
+          currentPage: 1,
+        });
+      }
+
+      const vpIds = await VendorProduct.distinct("_id", {
+        vendor_id: vdoc._id,
+      });
+
+      if (!vpIds?.length) {
+        return res.json({
+          data: [],
+          totalCount: 0,
+          totalPages: 1,
+          currentPage: 1,
+        });
+      }
+
+      matchStage["items.cost_breakdown.vendorProductId"] = {
+        $in: vpIds.map((id) => new mongoose.Types.ObjectId(id)),
+      };
+
+      appliedVendorGuard = true;
+    }
+
+    // Chặn Seller cố tình lọc đơn người khác / đơn chưa có seller (trừ khi là user LNG guard)
+    if (isSeller && !appliedVendorGuard) {
       if (!mongoose.Types.ObjectId.isValid(userId)) {
         return res.status(400).json({ message: "Invalid user id in token" });
       }
       matchStage.sellerId = new mongoose.Types.ObjectId(userId);
-    } else {
+    } else if (isAdmin) {
       // Admin có thể dùng userNull
       if (userNull === "true") {
         matchStage.sellerId = { $in: [null, undefined] };
       }
     }
 
+    // ====== các filter còn lại giữ nguyên ======
     if (statuses && statuses.trim() !== "") {
       const statusArray = statuses
         .split(",")
@@ -1178,6 +1236,7 @@ const getFrontendOrders = async (req, res) => {
       }
     }
 
+    // ===== Pipeline chính =====
     const pipeline = [
       {
         $lookup: {
@@ -1191,12 +1250,12 @@ const getFrontendOrders = async (req, res) => {
 
       ...(shopName && shopName.trim() !== ""
         ? [
-            {
-              $match: {
-                "shop.name": { $regex: new RegExp(shopName.trim(), "i") },
-              },
+          {
+            $match: {
+              "shop.name": { $regex: new RegExp(shopName.trim(), "i") },
             },
-          ]
+          },
+        ]
         : []),
 
       {
@@ -1261,7 +1320,7 @@ const getFrontendOrders = async (req, res) => {
       }
       if (ids.length > 0) {
         const listings = await Listing.find({ _id: { $in: ids } })
-          .select("asin_type product_image psd") // chỉ lấy các trường cần
+          .select("asin_type product_image psd")
           .lean();
         listingMap = new Map(listings.map((l) => [String(l._id), l]));
       }
@@ -1301,13 +1360,18 @@ const getFrontendOrders = async (req, res) => {
       }
     }
 
+    // --- build kết quả ---
     const result = orders.map((order) => {
       const items = (order.items || []).map((item) => {
         const surfaces = item.version3Data?.customizationInfo?.surfaces || [];
         const version3Data = surfaces.flatMap((surface) =>
           (surface.areas || []).map((area) => ({
             label: area.label || area.name || "",
-            value: area.optionValue || area.text || area.numberValue || "",
+            value:
+              area.optionValue ||
+              area.text ||
+              area.numberValue ||
+              "",
           }))
         );
 
@@ -1316,7 +1380,7 @@ const getFrontendOrders = async (req, res) => {
           ? vendorFullNameMap.get(String(vendorProductId)) || null
           : null;
 
-        // --- NEW: ghép dữ liệu Listing theo listingId ---
+        // ghép dữ liệu Listing theo listingId
         const ldoc = item?.listingId
           ? listingMap.get(String(item.listingId))
           : null;
@@ -1334,14 +1398,14 @@ const getFrontendOrders = async (req, res) => {
           asin: item.asin,
           customized_url: item.customized_url,
 
-          // NEW: expose listing info (chỉ vài trường)
+          // expose listing info (chỉ vài trường)
           listingId: item.listingId || null,
           listing: ldoc
             ? {
-                asin_type: ldoc.asin_type || null,
-                product_image: ldoc.product_image || null,
-                psd: ldoc.psd || null,
-              }
+              asin_type: ldoc.asin_type || null,
+              product_image: ldoc.product_image || null,
+              psd: ldoc.psd || null,
+            }
             : null,
 
           cost_center: {
@@ -1380,10 +1444,10 @@ const getFrontendOrders = async (req, res) => {
         scale_overall_status: order.scale_overall_status,
         seller: order.seller
           ? {
-              _id: order.seller._id,
-              full_name: order.seller.full_name,
-              email: order.seller.email,
-            }
+            _id: order.seller._id,
+            full_name: order.seller.full_name,
+            email: order.seller.email,
+          }
           : null,
         amazon_finance_total: order.amazon_finance_total,
         amazon_total_quantity: order.amazon_total_quantity,
@@ -1433,19 +1497,43 @@ const getOrderStatistics = async (req, res) => {
 
     const baseFilter = {};
 
-    // Seller chỉ thấy đơn của họ
-    if (isSeller) {
+    // SPECIAL CASE: user LNG Groups xem theo vendor
+    const LNG_VENDOR_GUARD_USER_ID = "68b93ed3f02eed8dec002ef0";
+    const LNG_VENDOR_NAME = "LNG Groups";
+
+    if (isSeller && String(userId) === LNG_VENDOR_GUARD_USER_ID) {
+      const vpIds = await getVendorProductIdsByVendorName(LNG_VENDOR_NAME);
+      if (vpIds.length === 0) {
+        // Không có gì để đếm -> trả về 0 hết
+        return res.json({
+          all: 0,
+          new: 0,
+          noCostCenter: 0,
+          paymentPending: 0,
+          fulfilled: 0,
+          shipped: 0,
+          cancelled: 0,
+          refund: 0,
+          openCase: 0,
+        });
+      }
+      baseFilter["items.cost_breakdown.vendorProductId"] = {
+        $in: vpIds.map((id) => new mongoose.Types.ObjectId(id)),
+      };
+    } else if (isSeller) {
+      // Seller thường: chỉ thấy đơn của họ
       if (!mongoose.Types.ObjectId.isValid(userId)) {
         return res.status(400).json({ message: "Invalid user id in token" });
       }
       baseFilter.sellerId = new mongoose.Types.ObjectId(userId);
     } else {
-      // Chỉ Admin mới được lọc đơn chưa có seller
+      // Admin có thể lọc đơn chưa có seller
       if (userNull === "true") {
-        baseFilter.sellerId = { $in: [null, undefined] }; // [Sửa lỗi] trước đây dùng userId
+        baseFilter.sellerId = { $in: [null, undefined] };
       }
     }
 
+    // ==== các filter còn lại giữ nguyên ====
     if (from && to) {
       if (isNaN(Date.parse(from)) || isNaN(Date.parse(to))) {
         return res
@@ -1494,7 +1582,7 @@ const getOrderStatistics = async (req, res) => {
 
     if (shopName) {
       const resFillter = await Shop.findOne({ name: shopName }, { _id: 1 });
-      baseFilter.shopId = resFillter._id;
+      if (resFillter?._id) baseFilter.shopId = resFillter._id;
     }
 
     const [
@@ -1546,6 +1634,7 @@ const getOrderStatistics = async (req, res) => {
     });
   }
 };
+
 
 const updateOrderStatus = async (req, res) => {
   try {
@@ -2033,9 +2122,9 @@ async function listCandidateVendors(pfItems = [], sizeValue, colorValue) {
 
     const vendorId = String(
       it?.vendor_id ||
-        it?.vendor?._id ||
-        (await getVendorIdByVendorProductId(vendorProductId)) ||
-        ""
+      it?.vendor?._id ||
+      (await getVendorIdByVendorProductId(vendorProductId)) ||
+      ""
     );
     if (vendorId) out.add(vendorId);
   }
@@ -2086,9 +2175,9 @@ async function selectBestVendorProduct(
     if (!vpId) continue;
     const vId = String(
       it?.vendor_id ||
-        it?.vendor?._id ||
-        (await getVendorIdByVendorProductId(vpId)) ||
-        ""
+      it?.vendor?._id ||
+      (await getVendorIdByVendorProductId(vpId)) ||
+      ""
     );
     resolved.push({ ...it, __vendorId: vId, __vendorProductId: vpId });
   }
@@ -2176,9 +2265,9 @@ async function buildVendorRank(preItems) {
       if (!vpId) continue;
       const vId = String(
         it?.vendor_id ||
-          it?.vendor?._id ||
-          (await getVendorIdByVendorProductId(vpId)) ||
-          ""
+        it?.vendor?._id ||
+        (await getVendorIdByVendorProductId(vpId)) ||
+        ""
       );
       if (!vId) continue;
       resolved.push({ ...it, __vendorId: vId, __vendorProductId: vpId });
@@ -2702,7 +2791,7 @@ const computeBaseCostForOrder = async (req, res) => {
           const minus =
             (out.shipping_international_economy || 0) +
             (out.shipping_international_additional_units || 0) *
-              (out.shipping_international_additional_rate || 0);
+            (out.shipping_international_additional_rate || 0);
           out.base_cost_total_for_item_including_shipping = Number(
             (out.base_cost_total_for_item_including_shipping - minus).toFixed(2)
           );
@@ -2730,9 +2819,8 @@ const computeBaseCostForOrder = async (req, res) => {
                 out.base_cost_total_for_item_including_shipping + expensive.eco
               ).toFixed(2)
             );
-            out.formula = `${out.formula || ""} | SPECIAL[${
-              expensive.shipProfile
-            }]: eco(${expensive.eco}) for expensive product`;
+            out.formula = `${out.formula || ""} | SPECIAL[${expensive.shipProfile
+              }]: eco(${expensive.eco}) for expensive product`;
           }
         }
         // additional (1) cho sp "rẻ hơn"
@@ -2748,9 +2836,8 @@ const computeBaseCostForOrder = async (req, res) => {
                 out.base_cost_total_for_item_including_shipping + cheap.add
               ).toFixed(2)
             );
-            out.formula = `${out.formula || ""} | SPECIAL[${
-              cheap.shipProfile
-            }]: add(${cheap.add}) for cheaper product`;
+            out.formula = `${out.formula || ""} | SPECIAL[${cheap.shipProfile
+              }]: add(${cheap.add}) for cheaper product`;
           }
         }
 
@@ -2834,7 +2921,7 @@ const computeBaseCostForOrder = async (req, res) => {
               return (
                 sum +
                 (out.shipping_international_additional_units || 0) *
-                  (out.shipping_international_additional_rate || 0)
+                (out.shipping_international_additional_rate || 0)
               );
             }, 0)
           ).toFixed(2)
@@ -2892,7 +2979,7 @@ const computeBaseCostForOrder = async (req, res) => {
       if (
         it.cost_breakdown &&
         typeof it.cost_breakdown.base_cost_total_for_item_including_shipping ===
-          "number"
+        "number"
       ) {
         orderTotalBaseCost +=
           it.cost_breakdown.base_cost_total_for_item_including_shipping;
