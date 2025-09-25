@@ -1111,7 +1111,7 @@ const getFrontendOrders = async (req, res) => {
 
     // Production: filter by vendor "LNG Groups"
     if (isProduction) {
-      const vpIds = await getVendorProductIdsByVendorName("LNG Groups");
+      const vpIds = await getVendorProductIdsByVendorName("LNG Group");
       // debug log (remove in production)
       console.log("Production role detected. vpIds length:", vpIds.length);
 
