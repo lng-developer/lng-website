@@ -1106,13 +1106,17 @@ const getFrontendOrders = async (req, res) => {
         .json({ message: "Access denied: insufficient permissions" });
     }
 
-    const matchStage = {};
+    // We'll collect individual filter clauses into `filters` then compose $and
+    const filters = [];
 
-    // Production role => filter by vendor "LNG Groups"
+    // Production: filter by vendor "LNG Groups"
     if (isProduction) {
       const vpIds = await getVendorProductIdsByVendorName("LNG Groups");
+      // debug log (remove in production)
+      console.log("Production role detected. vpIds length:", vpIds.length);
+
       if (!vpIds || vpIds.length === 0) {
-        // safe: return empty result if vendor or vp not found
+        // safe: no vendor or no vendorProducts -> return empty
         return res.json({
           data: [],
           totalCount: 0,
@@ -1120,75 +1124,93 @@ const getFrontendOrders = async (req, res) => {
           currentPage: 1,
         });
       }
-      matchStage["items.cost_breakdown.vendorProductId"] = {
-        $in: vpIds.map((id) => new mongoose.Types.ObjectId(id)),
+
+      // build string and ObjectId forms
+      const vpIdsStr = vpIds.map((id) => String(id));
+      const vpIdsObj = vpIdsStr
+        .filter((s) => mongoose.Types.ObjectId.isValid(s))
+        .map((s) => new mongoose.Types.ObjectId(s));
+
+      // vendorCondition matches either string-stored ID or ObjectId-stored ID
+      const vendorCondition = {
+        $or: [
+          { "items.cost_breakdown.vendorProductId": { $in: vpIdsStr } },
+          { "items.cost_breakdown.vendorProductId": { $in: vpIdsObj } },
+        ],
       };
+
+      filters.push(vendorCondition);
     }
 
-    // Seller: only see own orders (unless production role)
+    // Seller: only see own orders (unless production)
     if (isSeller && !isProduction) {
       if (!mongoose.Types.ObjectId.isValid(userId)) {
         return res.status(400).json({ message: "Invalid user id in token" });
       }
-      matchStage.sellerId = new mongoose.Types.ObjectId(userId);
-    } else if (isAdmin) {
-      // Admin can use userNull to filter orders without seller
-      if (userNull === "true") {
-        matchStage.sellerId = { $in: [null, undefined] };
-      }
+      filters.push({ sellerId: new mongoose.Types.ObjectId(userId) });
     }
 
-    // Other filters
+    // Admin: can filter userNull
+    if (isAdmin && userNull === "true") {
+      filters.push({ sellerId: { $in: [null, undefined] } });
+    }
+
+    // statuses
     if (statuses && statuses.trim() !== "") {
       const statusArray = statuses
         .split(",")
         .map((s) => s.trim())
         .filter(Boolean);
-      if (statusArray.length > 0) matchStage.status = { $in: statusArray };
+      if (statusArray.length > 0) filters.push({ status: { $in: statusArray } });
     }
 
+    // search -> build $or clause, but push as separate filter (so it will be ANDed with vendorCondition etc)
     if (search) {
       const keyword = new RegExp(search, "i");
-      matchStage.$or = [
-        { orderId: keyword },
-        { "customer_infor.name": keyword },
-        { "items.sku": keyword },
-        { "items.asin": keyword },
-      ];
+      filters.push({
+        $or: [
+          { orderId: keyword },
+          { "customer_infor.name": keyword },
+          { "items.sku": keyword },
+          { "items.asin": keyword },
+        ],
+      });
     }
 
+    // openCase
     if (openCase === "true") {
-      matchStage.case = { $exists: true, $not: { $size: 0 } };
+      filters.push({ case: { $exists: true, $not: { $size: 0 } } });
     }
 
+    // date range
     if (from && to) {
       if (isNaN(Date.parse(from)) || isNaN(Date.parse(to))) {
         return res
           .status(400)
           .json({ message: "Invalid date format in from or to" });
       }
-      matchStage.purchase_date = { $gte: new Date(from), $lte: new Date(to) };
+      filters.push({ purchase_date: { $gte: new Date(from), $lte: new Date(to) } });
     }
 
     if (isNoCostCenter === "true") {
-      matchStage.base_cost = { $in: [null, 0] };
+      filters.push({ base_cost: { $in: [null, 0] } });
     }
 
     if (financialStatus) {
-      matchStage.financialStatus = financialStatus;
+      filters.push({ financialStatus });
     }
 
     if (sevenDayAlert === "true") {
       const today = new Date();
       const sevenDaysLater = new Date(today);
       sevenDaysLater.setDate(today.getDate() + 7);
-      matchStage.deliveryDate = { $lte: sevenDaysLater };
+      filters.push({ deliveryDate: { $lte: sevenDaysLater } });
     }
 
-    if (platform) matchStage.platform = platform;
+    if (platform) filters.push({ platform });
 
     if (noPsd === "true") {
-      matchStage["items.snapshotImage"] = { $in: [null, ""] };
+      filters.push({ "items.snapshotImage": { $in: [null, ""] } });
     }
 
     if (shippingType && shippingType.trim() !== "") {
@@ -1204,9 +1226,12 @@ const getFrontendOrders = async (req, res) => {
         .split(",")
         .map((t) => t.trim())
         .filter((t) => validShippingTypes.includes(t));
-      if (types.length === 1) matchStage.shipping_type = types[0];
-      else if (types.length > 1) matchStage.shipping_type = { $in: types };
+      if (types.length === 1) filters.push({ shipping_type: types[0] });
+      else if (types.length > 1) filters.push({ shipping_type: { $in: types } });
     }
+
+    // Compose final matchStage
+    const matchStage = filters.length > 0 ? { $and: filters } : {};
 
     // ===== Pipeline =====
     const pipeline = [
@@ -1219,17 +1244,17 @@ const getFrontendOrders = async (req, res) => {
         },
       },
       { $unwind: "$shop" },
+    ];
 
-      ...(shopName && shopName.trim() !== ""
-        ? [
-          {
-            $match: {
-              "shop.name": { $regex: new RegExp(shopName.trim(), "i") },
-            },
-          },
-        ]
-        : []),
+    if (shopName && shopName.trim() !== "") {
+      pipeline.push({
+        $match: {
+          "shop.name": { $regex: new RegExp(shopName.trim(), "i") },
+        },
+      });
+    }
 
+    pipeline.push(
       {
         $lookup: {
           from: "cases",
@@ -1238,7 +1263,6 @@ const getFrontendOrders = async (req, res) => {
           as: "case",
         },
       },
-
       {
         $lookup: {
           from: "users",
@@ -1252,11 +1276,15 @@ const getFrontendOrders = async (req, res) => {
           path: "$seller",
           preserveNullAndEmptyArrays: true,
         },
-      },
+      }
+    );
 
-      { $match: matchStage },
-    ];
+    // apply matchStage if any
+    if (Object.keys(matchStage).length > 0) {
+      pipeline.push({ $match: matchStage });
+    }
 
+    // count
     const countPipeline = [...pipeline, { $count: "total" }];
     const countResult = await OrderCustomProduct.aggregate(countPipeline);
     const totalCount = countResult[0]?.total || 0;
@@ -1470,11 +1498,13 @@ const getOrderStatistics = async (req, res) => {
         .json({ message: "Access denied: insufficient permissions" });
     }
 
-    const baseFilter = {};
+    const filters = [];
 
     // Production role => stats only for vendor "LNG Groups"
     if (isProduction) {
       const vpIds = await getVendorProductIdsByVendorName("LNG Groups");
+      console.log("getOrderStatistics: production vpIds length:", vpIds.length);
+
       if (!vpIds || vpIds.length === 0) {
         return res.json({
           all: 0,
@@ -1488,19 +1518,31 @@ const getOrderStatistics = async (req, res) => {
           openCase: 0,
         });
       }
-      baseFilter["items.cost_breakdown.vendorProductId"] = {
-        $in: vpIds.map((id) => new mongoose.Types.ObjectId(id)),
-      };
+
+      const vpIdsStr = vpIds.map((id) => String(id));
+      const vpIdsObj = vpIdsStr
+        .filter((s) => mongoose.Types.ObjectId.isValid(s))
+        .map((s) => new mongoose.Types.ObjectId(s));
+
+      filters.push({
+        $or: [
+          { "items.cost_breakdown.vendorProductId": { $in: vpIdsStr } },
+          { "items.cost_breakdown.vendorProductId": { $in: vpIdsObj } },
+        ],
+      });
     }
 
-    // Seller: only their orders (unless production)
+    // Seller only their orders (unless production)
     if (isSeller && !isProduction) {
       if (!mongoose.Types.ObjectId.isValid(userId)) {
         return res.status(400).json({ message: "Invalid user id in token" });
       }
-      baseFilter.sellerId = new mongoose.Types.ObjectId(userId);
-    } else if (isAdmin) {
-      if (userNull === "true") baseFilter.sellerId = { $in: [null, undefined] };
+      filters.push({ sellerId: new mongoose.Types.ObjectId(userId) });
+    }
+
+    // Admin: userNull
+    if (isAdmin && userNull === "true") {
+      filters.push({ sellerId: { $in: [null, undefined] } });
     }
 
     if (from && to) {
@@ -1509,28 +1551,26 @@ const getOrderStatistics = async (req, res) => {
           .status(400)
           .json({ message: "Invalid date format in from or to" });
       }
-      baseFilter.purchase_date = { $gte: new Date(from), $lte: new Date(to) };
+      filters.push({ purchase_date: { $gte: new Date(from), $lte: new Date(to) } });
     }
 
     if (search) {
       const keyword = new RegExp(search, "i");
-      baseFilter.$or = [
-        { orderId: keyword },
-        { "customer_infor.name": keyword },
-        { "items.sku": keyword },
-        { "items.asin": keyword },
-      ];
+      filters.push({
+        $or: [
+          { orderId: keyword },
+          { "customer_infor.name": keyword },
+          { "items.sku": keyword },
+          { "items.asin": keyword },
+        ],
+      });
     }
 
-    if (platform) baseFilter.platform = platform;
+    if (platform) filters.push({ platform });
 
-    if (noPsd === "true") {
-      baseFilter["items.snapshotImage"] = { $in: [null, ""] };
-    }
+    if (noPsd === "true") filters.push({ "items.snapshotImage": { $in: [null, ""] } });
 
-    if (openCase === "true") {
-      baseFilter.case = { $exists: true, $not: { $size: 0 } };
-    }
+    if (openCase === "true") filters.push({ case: { $exists: true, $not: { $size: 0 } } });
 
     if (shippingType && shippingType.trim() !== "") {
       const validShippingTypes = [
@@ -1545,14 +1585,16 @@ const getOrderStatistics = async (req, res) => {
         .split(",")
         .map((t) => t.trim())
         .filter((t) => validShippingTypes.includes(t));
-      if (types.length === 1) baseFilter.shipping_type = types[0];
-      else if (types.length > 1) baseFilter.shipping_type = { $in: types };
+      if (types.length === 1) filters.push({ shipping_type: types[0] });
+      else if (types.length > 1) filters.push({ shipping_type: { $in: types } });
     }
 
     if (shopName) {
       const resFilter = await Shop.findOne({ name: shopName }, { _id: 1 }).lean();
-      if (resFilter?._id) baseFilter.shopId = resFilter._id;
+      if (resFilter?._id) filters.push({ shopId: resFilter._id });
     }
+
+    const baseFilter = filters.length > 0 ? { $and: filters } : {};
 
     const [
       all,
@@ -1604,7 +1646,6 @@ const getOrderStatistics = async (req, res) => {
     });
   }
 };
-
 
 const updateOrderStatus = async (req, res) => {
   try {
