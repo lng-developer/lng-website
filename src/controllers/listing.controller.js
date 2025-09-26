@@ -320,11 +320,9 @@ const upsertListing = async (req, res) => {
       .json({ message: "Error upserting listing", error: error.message });
   }
 };
-const ALLOWED_EXTS = ['.psd', '.zip', '.rar'];
+const ALLOWED_EXTS = ['.zip'];
 const MIME_BY_EXT = {
-  '.psd': 'image/vnd.adobe.photoshop',
   '.zip': 'application/zip',
-  '.rar': 'application/x-rar-compressed', // một số client có thể dùng 'application/vnd.rar'
 };
 
 const upload = multer({
@@ -332,17 +330,10 @@ const upload = multer({
   limits: { fileSize: 1024 * 1024 * 1024 }, // 1GB
   fileFilter: (req, file, cb) => {
     const ext = (path.extname(file.originalname) || '').toLowerCase();
-    const isOk = ALLOWED_EXTS.includes(ext)
-      || file.mimetype === 'image/vnd.adobe.photoshop'
-      || file.mimetype === 'application/zip'
-      || file.mimetype === 'application/x-rar-compressed'
-      || file.mimetype === 'application/vnd.rar';
-
-    if (!isOk) return cb(new Error("Chỉ chấp nhận .psd, .zip, .rar"));
+    if (ext !== '.zip') return cb(new Error('Chỉ chấp nhận .zip'));
     cb(null, true);
   },
 });
-
 function buildDesignKeyByExt(asin, ext) {
   ext = (ext || '.psd').toLowerCase();
   // Quy ước: psd/<ASIN>/<ASIN><ext>
@@ -366,27 +357,18 @@ const updatePSD = [
       if (!req.file?.buffer)
         return res.status(400).json({ message: "Thiếu file (field: file)" });
 
-      const originalName = req.file.originalname || `${asin}.psd`;
-      const ext = (path.extname(originalName) || ".psd").toLowerCase();
+      // ✅ Ép chỉ .zip (fileFilter đã chặn từ trước)
+      const originalName = req.file.originalname || `${asin}.zip`;
+      const ext = '.zip';
 
-      // Chỉ cho phép đúng bộ đuôi
-      if (!['.zip'].includes(ext)) {
-        return res.status(400).json({ message: "Chỉ chấp nhận .zip" });
-      }
+      // ✅ Key theo quy ước: psd/<ASIN>/<ASIN>.zip
+      const key = buildDesignKeyByExt(asin, ext);
 
-      // Key overwrite theo ASIN + đuôi
-      const key = ext === '.psd'
-        ? buildPsdKeyFromAsin(asin)                 // ví dụ: psd/<ASIN>/<ASIN>.psd
-        : buildDesignKeyByExt(asin, ext);           // ví dụ: psd/<ASIN>/<ASIN>.zip/.rar
-
-      // Content-Type đúng theo đuôi
-      const contentType = MIME_BY_EXT[ext] || 'application/octet-stream';
+      // ✅ MIME chuẩn .zip
+      const contentType = MIME_BY_EXT[ext] || 'application/zip';
 
       // Upload (overwrite nếu tồn tại)
-      const { url } = await uploadBufferToWasabi(req.file.buffer, {
-        key,
-        contentType,
-      });
+      const { url } = await uploadBufferToWasabi(req.file.buffer, { key, contentType });
 
       // Lưu metadata vào listing.psd
       const updated = await Listing.findOneAndUpdate(
@@ -394,13 +376,13 @@ const updatePSD = [
         {
           $set: {
             "psd.psd_id": asin,
-            "psd.url": url,            // với bucket private, dùng signed URL để tải
+            "psd.url": url,
             "psd.status": status,
             "psd.file_name": originalName,
-            "psd.file_ext": ext,       // '.psd' | '.zip' | '.rar'
+            "psd.file_ext": ext,       // luôn '.zip'
             "psd.mime": contentType,
             "psd.size": req.file.size || null,
-            "psd.archive": ext === '.zip' || ext === '.rar',
+            "psd.archive": true,       // vì .zip
             date_updated: new Date(),
           },
         },
@@ -409,7 +391,7 @@ const updatePSD = [
 
       return res.json({
         message: "Cập nhật file thiết kế thành công",
-        file_type: ext.replace('.', '').toUpperCase(),
+        file_type: "ZIP",
         key,
         listing: updated,
       });
@@ -428,31 +410,23 @@ const updatePSD = [
 const getPsdSignedUrl = async (req, res) => {
   try {
     const { asin } = req.params;
-    const expires = Math.max(60, Math.min(86400, Number(req.query.expires) || 3600)); // 1m–24h
+    const expires = Math.max(60, Math.min(86400, Number(req.query.expires) || 3600));
     const asAttachment = String(req.query.download || "") === "1";
 
     const listing = await Listing.findOne({ asin }).lean();
     if (!listing) return res.status(404).json({ message: "Listing không tồn tại" });
 
-    // Ưu tiên đuôi đã lưu trong DB, fallback sang .psd
-    const ext = (listing.psd?.file_ext || ".psd").toLowerCase();
-    const key = ext === '.psd'
-      ? buildPsdKeyFromAsin(asin)
-      : buildDesignKeyByExt(asin, ext);
+    // ✅ Fallback .zip thay vì .psd
+    const ext = (listing.psd?.file_ext || ".zip").toLowerCase();
+    const key = buildDesignKeyByExt(asin, ext);   // luôn trả psd/<ASIN>/<ASIN>.zip
 
     const filename = `${asin}${ext}`;
-    const url = await getSignedUrlForKey(key, {
-      expiresIn: expires,
-      asAttachment,
-      filename,
-    });
+    const url = await getSignedUrlForKey(key, { expiresIn: expires, asAttachment, filename });
 
     return res.json({ asin, key, signed_url: url, expires_in: expires });
   } catch (error) {
     console.error("Error getPsdSignedUrl:", error);
-    return res
-      .status(500)
-      .json({ message: "Lỗi tạo signed URL", error: error.message });
+    return res.status(500).json({ message: "Lỗi tạo signed URL", error: error.message });
   }
 };
 
