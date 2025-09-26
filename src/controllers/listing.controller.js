@@ -370,8 +370,8 @@ const updatePSD = [
       const ext = (path.extname(originalName) || ".psd").toLowerCase();
 
       // Chỉ cho phép đúng bộ đuôi
-      if (!['.psd', '.zip', '.rar'].includes(ext)) {
-        return res.status(400).json({ message: "Chỉ chấp nhận .psd, .zip, .rar" });
+      if (!['.zip'].includes(ext)) {
+        return res.status(400).json({ message: "Chỉ chấp nhận .zip" });
       }
 
       // Key overwrite theo ASIN + đuôi
