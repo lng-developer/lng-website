@@ -882,10 +882,10 @@ const getScaleListForDesign = async (req, res) => {
     const userRole = req.user?.role; // string hoặc array
     const userId = req.user?.userId || "";
 
-    const isAdmin = /^admin$/i.test(role);
-    const isSeller = /^seller$/i.test(role);
-    const isDesigner = /^design(?:er)?$/i.test(role);
-    const isDesignLeader = /^design\s*leader$/i.test(role);
+    const isAdmin = /^admin$/i.test(userRole);
+    const isSeller = /^seller$/i.test(userRole);
+    const isDesigner = /^design(?:er)?$/i.test(userRole);
+    const isDesignLeader = /^design\s*leader$/i.test(userRole);
 
     if (!isAdmin && !isSeller && !isDesigner && !isDesignLeader) {
       return res
