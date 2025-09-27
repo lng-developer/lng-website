@@ -23,6 +23,21 @@ const getAllSeller = async (req, res) => {
   }
 };
 
+const getAllDesigner = async (req, res) => {
+  try {
+    const designRoleId = "6886ced93157601ba73ce832";
+    const leadDesignRoleId = "68d4f11f3c366c734ea24284";
+    const csRoleId = "688087528659a0e8cf260d46";
+    const users = await User.find({
+      role_id: { $in: [designRoleId, leadDesignRoleId, csRoleId] },
+    });
+    res.json(users);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: "Get users failed", error: err.message });
+  }
+};
+
 const getUserById = async (req, res) => {
   const user = await User.findById(req.params.id).populate("role_id");
   res.json(user);
@@ -65,4 +80,5 @@ module.exports = {
   updateUser,
   deleteUser,
   getAllSeller,
+  getAllDesigner,
 };

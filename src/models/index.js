@@ -15,8 +15,9 @@ const ConfigCostCenter = require("./configCostCenter.model");
 const ConfigOptionMapping = require("./configOptionMapping");
 const Report = require("./report.model");
 const Ads = require("./ads.model");
-const SkuMappingConfig = require("./skuMappingConfig.model")
-const SkuMappingEntry = require("./skuMappingEntry.model")
+const SkuMappingConfig = require("./skuMappingConfig.model");
+const SkuMappingEntry = require("./skuMappingEntry.model");
+const PsdTask = require("./psdTask.model");
 
 // Cau hinh mongoose dang global
 mongoose.Promise = global.Promise;
@@ -40,8 +41,9 @@ db.configCostCenter = ConfigCostCenter;
 db.configOptionMapping = ConfigOptionMapping;
 db.Report = Report;
 db.Ads = Ads;
-db.SkuMappingConfig = SkuMappingConfig
-db.SkuMappingEntry = SkuMappingEntry
+db.SkuMappingConfig = SkuMappingConfig;
+db.SkuMappingEntry = SkuMappingEntry;
+db.PsdTask = PsdTask;
 db.connectDB = async () => {
   await mongoose
     .connect(process.env.MONGO_URI, {

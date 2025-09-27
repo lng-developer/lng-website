@@ -67,4 +67,6 @@ router.put(
   controller.updateItemTracking
 );
 
+router.put("/:orderId", authenticateToken, controller.updateScaleOrder);
+
 module.exports = router;
