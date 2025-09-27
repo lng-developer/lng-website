@@ -18,6 +18,7 @@ const reportRoutes = require("./report.routes");
 const adsRoutes = require("./ads.routes");
 const skuMappingRoutes = require("./skuMapping.routes");
 const APORoutes = require("./APO.routes");
+const PsdTaskRoutes = require("./psdTask.routes");
 
 module.exports = {
   roleRoutes,
@@ -40,4 +41,5 @@ module.exports = {
   adsRoutes,
   skuMappingRoutes,
   APORoutes,
+  PsdTaskRoutes,
 };

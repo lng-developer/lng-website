@@ -51,10 +51,8 @@ const importReportFromFile = async (req, res) => {
       const shippingTax = num(r["shipping-tax"]);
       const discount = num(r["item-promotion-discount"]);
 
-      // revenue = itemPrice + shippingPrice (không trừ thuế/discount/fee)
+      // ✅ Công thức mới
       const revenue = itemPrice + shippingPrice;
-
-      // fee 17% theo (item + shipping)
       const fee = 0.17 * (itemPrice + shippingPrice);
 
       const acc = bucket.get(orderId) || {
@@ -67,7 +65,7 @@ const importReportFromFile = async (req, res) => {
         item_promotion_discount: 0,
         fee: 0,
         revenue: 0,
-        purchase_date_raw: r["purchase-date"], // dùng để set nếu order chưa có
+        purchase_date_raw: r["purchase-date"],
       };
 
       acc.quantity += qty;
@@ -82,12 +80,13 @@ const importReportFromFile = async (req, res) => {
       bucket.set(orderId, acc);
     }
 
-    // ===== Bulk updates bằng native driver để tránh validation của Mongoose =====
+    // ===== Bulk updates bằng native driver =====
     const col = mongoose.connection.collection("ordercustomproducts");
     const ops = [];
 
     for (const acc of bucket.values()) {
       const aft = {
+        // các trường sẽ GHI ĐÈ toàn bộ amazon_finance_total
         item_price: +acc.item_price.toFixed(2),
         item_tax: +acc.item_tax.toFixed(2),
         shipping_price: +acc.shipping_price.toFixed(2),
@@ -95,38 +94,45 @@ const importReportFromFile = async (req, res) => {
         item_promotion_discount: +acc.item_promotion_discount.toFixed(2),
         fee: +acc.fee.toFixed(2),
         revenue: +acc.revenue.toFixed(2),
+        opCost: 0, // ghi đè mặc định 0
+        refund: 0, // ghi đè mặc định 0
         computed_at: new Date(),
       };
 
-      // (A) Ghi đè amazon_finance_total.*, set default opCost/refund, tính profit1/profit2 (đều NẰM TRONG amazon_finance_total)
+      const d = acc.purchase_date_raw ? new Date(acc.purchase_date_raw) : null;
+      const hasValidPurchaseDate = d && !isNaN(d);
+
       ops.push({
         updateOne: {
-          filter: { orderId: acc.orderId }, // chỉ update đơn đã có sẵn
+          filter: { orderId: acc.orderId }, // chỉ update đơn đã tồn tại
           update: [
-            // GỘP và GHI ĐÈ các field từ file (aft nằm sau nên override field cũ)
+            // Stage 1: GHI ĐÈ
             {
               $set: {
                 amazon_total_quantity: acc.quantity,
-                amazon_finance_total: {
-                  $mergeObjects: ["$amazon_finance_total", aft],
-                },
+                amazon_finance_total: aft, // ❗ ghi đè toàn bộ object
+                ...(hasValidPurchaseDate
+                  ? { purchase_date: { $ifNull: ["$purchase_date", d] } }
+                  : {}),
               },
             },
-            // Bổ sung mặc định nếu thiếu + tính profit1: revenue - (base_cost + fee)
+            // Stage 2: tính profit1 theo công thức mới
             {
               $set: {
-                "amazon_finance_total.opCost": {
-                  $ifNull: ["$amazon_finance_total.opCost", 0],
-                },
-                "amazon_finance_total.refund": {
-                  $ifNull: ["$amazon_finance_total.refund", 0],
-                },
                 "amazon_finance_total.profit1": {
                   $round: [
                     {
                       $subtract: [
                         aft.revenue,
-                        { $add: [{ $ifNull: ["$base_cost", 0] }, aft.fee] },
+                        {
+                          $add: [
+                            { $ifNull: ["$base_cost", 0] },
+                            aft.fee,
+                            aft.item_tax,
+                            aft.shipping_tax,
+                            aft.item_promotion_discount,
+                          ],
+                        },
                       ],
                     },
                     2,
@@ -134,7 +140,7 @@ const importReportFromFile = async (req, res) => {
                 },
               },
             },
-            // profit2 = profit1 - (opCost + refund)
+            // Stage 3: profit2 = profit1 - (opCost + refund)
             {
               $set: {
                 "amazon_finance_total.profit2": {
@@ -156,32 +162,11 @@ const importReportFromFile = async (req, res) => {
               },
             },
           ],
-          upsert: false, // Không tạo order mới ở đây; chỉ ghi đè order đã tồn tại
+          upsert: false, // ❗ KHÔNG tạo mới — chỉ ghi đè order đã có
         },
       });
-
-      // (B) Set purchase_date nếu đang thiếu
-      if (acc.purchase_date_raw) {
-        const d = new Date(acc.purchase_date_raw);
-        if (!isNaN(d)) {
-          ops.push({
-            updateOne: {
-              filter: {
-                orderId: acc.orderId,
-                $or: [
-                  { purchase_date: { $exists: false } },
-                  { purchase_date: null },
-                ],
-              },
-              update: { $set: { purchase_date: d } },
-              upsert: false,
-            },
-          });
-        }
-      }
     }
 
-    // Cho phép dry-run để test
     if (req.query.dryRun === "true") {
       return res.json({
         message: "DRY-RUN: no writes executed",
@@ -197,7 +182,7 @@ const importReportFromFile = async (req, res) => {
 
     res.json({
       message:
-        "Imported: overwrite amazon_finance_total; profit fields computed with new revenue; purchase_date set-if-missing",
+        "Imported: HARD-OVERWRITE amazon_finance_total; profit fields computed with new formula; purchase_date set-if-missing",
       ordersParsed: bucket.size,
       opsCount: ops.length,
       bulkResult,

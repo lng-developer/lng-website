@@ -17,6 +17,7 @@ const QCController = require("./qc.controller");
 const reportController = require("./report.controller");
 const adsController = require("./ads.controller");
 const APOController = require("./APO.controller");
+const PsdTaskController = require("./psdTask.controller");
 
 module.exports = {
   roleController,
@@ -38,4 +39,5 @@ module.exports = {
   reportController,
   adsController,
   APOController,
+  PsdTaskController,
 };

@@ -21,6 +21,8 @@ router.get(
   userController.getAllSeller
 );
 
+router.get("/designer", authenticateToken, userController.getAllDesigner);
+
 router.post(
   "/",
   authenticateToken,
