@@ -3258,6 +3258,166 @@ const updateItemTracking = async (req, res) => {
   }
 };
 
+/**
+ * Tạo orderId mới với hậu tố -R1 (nếu trùng thì R2, R3...)
+ */
+async function buildNextReplaceOrderId(baseOrderId) {
+  // Nếu đã có hậu tố -R\d rồi thì bỏ đi để lấy "gốc"
+  const base = String(baseOrderId).replace(/-R\d+$/i, "");
+  const regex = new RegExp(`^${base}-R(\\d+)$`, "i");
+  const exists = await OrderCustomProduct.find(
+    { orderId: { $regex: new RegExp(`^${base}-R\\d+$`, "i") } },
+    { orderId: 1 }
+  ).lean();
+
+  if (!exists || exists.length === 0) return `${base}-R1`;
+
+  let max = 0;
+  for (const d of exists) {
+    const m = String(d.orderId).match(regex);
+    if (m && m[1]) max = Math.max(max, Number(m[1]));
+  }
+  return `${base}-R${max + 1}`;
+}
+
+/**
+ * Làm sạch 1 item để dùng cho đơn replace
+ * - Giữ nguyên customization/version3/baseImage/snapshot (để sản xuất lại)
+ * - Reset các field fulfillment/shipping/tracking/scale/cost
+ */
+function sanitizeItemForReplace(srcItem) {
+  const dst = JSON.parse(JSON.stringify(srcItem)); // deep clone plain
+
+  // ID item mới
+  dst.orderItemId = new mongoose.Types.ObjectId().toHexString();
+
+  // Reset các field không nên mang sang
+  dst.fulfillment_file = {};
+  dst.tracking_info = {
+    fulfillment: "",
+    tracking: "",
+    status: "New",
+    note: "",
+    updated_at: new Date(),
+  };
+  dst.scale_status = "Need Scale";
+  dst.qc_note = "";
+  dst.cs_note = "";
+
+  // cost breakdown tính lại sau
+  dst.cost_breakdown = undefined;
+
+  // quantity giữ nguyên (có thể cho phép override trong tương lai)
+  dst.quantity = Number(srcItem.quantity || 1);
+
+  // các field còn lại: sku/mapped_sku/title/customization/… giữ nguyên
+  return dst;
+}
+
+/**
+ * POST /orders/:orderId/replace
+ * Body:
+ *   - orderItemIds?: string[]  (bắt buộc nếu đơn có >1 item)
+ *   - note?: string            (ghi chú lý do replace, sẽ gắn vào cs_note của items mới)
+ */
+async function createReplacementOrder(req, res) {
+  try {
+    const { orderId } = req.params;
+    const { orderItemIds, note } = req.body || {};
+
+    // 1) Lấy đơn gốc
+    const src = await OrderCustomProduct.findOne({ orderId }).lean();
+    if (!src) return res.status(404).json({ message: "Order not found" });
+
+    const totalItems = Array.isArray(src.items) ? src.items.length : 0;
+    if (totalItems === 0)
+      return res.status(400).json({ message: "Source order has no items" });
+
+    // 2) Xác định danh sách item được replace
+    let selected = [];
+    if (totalItems === 1) {
+      selected = [src.items[0]];
+    } else {
+      if (!Array.isArray(orderItemIds) || orderItemIds.length === 0) {
+        return res.status(400).json({
+          message:
+            "This order has multiple items. Please provide body.orderItemIds as an array of orderItemId to replace.",
+          availableItemIds: src.items.map((i) => i.orderItemId),
+        });
+      }
+      const setIds = new Set(orderItemIds.map(String));
+      selected = src.items.filter((it) => setIds.has(String(it.orderItemId)));
+      if (selected.length === 0) {
+        return res.status(400).json({
+          message: "No matching orderItemIds found in source order",
+          availableItemIds: src.items.map((i) => i.orderItemId),
+        });
+      }
+    }
+
+    // 3) Tạo orderId mới theo -R1/-R2…
+    const newOrderId = await buildNextReplaceOrderId(src.orderId);
+
+    // 4) Build items mới
+    const newItems = selected.map((it) => {
+      const clean = sanitizeItemForReplace(it);
+      if (note) clean.cs_note = String(note);
+      return clean;
+    });
+
+    // 5) Dữ liệu đơn mới
+    const dstPayload = {
+      orderId: newOrderId,
+      items: newItems,
+
+      // copy các trường chung
+      customer_infor: src.customer_infor || null,
+      shopId: src.shopId || null,
+      sellerId: src.sellerId || null,
+      shipping_type: src.shipping_type || "Standard",
+      platform: src.platform || "Amazon",
+      status: "New",
+      scale_overall_status: "Need Scale",
+
+      // reset các tổng hợp / tài chính
+      base_cost: 0,
+      base_cost_shipping_groups: [],
+      amazon_total_quantity: newItems.reduce(
+        (s, it) => s + Number(it.quantity || 1),
+        0
+      ),
+
+      // metadata replace (không đụng schema hiện tại nếu chưa có field — chỉ lưu thêm key mềm)
+      replace_meta: {
+        is_replacement: true,
+        replace_of_order_id: src.orderId,
+        created_at: new Date(),
+        reason: note || "",
+      },
+
+      // thời gian: để createdAt/purchase_date tách biệt; purchase_date = now
+      purchase_date: new Date(),
+    };
+
+    // 6) Tạo đơn
+    const created = await OrderCustomProduct.create(dstPayload);
+
+    return res.json({
+      message: "Replacement order created",
+      source_order_id: src.orderId,
+      replacement_order_id: created.orderId,
+      items_copied: newItems.length,
+      selected_order_item_ids: newItems.map((i) => i.orderItemId),
+    });
+  } catch (err) {
+    console.error("createReplacementOrder error:", err);
+    return res
+      .status(500)
+      .json({ message: "Failed to create replacement order", error: err.message });
+  }
+}
+
+
 const updateScaleOrder = async (req, res) => {
   const user = await OrderCustomProduct.findByIdAndUpdate(
     req.params.orderId,
@@ -3286,5 +3446,6 @@ module.exports = {
   computeBaseCostForOrder,
   computeBaseCostForMany,
   updateItemTracking,
+  createReplacementOrder,
   updateScaleOrder,
 };

@@ -23,15 +23,20 @@ function uploadStreamToCloudinary(buffer, opts = {}) {
 function computeOverallScaleStatus(orderDoc) {
   const items = orderDoc.items || [];
   if (items.length === 0) return "Need Scale";
-  const statuses = items.map((i) => i.scale_status || "Need Scale");
-  const allComplete = statuses.every((s) => s === "Complete");
-  const anyPendingOrComplete = statuses.some(
-    (s) => s === "Pending" || s === "Complete"
-  );
+
+  // Chuẩn hoá để tránh lỗi viết hoa / null
+  const statuses = items.map((i) => String(i?.scale_status || "Need Scale"));
+
   const anyRejected = statuses.some((s) => s === "QC Rejected");
   if (anyRejected) return "QC Rejected";
+
+  const allComplete = statuses.every((s) => s === "Complete");
   if (allComplete) return "Ready";
-  if (anyPendingOrComplete) return "Pending";
+
+  // Pending đúng nghĩa: không còn Need Scale
+  const noneNeedScale = statuses.every((s) => s === "Pending" || s === "Complete");
+  if (noneNeedScale) return "Pending";
+
   return "Need Scale";
 }
 
@@ -115,6 +120,7 @@ function normalizeProviderKey(vendorDoc) {
   if (ft.includes("merchfox") || nm.includes("merchfox")) return "merchfox";
   if (ft.includes("grabink") || nm.includes("grabink")) return "grabink";
   if (ft.includes("merchize") || nm.includes("merchize")) return "merchize";
+  if (ft.includes("printway") || nm.includes("printway")) return "printway";
 
   // có thể bổ sung thêm provider khác ở đây
   return null;
@@ -357,7 +363,7 @@ const retrySendFulfillment = async (req, res) => {
     );
     const providersHint = AVAILABLE_PROVIDERS.length
       ? AVAILABLE_PROVIDERS.join(" | ")
-      : "grabink | merchfox | merchize";
+      : "grabink | merchfox | merchize | printway"
 
     // 1) Nếu không truyền provider, auto-resolve từ VendorProduct → Vendor
     if (!providerKey) {
@@ -544,12 +550,12 @@ const getScaleList = async (req, res) => {
       // Filter shopName
       ...(shopName && shopName.trim()
         ? [
-            {
-              $match: {
-                "shop.name": { $regex: new RegExp(shopName.trim(), "i") },
-              },
+          {
+            $match: {
+              "shop.name": { $regex: new RegExp(shopName.trim(), "i") },
             },
-          ]
+          },
+        ]
         : []),
 
       // Filter search (mở rộng thêm seller)
@@ -689,7 +695,7 @@ const getScaleList = async (req, res) => {
     const limitNum = isAll ? totalCount || 1 : parseInt(perPage, 10) || 10;
     const skip = isAll ? 0 : (pageNum - 1) * limitNum;
 
-    pipeline.push({ $sort: { createdAt: -1 } });
+    pipeline.push({ $sort: { purchase_date: 1, createdAt: 1 } });
     if (!isAll) pipeline.push({ $skip: skip }, { $limit: limitNum });
 
     const orders = await OrderCustomProduct.aggregate(pipeline);
@@ -797,10 +803,10 @@ const getScaleList = async (req, res) => {
           listingId: item.listingId,
           listing: ldoc
             ? {
-                asin_type: ldoc.asin_type || null,
-                product_image: ldoc.product_image || null,
-                psd: ldoc.psd || null,
-              }
+              asin_type: ldoc.asin_type || null,
+              product_image: ldoc.product_image || null,
+              psd: ldoc.psd || null,
+            }
             : null,
         };
       });
@@ -823,10 +829,10 @@ const getScaleList = async (req, res) => {
         scale_overall_status: order.scale_overall_status,
         seller: order.seller
           ? {
-              _id: order.seller._id,
-              full_name: order.seller.full_name,
-              email: order.seller.email,
-            }
+            _id: order.seller._id,
+            full_name: order.seller.full_name,
+            email: order.seller.email,
+          }
           : null,
       };
     });
@@ -953,12 +959,12 @@ const getScaleListForDesign = async (req, res) => {
       // Filter shopName
       ...(shopName && shopName.trim()
         ? [
-            {
-              $match: {
-                "shop.name": { $regex: new RegExp(shopName.trim(), "i") },
-              },
+          {
+            $match: {
+              "shop.name": { $regex: new RegExp(shopName.trim(), "i") },
             },
-          ]
+          },
+        ]
         : []),
 
       // Filter search
@@ -1261,10 +1267,10 @@ const getScaleListForDesign = async (req, res) => {
           listingId: item.listingId,
           listing: ldoc
             ? {
-                asin_type: ldoc.asin_type || null,
-                product_image: ldoc.product_image || null,
-                psd: ldoc.psd || null,
-              }
+              asin_type: ldoc.asin_type || null,
+              product_image: ldoc.product_image || null,
+              psd: ldoc.psd || null,
+            }
             : null,
         };
       });
@@ -1288,17 +1294,17 @@ const getScaleListForDesign = async (req, res) => {
         scale_overall_status: order.scale_overall_status,
         seller: order.seller
           ? {
-              _id: order.seller._id,
-              full_name: order.seller.full_name,
-              email: order.seller.email,
-            }
+            _id: order.seller._id,
+            full_name: order.seller.full_name,
+            email: order.seller.email,
+          }
           : null,
         scale_by: order.scale_by
           ? {
-              _id: order.scale_by._id,
-              full_name: order.scale_by.full_name,
-              email: order.scale_by.email,
-            }
+            _id: order.scale_by._id,
+            full_name: order.scale_by.full_name,
+            email: order.scale_by.email,
+          }
           : null,
       };
     });
@@ -1419,12 +1425,12 @@ async function getScaleStatistics(req, res) {
 
       ...(shopName && shopName.trim()
         ? [
-            {
-              $match: {
-                "shop.name": { $regex: new RegExp(shopName.trim(), "i") },
-              },
+          {
+            $match: {
+              "shop.name": { $regex: new RegExp(shopName.trim(), "i") },
             },
-          ]
+          },
+        ]
         : []),
 
       // Filter search
@@ -1653,12 +1659,12 @@ async function getScaleStatisticsForDesign(req, res) {
       { $unwind: { path: "$shop", preserveNullAndEmptyArrays: true } },
       ...(shopName && shopName.trim()
         ? [
-            {
-              $match: {
-                "shop.name": { $regex: new RegExp(shopName.trim(), "i") },
-              },
+          {
+            $match: {
+              "shop.name": { $regex: new RegExp(shopName.trim(), "i") },
             },
-          ]
+          },
+        ]
         : []),
 
       // Filter search
