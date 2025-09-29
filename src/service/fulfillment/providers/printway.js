@@ -82,12 +82,6 @@ function buildPayload(orderObj) {
 
     const { firstName, lastName } = splitName(customer.name || "");
 
-    const rawPhone = getRawPhone(orderObj);
-    const normalizedPhone = normalizePhoneByCountry(
-        rawPhone,
-        shipping_country_code
-    );
-
     return {
         order_id: orderObj.orderId,
         store_code: orderObj.store_code || "",
@@ -256,8 +250,6 @@ async function send(orderDoc) {
     };
 
     // Log đầy đủ
-    console.log("[PRINTWAY] rawPhone:", getRawPhone(orderObj));
-    console.log("[PRINTWAY] payload.shipping_phone:", payload.shipping_phone);
     console.log("[PRINTWAY] Create order endpoint:", createEndpoint);
     console.log("[PRINTWAY] Sending payload:", JSON.stringify(payload, null, 2));
 
