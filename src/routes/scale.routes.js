@@ -39,14 +39,14 @@ router.put(
 router.get(
   "/list",
   authenticateToken,
-  authorizeRoles("Customer Service", "Admin", "Seller"),
+  authorizeRoles("Customer Service", "Admin", "Seller", "Design Leader"),
   scaleController.getScaleList
 );
 
 router.get(
   "/statistics",
   authenticateToken,
-  authorizeRoles("Customer Service", "Admin", "Seller"),
+  authorizeRoles("Customer Service", "Admin", "Seller", "Design Leader"),
   scaleController.getScaleStatistics
 );
 

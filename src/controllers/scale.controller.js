@@ -1330,9 +1330,26 @@ const getScaleListForDesign = async (req, res) => {
   }
 };
 
-// ============================
-// STATISTICS — giữ nguyên chuẩn
-// ============================
+// === helpers: normalize & check roles ===
+function extractRoles(userRole) {
+  const norm = (s) =>
+    String(s || "")
+      .trim()
+      .replace(/\s+/g, " ")
+      .toLowerCase();
+  if (!userRole) return [];
+  if (typeof userRole === "string") return [norm(userRole)];
+  if (Array.isArray(userRole)) return userRole.map(norm);
+  if (typeof userRole === "object" && Array.isArray(userRole.roles)) {
+    return userRole.roles.map(norm);
+  }
+  return [];
+}
+function hasRole(userRole, roleName) {
+  const want = String(roleName).trim().replace(/\s+/g, " ").toLowerCase();
+  return extractRoles(userRole).includes(want);
+}
+
 async function getScaleStatistics(req, res) {
   try {
     const {
@@ -1355,7 +1372,7 @@ async function getScaleStatistics(req, res) {
     ];
 
     // ===== RBAC =====
-    const userRole = req.user?.role; // string hoặc array
+    const userRole = req.user?.role; // string | array | {roles:[]}
     const userId = req.user?.userId || "";
 
     const isAdmin = hasRole(userRole, "Admin");
@@ -1363,23 +1380,22 @@ async function getScaleStatistics(req, res) {
     const isCS = hasRole(userRole, "Customer Service");
     const isDesignLeader = hasRole(userRole, "Design Leader");
 
-
-    // Chỉ cho phép Admin, Seller, Customer Service
     if (!(isAdmin || isSeller || isCS || isDesignLeader)) {
       return res
         .status(403)
         .json({ message: "Access denied: insufficient permissions" });
     }
 
-    // ===== Base match (time range + seller protection) =====
-    // Match theo thời gian + giới hạn seller (chỉ khi là Seller thuần)
+    // CHỈ Seller "thuần" mới bị giới hạn theo sellerId
+    const isSellerOnly = isSeller && !(isAdmin || isCS || isDesignLeader);
+
+    // ===== Base match (time range + optional seller filter) =====
     const matchStage = {};
     if (from && to) {
       matchStage.createdAt = { $gte: new Date(from), $lte: new Date(to) };
     }
 
-    const shouldRestrictToSeller = isSeller && !isAdmin && !isCS;
-    if (shouldRestrictToSeller) {
+    if (isSellerOnly) {
       if (!mongoose.Types.ObjectId.isValid(userId)) {
         return res.status(400).json({ message: "Invalid user id in token" });
       }
@@ -1387,7 +1403,6 @@ async function getScaleStatistics(req, res) {
     }
 
     // ===== Search =====
-    // Search mở rộng
     let searchOr = null;
     if (search && search.trim() !== "") {
       const keyword = new RegExp(search.trim(), "i");
@@ -1397,14 +1412,13 @@ async function getScaleStatistics(req, res) {
         { "items.orderItemId": keyword },
         { "customer_infor.email": keyword },
         { "customer_infor.name": keyword },
-        // có thể thêm seller nếu cần:
+        // nếu cần thêm seller.* thì join users và mở comment dưới:
         // { "seller.full_name": keyword },
         // { "seller.email": keyword },
       ];
     }
 
     // ===== Base pipeline =====
-    // Base pipeline
     const basePipeline = [
       { $match: matchStage },
 
@@ -1419,18 +1433,7 @@ async function getScaleStatistics(req, res) {
       },
       { $unwind: { path: "$shop", preserveNullAndEmptyArrays: true } },
 
-      // Filter shopName
-
-      // (Tuỳ chọn) nếu cần search theo seller.* thì join users:
-      // {
-      //   $lookup: {
-      //     from: "users",
-      //     localField: "sellerId",
-      //     foreignField: "_id",
-      //     as: "seller",
-      //   },
-      // },
-      // { $unwind: { path: "$seller", preserveNullAndEmptyArrays: true } },
+      // (nếu cần search theo seller.*, thêm lookup users và $unwind ở đây)
 
       ...(shopName && shopName.trim()
         ? [
@@ -1442,14 +1445,10 @@ async function getScaleStatistics(req, res) {
         ]
         : []),
 
-      // Filter search
-
       ...(searchOr ? [{ $match: { $or: searchOr } }] : []),
     ];
 
-    // ===== NEW: pngStatus filter theo asin_type trong Listing =====
-    // Mặc định (pngStatus !== 'true') -> LOẠI TRỪ các order có asin_type 'Custom Image' | 'Outline'
-    // Khi pngStatus === 'true' -> CHỈ LẤY các order này
+    // ===== NEW: pngStatus filter theo asin_type =====
     const wantPngStatus = String(pngStatus || "false").toLowerCase() === "true";
     basePipeline.push(
       {
@@ -1480,9 +1479,8 @@ async function getScaleStatistics(req, res) {
         : { $match: { hasPngAsinType: { $ne: true } } },
       { $unset: "pngListings" }
     );
-    // ===== end NEW =====
 
-    // Chuẩn hoá bucket + flag hasPendingItem
+    // ===== Chuẩn hoá bucket + flag hasPendingItem =====
     basePipeline.push({
       $addFields: {
         hasPendingItem: {
@@ -1541,7 +1539,7 @@ async function getScaleStatistics(req, res) {
           counts: {
             $mergeObjects: [
               { $arrayToObject: "$byStatus" },
-              { Pending: "$pendingAdj" }, // overwrite Pending bằng pendingAdj
+              { Pending: "$pendingAdj" }, // overwrite Pending
             ],
           },
         },
@@ -1560,7 +1558,7 @@ async function getScaleStatistics(req, res) {
         "QC Rejected": c["QC Rejected"] || 0,
         Other: c["Other"] || 0,
       };
-      // All = Need Scale + Pending + Sent + QC Rejected (theo quy ước hiện tại)
+      // All = Need Scale + Pending + Sent + QC Rejected (đúng quy ước list)
       counts["All"] =
         counts["Need Scale"] +
         counts["Pending"] +
@@ -1574,7 +1572,6 @@ async function getScaleStatistics(req, res) {
       counts: normalizeCounts(overallRaw?.counts || {}),
     };
 
-    // Giữ nguyên: breakdown/timeseries chưa xây
     return res.json({ overall, breakdown: [], timeseries: [] });
   } catch (error) {
     console.error("❌ getScaleStatistics error:", error);
@@ -1584,6 +1581,7 @@ async function getScaleStatistics(req, res) {
     });
   }
 }
+
 
 async function getScaleStatisticsForDesign(req, res) {
   try {
