@@ -1,12 +1,6 @@
 // services/fulfillment/providers/printway.js
 const axios = require("axios");
 
-/* ------------------------- Helpers ------------------------- */
-function sanitizePhone(phone) {
-    if (!phone) return "";
-    return String(phone).replace(/\s*ext\..*$/i, "").trim();
-}
-
 function splitName(full = "") {
     const name = String(full || "").trim();
     if (!name) return { firstName: "", lastName: "" };
@@ -72,6 +66,7 @@ function buildPrintwayItem(item) {
     };
 }
 
+
 function buildPayload(orderObj) {
     const customer = orderObj.customer_infor || {};
     const items = orderObj.items || [];
@@ -87,13 +82,18 @@ function buildPayload(orderObj) {
 
     const { firstName, lastName } = splitName(customer.name || "");
 
+    const rawPhone = getRawPhone(orderObj);
+    const normalizedPhone = normalizePhoneByCountry(
+        rawPhone,
+        shipping_country_code
+    );
+
     return {
         order_id: orderObj.orderId,
         store_code: orderObj.store_code || "",
         shipping_email: customer.email || "",
         firstName,
         lastName,
-        shipping_phone: sanitizePhone(customer.phone_number),
         shipping_address1: customer.address || "",
         shipping_address2: customer.address_2 || "",
         shipping_city: customer.city || "",
@@ -102,7 +102,6 @@ function buildPayload(orderObj) {
         shipping_zip: customer.zip_code || "",
         shipping_country,
         shipping_country_code,
-        shipping_service: orderObj.shipping_type || "",
         discount_code: Array.isArray(orderObj.discount_code)
             ? orderObj.discount_code
             : [],
@@ -112,7 +111,37 @@ function buildPayload(orderObj) {
 }
 
 /* -------------------- Response parser ------------------- */
+/**
+ * Hỗ trợ cả schema cũ ({status, message, result}) và schema mới bạn vừa gửi ({success, data, message})
+ * Trả về:
+ *  - ok, externalId (pwOrderId nếu có hoặc order_id), normalized
+ */
 function parseResponseForPrintway(body) {
+    // New schema: { success: true/false, data:{ pwOrderId, ... }, message }
+    if (typeof body?.success === "boolean") {
+        if (body.success === true) {
+            const d = body.data || {};
+            const pwOrderId = d.pwOrderId || d.pw_order_id || null;
+            const orderId = d.orderId || d.order_id || null;
+            return {
+                ok: true,
+                externalId: pwOrderId || orderId,
+                normalized: {
+                    success: true,
+                    message: body.message || "OK",
+                    pwOrderId,
+                    orderId,
+                    data: d,
+                },
+            };
+        }
+        const err = new Error(body?.message || "Printway: Non-success response");
+        err.code = "PRINTWAY_NON_SUCCESS";
+        err.vendorResponse = body;
+        return { ok: false, error: err };
+    }
+
+    // Legacy schema: { status, message, result/data }
     const bucket = body?.result || body?.data || {};
     const status = Number(body?.status);
     const message = body?.message || "";
@@ -163,6 +192,47 @@ function parseResponseForPrintway(body) {
     return { ok: false, error: err };
 }
 
+/* -------------------- Auto-pay helper ------------------- */
+async function payOrder(pwOrderId, baseHeaders = {}, paidEndpointFromEnv) {
+    if (!pwOrderId) {
+        const err = new Error("Missing pwOrderId for payment");
+        err.code = "PRINTWAY_PAY_MISSING_ID";
+        throw err;
+    }
+
+    const endpoint =
+        paidEndpointFromEnv ||
+        process.env.PRINTWAY_PAID_ENDPOINT ||
+        "https://api.printway.io/cdn/api/orders/v3/order/paid";
+
+    const body = { order_id: pwOrderId };
+    const headers = {
+        "Content-Type": "application/json",
+        ...baseHeaders,
+    };
+
+    console.log(
+        "[PRINTWAY] Auto pay request:",
+        endpoint,
+        JSON.stringify(body, null, 2)
+    );
+
+    const resp = await axios.post(endpoint, body, { headers });
+    const data = resp?.data;
+
+    // Kỳ vọng success:true
+    if (!data || data.success !== true) {
+        const err = new Error(
+            (data && data.message) || "Printway: Payment failed"
+        );
+        err.code = "PRINTWAY_PAY_FAILED";
+        err.vendorResponse = data;
+        throw err;
+    }
+    console.log("[PRINTWAY] Auto pay success:", JSON.stringify(data, null, 2));
+    return data;
+}
+
 /* -------------------------- Sender ------------------------- */
 async function send(orderDoc) {
     const orderObj = orderDoc.toObject
@@ -176,7 +246,7 @@ async function send(orderDoc) {
         throw err;
     }
 
-    const endpoint =
+    const createEndpoint =
         process.env.PRINTWAY_ENDPOINT ||
         "https://api.printway.io/cdn/api/orders/v3/create";
 
@@ -185,7 +255,14 @@ async function send(orderDoc) {
         "pw-access-token": process.env.PRINTWAY_ACCESS_TOKEN,
     };
 
-    const resp = await axios.post(endpoint, payload, { headers });
+    // Log đầy đủ
+    console.log("[PRINTWAY] rawPhone:", getRawPhone(orderObj));
+    console.log("[PRINTWAY] payload.shipping_phone:", payload.shipping_phone);
+    console.log("[PRINTWAY] Create order endpoint:", createEndpoint);
+    console.log("[PRINTWAY] Sending payload:", JSON.stringify(payload, null, 2));
+
+    // Create order
+    const resp = await axios.post(createEndpoint, payload, { headers });
     const body = resp?.data;
 
     if (!body || typeof body !== "object") {
@@ -197,10 +274,44 @@ async function send(orderDoc) {
     const parsed = parseResponseForPrintway(body);
     if (!parsed.ok) throw parsed.error;
 
+    // Lấy pwOrderId từ normalized (schema mới)
+    const pwOrderId =
+        parsed.normalized?.pwOrderId ||
+        parsed.externalId || // fallback
+        null;
+
+    // --- Auto Pay ngay sau khi tạo đơn thành công ---
+    const autoPay = String(process.env.PRINTWAY_AUTO_PAY || "true").toLowerCase() !== "false";
+    const payStrict = String(process.env.PRINTWAY_PAY_STRICT || "true").toLowerCase() !== "false";
+
+    let payResult = null;
+    if (autoPay) {
+        try {
+            payResult = await payOrder(
+                pwOrderId,
+                headers,
+                process.env.PRINTWAY_PAID_ENDPOINT
+            );
+        } catch (e) {
+            console.error("[PRINTWAY] Auto pay failed:", e?.message, e?.vendorResponse || "");
+            if (payStrict) {
+                // Nếu bạn muốn thất bại cả quy trình khi thanh toán lỗi (mặc định)
+                e.code = e.code || "PRINTWAY_PAY_FAILED";
+                throw e;
+            }
+            // Nếu không strict, chỉ gắn cảnh báo trong normalized
+        }
+    }
+
     return {
         data: body,
         externalId: parsed.externalId,
-        normalized: parsed.normalized,
+        normalized: {
+            ...parsed.normalized,
+            autoPay: autoPay,
+            payStrict: payStrict,
+            payResult: payResult || null,
+        },
     };
 }
 
