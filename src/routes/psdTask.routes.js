@@ -6,21 +6,29 @@ const {
   authenticateToken,
   authorizeRoles,
 } = require("../middlewares/auth.middleware");
+const multer = require("multer");
+const upload = multer({ storage: multer.memoryStorage() });
 
 // Lấy danh sách task
 router.get("/", authenticateToken, PsdTaskController.getTasks);
+
+router.get(
+  "/statictisc",
+  authenticateToken,
+  PsdTaskController.getTaskStatistics
+);
 
 // Seller actions
 router.post(
   "/request",
   authenticateToken,
-  authorizeRoles("Admin", "Seller"),
+  authorizeRoles("Admin", "Seller", "Design Leader"),
   PsdTaskController.requestPSD
 );
 router.post(
   "/:taskId/qc",
   authenticateToken,
-  authorizeRoles("Admin", "Seller"),
+  authorizeRoles("Admin", "Seller", "Design Leader"),
   PsdTaskController.qcPSD
 );
 
@@ -36,13 +44,14 @@ router.post(
 router.post(
   "/:taskId/start",
   authenticateToken,
-  authorizeRoles("Admin", "Designer"),
+  authorizeRoles("Admin", "Designer", "Design Leader"),
   PsdTaskController.startTask
 );
 router.post(
   "/:taskId/upload",
   authenticateToken,
-  authorizeRoles("Admin", "Designer", "Seller"),
+  authorizeRoles("Admin", "Designer", "Seller", "Design Leader"),
+  upload.single("file"),
   PsdTaskController.uploadPSD
 );
 

@@ -37,6 +37,21 @@ const getListings = async (req, res) => {
 
     const filter = {};
 
+    // ===== RBAC =====
+    const role = req.user?.role;
+    const userId = req.user?.userId;
+
+    const isAdmin = /^admin$/i.test(role);
+    const isSeller = /^seller$/i.test(role);
+
+    if (isSeller && !isAdmin) {
+      // Seller chỉ xem listing của mình
+      filter.seller = userId;
+    } else if (seller) {
+      // Admin (hoặc role khác) có thể lọc seller theo query
+      filter.seller = seller;
+    }
+
     // asin_type filters
     if (asinType) filter.asin_type = asinType;
     if (asinTypeMode === "excludeOutline") {
@@ -45,7 +60,6 @@ const getListings = async (req, res) => {
       filter.asin_type = "Outline";
     }
 
-    if (seller) filter.seller = seller;
     if (platform) filter.platform = platform;
     if (store) filter.store = store;
 
@@ -101,23 +115,15 @@ const getListings = async (req, res) => {
 
     if (listingIds.length > 0) {
       const agg = await OrderCustomProduct.aggregate([
-        // chỉ lấy các đơn có ít nhất 1 item có listingId trong danh sách
         { $match: { "items.listingId": { $in: listingIds } } },
         { $unwind: "$items" },
         { $match: { "items.listingId": { $in: listingIds } } },
-        // gom theo (listingId, orderId) để mỗi order chỉ được tính 1 lần cho mỗi listing
         {
           $group: {
             _id: { listingId: "$items.listingId", orderId: "$orderId" },
           },
         },
-        // đếm số order duy nhất cho từng listingId
-        {
-          $group: {
-            _id: "$_id.listingId",
-            orders: { $sum: 1 },
-          },
-        },
+        { $group: { _id: "$_id.listingId", orders: { $sum: 1 } } },
       ]);
 
       salesMap = new Map(agg.map((x) => [String(x._id), x.orders]));
@@ -211,19 +217,44 @@ const getPsdStatistics = async (req, res) => {
   }
 };
 
+function hasRole(userRole, target) {
+  if (!userRole) return false;
+  if (Array.isArray(userRole)) {
+    return userRole.some(
+      (r) => String(r).toLowerCase() === String(target).toLowerCase()
+    );
+  }
+  return String(userRole).toLowerCase() === String(target).toLowerCase();
+}
+
 const getListingStatistics = async (req, res) => {
   try {
     const { from, to, store, seller, platform, search } = req.query;
 
+    // ===== RBAC =====
+    const role = req.user?.role;
+    const userId = req.user?.userId;
+    const isAdmin = hasRole(role, "Admin");
+    const isSeller = hasRole(role, "Seller");
+
     // ===== baseFilter =====
     const baseFilter = {};
 
-    if (from && to) {
-      baseFilter.createdAt = { $gte: new Date(from), $lte: new Date(to) };
+    // RBAC scoping
+    if (isSeller && !isAdmin) {
+      baseFilter.seller = userId; // Seller chỉ xem của mình
+    } else if (seller) {
+      baseFilter.seller = seller; // Admin (hoặc role khác) có thể lọc seller
+    }
+
+    // time range (createdAt)
+    if (from || to) {
+      baseFilter.createdAt = {};
+      if (from) baseFilter.createdAt.$gte = new Date(from);
+      if (to) baseFilter.createdAt.$lte = new Date(to);
     }
 
     if (store) baseFilter.store = store;
-    if (seller) baseFilter.seller = seller;
     if (platform) baseFilter.platform = platform;
 
     if (search) {
@@ -240,7 +271,7 @@ const getListingStatistics = async (req, res) => {
       "psd.status": "Available",
     });
 
-    // No PSD = tất cả trừ Available
+    // No PSD = tất cả trừ Available (không có psd hoặc status khác)
     const noPsd = await Listing.countDocuments({
       ...baseFilter,
       $or: [
@@ -249,7 +280,7 @@ const getListingStatistics = async (req, res) => {
       ],
     });
 
-    // Anonymous Asin (mặc định 0)
+    // Anonymous Asin (chưa định nghĩa, tạm 0)
     const anonymousAsin = 0;
 
     // Danh sách asin_type cố định (theo UI)
@@ -272,20 +303,20 @@ const getListingStatistics = async (req, res) => {
     ]);
 
     // Map ra object kết quả với giá trị mặc định = 0
-    const asinTypeCounts = { All: 0 }; // thêm All
-    for (const type of asinTypes) {
-      asinTypeCounts[type] = 0;
-    }
+    const asinTypeCounts = {};
+    for (const t of asinTypes) asinTypeCounts[t] = 0;
 
     for (const row of asinTypeAgg) {
-      const key = row._id || "others"; // nếu null thì đưa vào Others
+      const key = row._id || "Others";
       if (asinTypeCounts.hasOwnProperty(key)) {
-        asinTypeCounts[key] = row.count;
+        asinTypeCounts[key] += row.count;
       } else {
-        asinTypeCounts["others"] += row.count; // cái nào không map thì dồn vào Others
+        asinTypeCounts["Others"] += row.count; // mọi giá trị lạ dồn vào Others
       }
-      asinTypeCounts.All += row.count; // cộng dồn cho All
     }
+
+    // All = tổng listing sau filter (ổn định nhất)
+    asinTypeCounts.All = totalAsin;
 
     return res.json({
       totalAsin,
@@ -320,22 +351,22 @@ const upsertListing = async (req, res) => {
       .json({ message: "Error upserting listing", error: error.message });
   }
 };
-const ALLOWED_EXTS = ['.zip'];
+const ALLOWED_EXTS = [".zip"];
 const MIME_BY_EXT = {
-  '.zip': 'application/zip',
+  ".zip": "application/zip",
 };
 
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 1024 * 1024 * 1024 }, // 1GB
   fileFilter: (req, file, cb) => {
-    const ext = (path.extname(file.originalname) || '').toLowerCase();
-    if (ext !== '.zip') return cb(new Error('Chỉ chấp nhận .zip'));
+    const ext = (path.extname(file.originalname) || "").toLowerCase();
+    if (ext !== ".zip") return cb(new Error("Chỉ chấp nhận .zip"));
     cb(null, true);
   },
 });
 function buildDesignKeyByExt(asin, ext) {
-  ext = (ext || '.psd').toLowerCase();
+  ext = (ext || ".psd").toLowerCase();
   // Quy ước: psd/<ASIN>/<ASIN><ext>
   return `psd/${asin}/${asin}${ext}`;
 }
@@ -359,16 +390,19 @@ const updatePSD = [
 
       // ✅ Ép chỉ .zip (fileFilter đã chặn từ trước)
       const originalName = req.file.originalname || `${asin}.zip`;
-      const ext = '.zip';
+      const ext = ".zip";
 
       // ✅ Key theo quy ước: psd/<ASIN>/<ASIN>.zip
       const key = buildDesignKeyByExt(asin, ext);
 
       // ✅ MIME chuẩn .zip
-      const contentType = MIME_BY_EXT[ext] || 'application/zip';
+      const contentType = MIME_BY_EXT[ext] || "application/zip";
 
       // Upload (overwrite nếu tồn tại)
-      const { url } = await uploadBufferToWasabi(req.file.buffer, { key, contentType });
+      const { url } = await uploadBufferToWasabi(req.file.buffer, {
+        key,
+        contentType,
+      });
 
       // Lưu metadata vào listing.psd
       const updated = await Listing.findOneAndUpdate(
@@ -379,10 +413,10 @@ const updatePSD = [
             "psd.url": url,
             "psd.status": status,
             "psd.file_name": originalName,
-            "psd.file_ext": ext,       // luôn '.zip'
+            "psd.file_ext": ext, // luôn '.zip'
             "psd.mime": contentType,
             "psd.size": req.file.size || null,
-            "psd.archive": true,       // vì .zip
+            "psd.archive": true, // vì .zip
             date_updated: new Date(),
           },
         },
@@ -410,23 +444,33 @@ const updatePSD = [
 const getPsdSignedUrl = async (req, res) => {
   try {
     const { asin } = req.params;
-    const expires = Math.max(60, Math.min(86400, Number(req.query.expires) || 3600));
+    const expires = Math.max(
+      60,
+      Math.min(86400, Number(req.query.expires) || 3600)
+    );
     const asAttachment = String(req.query.download || "") === "1";
 
     const listing = await Listing.findOne({ asin }).lean();
-    if (!listing) return res.status(404).json({ message: "Listing không tồn tại" });
+    if (!listing)
+      return res.status(404).json({ message: "Listing không tồn tại" });
 
     // ✅ Fallback .zip thay vì .psd
     const ext = (listing.psd?.file_ext || ".zip").toLowerCase();
-    const key = buildDesignKeyByExt(asin, ext);   // luôn trả psd/<ASIN>/<ASIN>.zip
+    const key = buildDesignKeyByExt(asin, ext); // luôn trả psd/<ASIN>/<ASIN>.zip
 
     const filename = `${asin}${ext}`;
-    const url = await getSignedUrlForKey(key, { expiresIn: expires, asAttachment, filename });
+    const url = await getSignedUrlForKey(key, {
+      expiresIn: expires,
+      asAttachment,
+      filename,
+    });
 
     return res.json({ asin, key, signed_url: url, expires_in: expires });
   } catch (error) {
     console.error("Error getPsdSignedUrl:", error);
-    return res.status(500).json({ message: "Lỗi tạo signed URL", error: error.message });
+    return res
+      .status(500)
+      .json({ message: "Lỗi tạo signed URL", error: error.message });
   }
 };
 

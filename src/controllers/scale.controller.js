@@ -34,7 +34,9 @@ function computeOverallScaleStatus(orderDoc) {
   if (allComplete) return "Ready";
 
   // Pending đúng nghĩa: không còn Need Scale
-  const noneNeedScale = statuses.every((s) => s === "Pending" || s === "Complete");
+  const noneNeedScale = statuses.every(
+    (s) => s === "Pending" || s === "Complete"
+  );
   if (noneNeedScale) return "Pending";
 
   return "Need Scale";
@@ -363,7 +365,7 @@ const retrySendFulfillment = async (req, res) => {
     );
     const providersHint = AVAILABLE_PROVIDERS.length
       ? AVAILABLE_PROVIDERS.join(" | ")
-      : "grabink | merchfox | merchize | printway"
+      : "grabink | merchfox | merchize | printway";
 
     // 1) Nếu không truyền provider, auto-resolve từ VendorProduct → Vendor
     if (!providerKey) {
@@ -557,12 +559,12 @@ const getScaleList = async (req, res) => {
       // Filter shopName
       ...(shopName && shopName.trim()
         ? [
-          {
-            $match: {
-              "shop.name": { $regex: new RegExp(shopName.trim(), "i") },
+            {
+              $match: {
+                "shop.name": { $regex: new RegExp(shopName.trim(), "i") },
+              },
             },
-          },
-        ]
+          ]
         : []),
 
       // Filter search (mở rộng thêm seller)
@@ -811,10 +813,10 @@ const getScaleList = async (req, res) => {
           listingId: item.listingId,
           listing: ldoc
             ? {
-              asin_type: ldoc.asin_type || null,
-              product_image: ldoc.product_image || null,
-              psd: ldoc.psd || null,
-            }
+                asin_type: ldoc.asin_type || null,
+                product_image: ldoc.product_image || null,
+                psd: ldoc.psd || null,
+              }
             : null,
         };
       });
@@ -837,10 +839,10 @@ const getScaleList = async (req, res) => {
         scale_overall_status: order.scale_overall_status,
         seller: order.seller
           ? {
-            _id: order.seller._id,
-            full_name: order.seller.full_name,
-            email: order.seller.email,
-          }
+              _id: order.seller._id,
+              full_name: order.seller.full_name,
+              email: order.seller.email,
+            }
           : null,
       };
     });
@@ -967,12 +969,12 @@ const getScaleListForDesign = async (req, res) => {
       // Filter shopName
       ...(shopName && shopName.trim()
         ? [
-          {
-            $match: {
-              "shop.name": { $regex: new RegExp(shopName.trim(), "i") },
+            {
+              $match: {
+                "shop.name": { $regex: new RegExp(shopName.trim(), "i") },
+              },
             },
-          },
-        ]
+          ]
         : []),
 
       // Filter search
@@ -1275,10 +1277,10 @@ const getScaleListForDesign = async (req, res) => {
           listingId: item.listingId,
           listing: ldoc
             ? {
-              asin_type: ldoc.asin_type || null,
-              product_image: ldoc.product_image || null,
-              psd: ldoc.psd || null,
-            }
+                asin_type: ldoc.asin_type || null,
+                product_image: ldoc.product_image || null,
+                psd: ldoc.psd || null,
+              }
             : null,
         };
       });
@@ -1302,17 +1304,17 @@ const getScaleListForDesign = async (req, res) => {
         scale_overall_status: order.scale_overall_status,
         seller: order.seller
           ? {
-            _id: order.seller._id,
-            full_name: order.seller.full_name,
-            email: order.seller.email,
-          }
+              _id: order.seller._id,
+              full_name: order.seller.full_name,
+              email: order.seller.email,
+            }
           : null,
         scale_by: order.scale_by
           ? {
-            _id: order.scale_by._id,
-            full_name: order.scale_by.full_name,
-            email: order.scale_by.email,
-          }
+              _id: order.scale_by._id,
+              full_name: order.scale_by.full_name,
+              email: order.scale_by.email,
+            }
           : null,
       };
     });
@@ -1438,12 +1440,12 @@ async function getScaleStatistics(req, res) {
 
       ...(shopName && shopName.trim()
         ? [
-          {
-            $match: {
-              "shop.name": { $regex: new RegExp(shopName.trim(), "i") },
+            {
+              $match: {
+                "shop.name": { $regex: new RegExp(shopName.trim(), "i") },
+              },
             },
-          },
-        ]
+          ]
         : []),
 
       ...(searchOr ? [{ $match: { $or: searchOr } }] : []),
@@ -1583,7 +1585,6 @@ async function getScaleStatistics(req, res) {
   }
 }
 
-
 async function getScaleStatisticsForDesign(req, res) {
   try {
     const {
@@ -1615,7 +1616,7 @@ async function getScaleStatisticsForDesign(req, res) {
     const isSeller = /^seller$/i.test(role);
     const isDesigner = /^design(?:er)?$/i.test(role);
     const isDesignLeader = /^design\s*leader$/i.test(role);
-    const isCS = hasRole(userRole, "Customer Service");
+    const isCS = hasRole(role, "Customer Service");
 
     if (!isAdmin && !isSeller && !isDesigner && !isDesignLeader && !isCS) {
       return res
@@ -1668,12 +1669,12 @@ async function getScaleStatisticsForDesign(req, res) {
       { $unwind: { path: "$shop", preserveNullAndEmptyArrays: true } },
       ...(shopName && shopName.trim()
         ? [
-          {
-            $match: {
-              "shop.name": { $regex: new RegExp(shopName.trim(), "i") },
+            {
+              $match: {
+                "shop.name": { $regex: new RegExp(shopName.trim(), "i") },
+              },
             },
-          },
-        ]
+          ]
         : []),
 
       // Filter search
