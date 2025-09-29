@@ -501,12 +501,19 @@ const getScaleList = async (req, res) => {
     const isCS = hasRole(userRole, "Customer Service");
     const isDesignLeader = hasRole(userRole, "Design Leader");
 
-    // Cho phép Admin, Seller, Customer Service
+    // Cho phép Admin, Seller, Customer Service, Design Leader
     if (!(isAdmin || isSeller || isCS || isDesignLeader)) {
       return res
         .status(403)
         .json({ message: "Access denied: insufficient permissions" });
     }
+
+    /**
+     * CHỈ giới hạn theo seller khi là Seller "thuần"
+     * (không có bất kỳ role quyền cao nào khác).
+     * Design Leader phải luôn bypass filter này, kể cả khi tài khoản có Seller.
+     */
+    const isSellerOnly = isSeller && !(isAdmin || isCS || isDesignLeader);
 
     // 1) Match theo thời gian + seller filter (CHỈ filter khi là Seller thuần)
     const initialMatch = {};
@@ -514,8 +521,7 @@ const getScaleList = async (req, res) => {
       initialMatch.createdAt = { $gte: new Date(from), $lte: new Date(to) };
     }
 
-    const shouldRestrictToSeller = isSeller && !isAdmin && !isCS;
-    if (shouldRestrictToSeller) {
+    if (isSellerOnly) {
       if (!mongoose.Types.ObjectId.isValid(userId)) {
         return res.status(400).json({ message: "Invalid user id in token" });
       }
@@ -696,12 +702,13 @@ const getScaleList = async (req, res) => {
     const limitNum = isAll ? totalCount || 1 : parseInt(perPage, 10) || 10;
     const skip = isAll ? 0 : (pageNum - 1) * limitNum;
 
+    // sort cũ: purchase_date asc → đơn cũ -> mới
     pipeline.push({ $sort: { purchase_date: 1, createdAt: 1 } });
     if (!isAll) pipeline.push({ $skip: skip }, { $limit: limitNum });
 
     const orders = await OrderCustomProduct.aggregate(pipeline);
 
-    // === Map vendor product name (giữ nguyên logic cũ) ===
+    // === Map vendor product name ===
     const vendorIdSet = new Set();
     for (const o of orders) {
       for (const it of o.items || []) {
@@ -740,7 +747,7 @@ const getScaleList = async (req, res) => {
       }
     }
 
-    // Query Listing 1 lần và map theo _id (giữ nguyên)
+    // Query Listing 1 lần và map theo _id
     let listingMap = new Map();
     if (listingIdSet.size > 0) {
       const ids = [];
@@ -837,7 +844,6 @@ const getScaleList = async (req, res) => {
           : null,
       };
     });
-
     res.json({
       data: result,
       totalCount,
