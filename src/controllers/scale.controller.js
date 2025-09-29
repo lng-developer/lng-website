@@ -499,9 +499,10 @@ const getScaleList = async (req, res) => {
     const isAdmin = hasRole(userRole, "Admin");
     const isSeller = hasRole(userRole, "Seller");
     const isCS = hasRole(userRole, "Customer Service");
+    const isDesignLeader = hasRole(userRole, "Design Leader");
 
     // Cho phép Admin, Seller, Customer Service
-    if (!(isAdmin || isSeller || isCS)) {
+    if (!(isAdmin || isSeller || isCS || isDesignLeader)) {
       return res
         .status(403)
         .json({ message: "Access denied: insufficient permissions" });
@@ -1354,9 +1355,11 @@ async function getScaleStatistics(req, res) {
     const isAdmin = hasRole(userRole, "Admin");
     const isSeller = hasRole(userRole, "Seller");
     const isCS = hasRole(userRole, "Customer Service");
+    const isDesignLeader = hasRole(userRole, "Design Leader");
+
 
     // Chỉ cho phép Admin, Seller, Customer Service
-    if (!(isAdmin || isSeller || isCS)) {
+    if (!(isAdmin || isSeller || isCS || isDesignLeader)) {
       return res
         .status(403)
         .json({ message: "Access denied: insufficient permissions" });
