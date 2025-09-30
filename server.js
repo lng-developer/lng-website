@@ -27,6 +27,7 @@ const {
   skuMappingRoutes,
   APORoutes,
   PsdTaskRoutes,
+  ideaTaskRoutes
 } = require("./src/routes");
 
 const app = express();
@@ -61,6 +62,8 @@ app.use("/api/ads", adsRoutes);
 app.use("/api/sku-mapping", skuMappingRoutes);
 app.use("/APO", APORoutes);
 app.use("/api/psd-task", PsdTaskRoutes);
+app.use("/api/idea-task", ideaTaskRoutes);
+
 
 // Error Handler
 app.use((err, req, res, next) => {

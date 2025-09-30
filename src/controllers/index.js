@@ -18,7 +18,7 @@ const reportController = require("./report.controller");
 const adsController = require("./ads.controller");
 const APOController = require("./APO.controller");
 const PsdTaskController = require("./psdTask.controller");
-
+const ideaTaskController = require("./ideaTask.controller")
 module.exports = {
   roleController,
   userController,
@@ -40,4 +40,5 @@ module.exports = {
   adsController,
   APOController,
   PsdTaskController,
+  ideaTaskController
 };
