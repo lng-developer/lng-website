@@ -7,7 +7,7 @@ const multer = require('multer');
 /** Multer: chỉ nhận .psd, .psb, .zip */
 const upload = multer({
     storage: multer.memoryStorage(),
-    limits: { fileSize: 200 * 1024 * 1024 }, // 200MB
+    limits: { fileSize: 1024 * 1024 * 1024 },
     fileFilter: (req, file, cb) => {
         const ok = /\.(psd|psb|zip)$/i.test(file.originalname);
         if (!ok) return cb(new Error('Only .psd, .psb, .zip are allowed'));
@@ -344,54 +344,78 @@ const startWork = async (req, res) => {
     }
 };
 
+const uploadSingle = upload.single('file');
 
-const uploadPsd = [
-    upload.single('file'),
-    async (req, res) => {
+const uploadPsd = async (req, res) => {
+    // chạy multer trước để tự bắt lỗi size/định dạng
+    uploadSingle(req, res, async (multerErr) => {
         try {
+            if (multerErr) {
+                if (multerErr.code === 'LIMIT_FILE_SIZE') {
+                    return res.status(413).json({ message: 'File too large (max 1GB)' });
+                }
+                return res.status(400).json({ message: multerErr.message || 'Upload error' });
+            }
+
             const task = await IdeaTask.findById(req.params.id);
             if (!task) return res.status(404).json({ message: 'Not found' });
 
-            const me = req.user?.userId || '';
+            // Quyền: Admin/DL hoặc Designer được assign
+            const me = String(req.user?.userId || '');
             const r = req.user?.role;
             const isDesigner = hasRole(r, 'Designer');
             const isAdmin = hasRole(r, 'Admin');
             const isDL = hasRole(r, 'Design Leader');
+            const isAssignee = task.assignedTo?.toString?.() === me;
 
-            const isAssignee = task.assignedTo?.toString?.() === String(me);
             if (!(isAdmin || isDL || (isDesigner && isAssignee))) {
                 return res.status(403).json({ message: 'Access denied' });
             }
 
             if (!req.file) return res.status(400).json({ message: 'Missing file' });
 
-            const key = buildIdeaPsdKey(task._id, req.file.originalname);
+            // Tạo Key chắc chắn hợp lệ
+            const originalName = req.file.originalname || 'upload.psd';
+            const key = buildIdeaPsdKey(String(task._id), originalName);
+            if (!key || typeof key !== 'string' || key.trim() === '') {
+                return res.status(500).json({ message: 'Invalid storage key generated' });
+            }
+
+            // Upload buffer lên Wasabi
             await uploadBufferToWasabi(req.file.buffer, {
                 Key: key,
                 ContentType: req.file.mimetype || 'application/octet-stream',
             });
 
-            const url = await getSignedUrlForKey(key, 7 * 24 * 3600);
+            // URL ký hạn dùng (tuỳ bạn muốn bao lâu)
+            const url = await getSignedUrlForKey(key, 7 * 24 * 3600); // 7 ngày
+
+            // Ghi DB
             task.psd = {
                 key,
                 url,
                 uploadedAt: new Date(),
-                uploadedBy: req.user.userId,       // <<== ObjectId
+                uploadedBy: req.user.userId, // <-- ObjectId ref User
             };
             task.status = 'Uploaded';
-            task.history.push({ by: req.user.userId, action: 'upload', meta: { key } }); // <<==
-            await task.save();
+            task.history.push({ by: req.user.userId, action: 'upload', meta: { key, name: originalName } });
 
-            // populate cho đẹp khi trả về
+            // Nếu DB cũ chưa có productType/image (là required ở create), bạn có 2 lựa chọn:
+            // 1) đã migrate dữ liệu cũ đầy đủ -> save bình thường
+            // 2) chưa migrate -> tạm dùng validateModifiedOnly để không validate field chưa đụng tới
+            await task.save(/* { validateModifiedOnly: true } */);
+
             await task.populate('createdBy', 'full_name email role');
             await task.populate('assignedTo', 'full_name email role');
 
             res.json({ message: 'Uploaded', data: task });
         } catch (error) {
+            // Một số SDK S3/Wasabi trả lỗi "No value provided for input HTTP label: Key."
+            // nếu tham số Key bị undefined/empty — ta đã check phía trên.
             res.status(500).json({ error: { message: error.message } });
         }
-    },
-];
+    });
+};
 
 
 function canApproveOrReject(req, task) {
