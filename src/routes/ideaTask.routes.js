@@ -13,7 +13,7 @@ router.use(authenticateToken);
 
 // ===== STATISTICS =====
 router.get(
-    '/statistic',
+    '/stats',
     authorizeRoles('Admin', 'Design Leader', 'Designer', 'User', 'Seller'),
     ideaTaskController.getIdeaTaskStatistics
 );
