@@ -1,16 +1,24 @@
 const db = require('../models');
 const IdeaTask = db.IdeaTask; // export trong models/index.js
 const { uploadBufferToWasabi, getSignedUrlForKey } = require('../utils/wasabi');
-
 const multer = require('multer');
+const path = require('path');
 
-/** Multer: chỉ nhận .psd, .psb, .zip */
+const ALLOWED_EXTS = ['.psd', '.psb', '.zip'];
+const MIME_BY_EXT = {
+    '.psd': 'image/vnd.adobe.photoshop',
+    '.psb': 'application/octet-stream', // PSB không có mime chuẩn
+    '.zip': 'application/zip',
+};
+
 const upload = multer({
     storage: multer.memoryStorage(),
-    limits: { fileSize: 1024 * 1024 * 1024 },
+    limits: { fileSize: 1024 * 1024 * 1024 }, // 1GB
     fileFilter: (req, file, cb) => {
-        const ok = /\.(psd|psb|zip)$/i.test(file.originalname);
-        if (!ok) return cb(new Error('Only .psd, .psb, .zip are allowed'));
+        const ext = (path.extname(file.originalname) || '').toLowerCase();
+        if (!ALLOWED_EXTS.includes(ext)) {
+            return cb(new Error('Only .psd, .psb, .zip are allowed'));
+        }
         cb(null, true);
     },
 });
@@ -347,7 +355,6 @@ const startWork = async (req, res) => {
 const uploadSingle = upload.single('file');
 
 const uploadPsd = async (req, res) => {
-    // chạy multer trước để tự bắt lỗi size/định dạng
     uploadSingle(req, res, async (multerErr) => {
         try {
             if (multerErr) {
@@ -360,7 +367,7 @@ const uploadPsd = async (req, res) => {
             const task = await IdeaTask.findById(req.params.id);
             if (!task) return res.status(404).json({ message: 'Not found' });
 
-            // Quyền: Admin/DL hoặc Designer được assign
+            // RBAC: Admin/DL hoặc Designer được assign
             const me = String(req.user?.userId || '');
             const r = req.user?.role;
             const isDesigner = hasRole(r, 'Designer');
@@ -372,47 +379,48 @@ const uploadPsd = async (req, res) => {
                 return res.status(403).json({ message: 'Access denied' });
             }
 
-            if (!req.file) return res.status(400).json({ message: 'Missing file' });
-
-            // Tạo Key chắc chắn hợp lệ
-            const originalName = req.file.originalname || 'upload.psd';
-            const key = buildIdeaPsdKey(String(task._id), originalName);
-            if (!key || typeof key !== 'string' || key.trim() === '') {
-                return res.status(500).json({ message: 'Invalid storage key generated' });
+            if (!req.file?.buffer) {
+                return res.status(400).json({ message: 'Thiếu file (field: file)' });
             }
 
-            // Upload buffer lên Wasabi
-            await uploadBufferToWasabi(req.file.buffer, {
-                Key: key,
-                ContentType: req.file.mimetype || 'application/octet-stream',
+            // Xác định ext & contentType giống listing.controller
+            const originalName = req.file.originalname || 'design.zip';
+            const ext = (path.extname(originalName) || '.zip').toLowerCase();
+            const contentType = MIME_BY_EXT[ext] || req.file.mimetype || 'application/octet-stream';
+
+            // Tạo key theo quy ước của bạn cho Idea Task
+            // ví dụ: idea_tasks/<_id>/<timestamp>__<safe_name>
+            const key = buildIdeaPsdKey(String(task._id), originalName);
+
+            // ✅ GỌI WRAPPER THEO CÁCH LISTING: { key, contentType } (viết thường)
+            const { url } = await uploadBufferToWasabi(req.file.buffer, {
+                key,
+                contentType,
             });
 
-            // URL ký hạn dùng (tuỳ bạn muốn bao lâu)
-            const url = await getSignedUrlForKey(key, 7 * 24 * 3600); // 7 ngày
-
-            // Ghi DB
+            // Cập nhật DB
             task.psd = {
                 key,
                 url,
                 uploadedAt: new Date(),
-                uploadedBy: req.user.userId, // <-- ObjectId ref User
+                uploadedBy: req.user.userId, // ref User (ObjectId)
             };
             task.status = 'Uploaded';
-            task.history.push({ by: req.user.userId, action: 'upload', meta: { key, name: originalName } });
+            task.history.push({
+                by: req.user.userId,
+                action: 'upload',
+                meta: { key, file_name: originalName, ext, size: req.file.size || null },
+            });
 
-            // Nếu DB cũ chưa có productType/image (là required ở create), bạn có 2 lựa chọn:
-            // 1) đã migrate dữ liệu cũ đầy đủ -> save bình thường
-            // 2) chưa migrate -> tạm dùng validateModifiedOnly để không validate field chưa đụng tới
-            await task.save(/* { validateModifiedOnly: true } */);
+            await task.save();
 
+            // populate để trả về đẹp
             await task.populate('createdBy', 'full_name email role');
             await task.populate('assignedTo', 'full_name email role');
 
-            res.json({ message: 'Uploaded', data: task });
+            return res.json({ message: 'Uploaded', data: task });
         } catch (error) {
-            // Một số SDK S3/Wasabi trả lỗi "No value provided for input HTTP label: Key."
-            // nếu tham số Key bị undefined/empty — ta đã check phía trên.
-            res.status(500).json({ error: { message: error.message } });
+            return res.status(500).json({ error: { message: error.message } });
         }
     });
 };
