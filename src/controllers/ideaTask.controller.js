@@ -1,5 +1,5 @@
 const db = require('../models');
-const IdeaTask = db.ideaTask; // đảm bảo đã export trong models/index.js: db.ideaTask = require('./ideaTask.model');
+const IdeaTask = db.IdeaTask; // đảm bảo đã export trong models/index.js: db.ideaTask = require('./ideaTask.model');
 const { uploadBufferToWasabi, getSignedUrlForKey } = require('../utils/wasabi');
 
 const multer = require('multer');

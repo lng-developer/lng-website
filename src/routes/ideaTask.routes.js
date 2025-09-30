@@ -6,6 +6,11 @@ const { ideaTaskController } = require('../controllers');
 // TẤT CẢ route đều cần đăng nhập
 router.use(authenticateToken);
 
+/**
+ * Lưu ý:
+ * - Các route tĩnh (/statistic, /, …) phải đặt TRƯỚC /:id
+ */
+
 // ===== STATISTICS =====
 router.get(
     '/statistic',
@@ -19,12 +24,6 @@ router.get(
     authorizeRoles('Admin', 'Design Leader', 'Designer', 'User', 'Seller'),
     ideaTaskController.getAllIdeaTasks
 );
-
-// ===== CRUD =====
-router.get('/:id', ideaTaskController.getIdeaTaskById);
-router.post('/', ideaTaskController.createIdeaTask);
-router.put('/:id', ideaTaskController.updateIdeaTask);
-router.delete('/:id', authorizeRoles('Admin', 'Design Leader'), ideaTaskController.deleteIdeaTask);
 
 // ===== FLOW ACTIONS =====
 router.post(
@@ -50,5 +49,12 @@ router.post(
 );
 
 router.post('/:id/comments', ideaTaskController.addComment);
+
+// ===== CRUD =====
+// ⚠️ để sau cùng để không nuốt các route tĩnh
+router.get('/:id', ideaTaskController.getIdeaTaskById);
+router.post('/', ideaTaskController.createIdeaTask);
+router.put('/:id', ideaTaskController.updateIdeaTask);
+router.delete('/:id', authorizeRoles('Admin', 'Design Leader'), ideaTaskController.deleteIdeaTask);
 
 module.exports = router;
