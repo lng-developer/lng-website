@@ -329,18 +329,21 @@ const startWork = async (req, res) => {
         const isAdmin = hasRole(r, 'Admin');
         const isDL = hasRole(r, 'Design Leader');
 
-        if (!(isAdmin || isDL || (isDesigner && task.assignedTo?.userId === me))) {
+        // so sánh với ref (ObjectId)
+        const isAssignee = task.assignedTo?.toString?.() === String(me);
+        if (!(isAdmin || isDL || (isDesigner && isAssignee))) {
             return res.status(403).json({ message: 'Access denied' });
         }
 
         task.status = 'In Progress';
-        task.history.push({ by: actor(req), action: 'start' });
+        task.history.push({ by: req.user.userId, action: 'start' }); // <<== dùng ObjectId
         await task.save();
         res.json({ message: 'In Progress', data: task });
     } catch (error) {
         res.status(500).json({ error: { message: error.message } });
     }
 };
+
 
 const uploadPsd = [
     upload.single('file'),
@@ -355,7 +358,8 @@ const uploadPsd = [
             const isAdmin = hasRole(r, 'Admin');
             const isDL = hasRole(r, 'Design Leader');
 
-            if (!(isAdmin || isDL || (isDesigner && task.assignedTo?.userId === me))) {
+            const isAssignee = task.assignedTo?.toString?.() === String(me);
+            if (!(isAdmin || isDL || (isDesigner && isAssignee))) {
                 return res.status(403).json({ message: 'Access denied' });
             }
 
@@ -368,17 +372,27 @@ const uploadPsd = [
             });
 
             const url = await getSignedUrlForKey(key, 7 * 24 * 3600);
-            task.psd = { key, url, uploadedAt: new Date(), uploadedBy: actor(req) };
+            task.psd = {
+                key,
+                url,
+                uploadedAt: new Date(),
+                uploadedBy: req.user.userId,       // <<== ObjectId
+            };
             task.status = 'Uploaded';
-            task.history.push({ by: actor(req), action: 'upload', meta: { key } });
-
+            task.history.push({ by: req.user.userId, action: 'upload', meta: { key } }); // <<==
             await task.save();
+
+            // populate cho đẹp khi trả về
+            await task.populate('createdBy', 'full_name email role');
+            await task.populate('assignedTo', 'full_name email role');
+
             res.json({ message: 'Uploaded', data: task });
         } catch (error) {
             res.status(500).json({ error: { message: error.message } });
         }
     },
 ];
+
 
 function canApproveOrReject(req, task) {
     const r = req.user?.role;
@@ -398,8 +412,11 @@ const approveTask = async (req, res) => {
         if (!canApproveOrReject(req, task)) return res.status(403).json({ message: 'Access denied' });
 
         task.status = 'QC Passed';
-        task.history.push({ by: actor(req), action: 'approve' });
+        task.history.push({ by: req.user.userId, action: 'approve' });  // <<==
         await task.save();
+
+        await task.populate('createdBy', 'full_name email role');
+        await task.populate('assignedTo', 'full_name email role');
 
         res.json({ message: 'QC Passed', data: task });
     } catch (error) {
@@ -415,12 +432,15 @@ const rejectTask = async (req, res) => {
         if (!canApproveOrReject(req, task)) return res.status(403).json({ message: 'Access denied' });
 
         const prevKey = task.psd?.key || '';
-        task.psd = { key: '', url: '', uploadedAt: null, uploadedBy: { userId: '', name: '' } };
+        task.psd = { key: '', url: '', uploadedAt: null, uploadedBy: undefined }; // uploadedBy là ref
 
         task.status = 'QC Rejected';
-        task.history.push({ by: actor(req), action: 'reject', meta: { reason, clearedKey: prevKey } });
-
+        task.history.push({ by: req.user.userId, action: 'reject', meta: { reason, clearedKey: prevKey } }); // <<==
         await task.save();
+
+        await task.populate('createdBy', 'full_name email role');
+        await task.populate('assignedTo', 'full_name email role');
+
         res.json({ message: 'QC Rejected', data: task });
     } catch (error) {
         res.status(500).json({ error: { message: error.message } });
@@ -434,14 +454,19 @@ const addComment = async (req, res) => {
         if (!task) return res.status(404).json({ message: 'Not found' });
         if (!canView(req, task)) return res.status(403).json({ message: 'Access denied' });
 
-        task.comments.push({ by: actor(req), text });
-        task.history.push({ by: actor(req), action: 'comment' });
+        task.comments.push({ by: req.user.userId, text });  // <<==
+        task.history.push({ by: req.user.userId, action: 'comment' }); // <<==
         await task.save();
+
+        await task.populate('createdBy', 'full_name email role');
+        await task.populate('assignedTo', 'full_name email role');
+
         res.json({ message: 'Commented', data: task });
     } catch (error) {
         res.status(500).json({ error: { message: error.message } });
     }
 };
+
 
 module.exports = {
     getAllIdeaTasks,
