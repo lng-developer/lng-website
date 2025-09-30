@@ -215,22 +215,33 @@ const getIdeaTaskById = async (req, res) => {
 };
 const createIdeaTask = async (req, res) => {
     try {
-        const { title, description, referenceLink, deadline } = req.body;
-        if (!title || !description) {
-            return res.status(400).json({ message: "Missing required fields" });
+        const { title, description, referenceLink, deadline, productType, image } = req.body;
+
+        // validate bắt buộc
+        if (!title || !description || !productType || !image) {
+            return res.status(400).json({
+                message: 'Missing required fields',
+                required: ['title', 'description', 'productType', 'image'],
+            });
         }
 
         const doc = await IdeaTask.create({
             title,
             description,
-            referenceLink: referenceLink || "",
+            referenceLink: referenceLink || '',
             deadline: deadline ? new Date(deadline) : undefined,
-            createdBy: req.user.userId, // chỉ lưu ObjectId
-            status: "New",
-            history: [{ by: req.user.userId, action: "created" }],
+            createdBy: req.user.userId, // chỉ lưu ObjectId (đã đổi sang ref User)
+            productType,
+            image,
+            status: 'New',
+            history: [{ by: req.user.userId, action: 'created', meta: { productType, image } }],
         });
 
-        res.json({ message: "Created", data: doc });
+        // populate để trả về đầy đủ thông tin user
+        await doc.populate('createdBy', 'full_name email role');
+        await doc.populate('assignedTo', 'full_name email role');
+
+        res.json({ message: 'Created', data: doc });
     } catch (error) {
         res.status(500).json({ error: { message: error.message } });
     }
@@ -242,14 +253,28 @@ const updateIdeaTask = async (req, res) => {
         if (!task) return res.status(404).json({ message: 'Not found' });
         if (!canEditIdeaBasics(req, task)) return res.status(403).json({ message: 'Access denied' });
 
-        const { title, description, referenceLink, deadline } = req.body;
+        const { title, description, referenceLink, deadline, productType, image } = req.body;
+
         if (title !== undefined) task.title = title;
         if (description !== undefined) task.description = description;
         if (referenceLink !== undefined) task.referenceLink = referenceLink;
         if (deadline !== undefined) task.deadline = deadline ? new Date(deadline) : undefined;
 
-        task.history.push({ by: actor(req), action: 'update' });
+        // mới thêm:
+        if (productType !== undefined) task.productType = productType;
+        if (image !== undefined) task.image = image;
+
+        task.history.push({
+            by: req.user.userId,
+            action: 'update',
+            meta: { productType, image },
+        });
+
         await task.save();
+
+        // populate khi trả về
+        await task.populate('createdBy', 'full_name email role');
+        await task.populate('assignedTo', 'full_name email role');
 
         res.json({ message: 'Updated', data: task });
     } catch (error) {

@@ -44,6 +44,10 @@ const IdeaTaskSchema = new mongoose.Schema(
       },
     ],
 
+    productType: { type: String, required: true, trim: true, maxlength: 5000 },
+
+    image: { type: String, required: true, trim: true, maxlength: 5000 },
+    
     comments: [
       {
         _id: false,
