@@ -502,9 +502,11 @@ const getScaleList = async (req, res) => {
     const isSeller = hasRole(userRole, "Seller");
     const isCS = hasRole(userRole, "Customer Service");
     const isDesignLeader = hasRole(userRole, "Design Leader");
+    const isDesigner = hasRole(userRole, "Designer");
+
 
     // Cho phép Admin, Seller, Customer Service, Design Leader
-    if (!(isAdmin || isSeller || isCS || isDesignLeader)) {
+    if (!(isAdmin || isSeller || isCS || isDesignLeader || isDesigner)) {
       return res
         .status(403)
         .json({ message: "Access denied: insufficient permissions" });
@@ -559,12 +561,12 @@ const getScaleList = async (req, res) => {
       // Filter shopName
       ...(shopName && shopName.trim()
         ? [
-            {
-              $match: {
-                "shop.name": { $regex: new RegExp(shopName.trim(), "i") },
-              },
+          {
+            $match: {
+              "shop.name": { $regex: new RegExp(shopName.trim(), "i") },
             },
-          ]
+          },
+        ]
         : []),
 
       // Filter search (mở rộng thêm seller)
@@ -813,10 +815,10 @@ const getScaleList = async (req, res) => {
           listingId: item.listingId,
           listing: ldoc
             ? {
-                asin_type: ldoc.asin_type || null,
-                product_image: ldoc.product_image || null,
-                psd: ldoc.psd || null,
-              }
+              asin_type: ldoc.asin_type || null,
+              product_image: ldoc.product_image || null,
+              psd: ldoc.psd || null,
+            }
             : null,
         };
       });
@@ -839,10 +841,10 @@ const getScaleList = async (req, res) => {
         scale_overall_status: order.scale_overall_status,
         seller: order.seller
           ? {
-              _id: order.seller._id,
-              full_name: order.seller.full_name,
-              email: order.seller.email,
-            }
+            _id: order.seller._id,
+            full_name: order.seller.full_name,
+            email: order.seller.email,
+          }
           : null,
       };
     });
@@ -969,12 +971,12 @@ const getScaleListForDesign = async (req, res) => {
       // Filter shopName
       ...(shopName && shopName.trim()
         ? [
-            {
-              $match: {
-                "shop.name": { $regex: new RegExp(shopName.trim(), "i") },
-              },
+          {
+            $match: {
+              "shop.name": { $regex: new RegExp(shopName.trim(), "i") },
             },
-          ]
+          },
+        ]
         : []),
 
       // Filter search
@@ -1277,10 +1279,10 @@ const getScaleListForDesign = async (req, res) => {
           listingId: item.listingId,
           listing: ldoc
             ? {
-                asin_type: ldoc.asin_type || null,
-                product_image: ldoc.product_image || null,
-                psd: ldoc.psd || null,
-              }
+              asin_type: ldoc.asin_type || null,
+              product_image: ldoc.product_image || null,
+              psd: ldoc.psd || null,
+            }
             : null,
         };
       });
@@ -1304,17 +1306,17 @@ const getScaleListForDesign = async (req, res) => {
         scale_overall_status: order.scale_overall_status,
         seller: order.seller
           ? {
-              _id: order.seller._id,
-              full_name: order.seller.full_name,
-              email: order.seller.email,
-            }
+            _id: order.seller._id,
+            full_name: order.seller.full_name,
+            email: order.seller.email,
+          }
           : null,
         scale_by: order.scale_by
           ? {
-              _id: order.scale_by._id,
-              full_name: order.scale_by.full_name,
-              email: order.scale_by.email,
-            }
+            _id: order.scale_by._id,
+            full_name: order.scale_by.full_name,
+            email: order.scale_by.email,
+          }
           : null,
       };
     });
@@ -1382,8 +1384,10 @@ async function getScaleStatistics(req, res) {
     const isSeller = hasRole(userRole, "Seller");
     const isCS = hasRole(userRole, "Customer Service");
     const isDesignLeader = hasRole(userRole, "Design Leader");
+    const isDesigner = hasRole(userRole, "Designer");
 
-    if (!(isAdmin || isSeller || isCS || isDesignLeader)) {
+
+    if (!(isAdmin || isSeller || isCS || isDesignLeader || isDesigner)) {
       return res
         .status(403)
         .json({ message: "Access denied: insufficient permissions" });
@@ -1440,12 +1444,12 @@ async function getScaleStatistics(req, res) {
 
       ...(shopName && shopName.trim()
         ? [
-            {
-              $match: {
-                "shop.name": { $regex: new RegExp(shopName.trim(), "i") },
-              },
+          {
+            $match: {
+              "shop.name": { $regex: new RegExp(shopName.trim(), "i") },
             },
-          ]
+          },
+        ]
         : []),
 
       ...(searchOr ? [{ $match: { $or: searchOr } }] : []),
@@ -1669,12 +1673,12 @@ async function getScaleStatisticsForDesign(req, res) {
       { $unwind: { path: "$shop", preserveNullAndEmptyArrays: true } },
       ...(shopName && shopName.trim()
         ? [
-            {
-              $match: {
-                "shop.name": { $regex: new RegExp(shopName.trim(), "i") },
-              },
+          {
+            $match: {
+              "shop.name": { $regex: new RegExp(shopName.trim(), "i") },
             },
-          ]
+          },
+        ]
         : []),
 
       // Filter search
