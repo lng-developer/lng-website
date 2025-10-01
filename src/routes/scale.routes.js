@@ -9,7 +9,7 @@ const {
 router.post(
   "/orders/:orderId/items/:orderItemId/fulfillment-file",
   authenticateToken,
-  authorizeRoles("Customer Service", "Admin", "Seller"),
+  authorizeRoles("Customer Service", "Admin", "Seller", "Designer"),
   scaleController.uploadFulfillmentFileForItem
 );
 
@@ -39,14 +39,26 @@ router.put(
 router.get(
   "/list",
   authenticateToken,
-  authorizeRoles("Customer Service", "Admin", "Seller", "Design Leader", "Designer"),
+  authorizeRoles(
+    "Customer Service",
+    "Admin",
+    "Seller",
+    "Design Leader",
+    "Designer"
+  ),
   scaleController.getScaleList
 );
 
 router.get(
   "/statistics",
   authenticateToken,
-  authorizeRoles("Customer Service", "Admin", "Seller", "Design Leader", "Designer"),
+  authorizeRoles(
+    "Customer Service",
+    "Admin",
+    "Seller",
+    "Design Leader",
+    "Designer"
+  ),
   scaleController.getScaleStatistics
 );
 
