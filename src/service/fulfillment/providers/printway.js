@@ -60,7 +60,6 @@ function buildPrintwayItem(item) {
         item_sku: sku,
         variant_id: item?.variant_id || "",
         quantity: Number(item?.quantity || 1),
-        variant_note: item?.qc_note || item?.cs_note || "",
         mockup_url: item?.baseImage?.imageUrl || "",
         ...buildArtwork(ff),
     };
