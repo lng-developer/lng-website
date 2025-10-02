@@ -123,6 +123,7 @@ function normalizeProviderKey(vendorDoc) {
   if (ft.includes("grabink") || nm.includes("grabink")) return "grabink";
   if (ft.includes("merchize") || nm.includes("merchize")) return "merchize";
   if (ft.includes("printway") || nm.includes("printway")) return "printway";
+  if (ft.includes("mangotee") || nm.includes("mangotee")) return "mangotee";
 
   // có thể bổ sung thêm provider khác ở đây
   return null;
