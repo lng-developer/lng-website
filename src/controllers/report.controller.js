@@ -249,15 +249,12 @@ const getReportMatrix = async (req, res) => {
     const toDate = new Date(to);
 
     // ===== 2) Build match theo quyền & query =====
-    // Chỉ lấy đơn đã có object amazon_finance_total (đã import finance)
     const matchStage = {
       purchase_date: { $gte: fromDate, $lte: toDate },
       amazon_finance_total: { $exists: true, $ne: null },
     };
 
-    // - Seller: chỉ cho xem dữ liệu của chính mình
-    // - Admin: có thể lọc theo 1 hay nhiều sellerId qua ?seller=id1,id2,...
-    let sellerIdSet = null; // dùng để lọc dữ liệu ads
+    let sellerIdSet = null;
     if (isSeller) {
       matchStage.sellerId = new mongoose.Types.ObjectId(userId);
       sellerIdSet = new Set([String(userId)]);
@@ -272,7 +269,6 @@ const getReportMatrix = async (req, res) => {
         else if (ids.length > 1) matchStage.sellerId = { $in: ids };
         sellerIdSet = new Set(ids.map(String));
       }
-      // Admin có thể xin cả đơn chưa gán seller (tùy bạn cho phép):
       if (userNull === "true") {
         if (matchStage.sellerId) {
           if (matchStage.sellerId.$in) {
@@ -288,7 +284,7 @@ const getReportMatrix = async (req, res) => {
       }
     }
 
-    // ===== 3) Aggregation đơn hàng (chỉ các đơn có amazon_finance_total) =====
+    // ===== 3) Aggregation đơn hàng (có thêm 3 trường cần dùng) =====
     const rows = await OrderCustomProduct.aggregate([
       { $match: matchStage },
       {
@@ -322,13 +318,25 @@ const getReportMatrix = async (req, res) => {
             sellerName: "$sellerName",
             day: "$day",
           },
-          // items = số order (đã có revenue) trong ngày
           items: { $sum: 1 },
           revenue: { $sum: { $ifNull: ["$amazon_finance_total.revenue", 0] } },
           fee: { $sum: { $ifNull: ["$amazon_finance_total.fee", 0] } },
+          // NEW:
+          shipping_tax: {
+            $sum: { $ifNull: ["$amazon_finance_total.shipping_tax", 0] },
+          },
+          item_promotion_discount: {
+            $sum: {
+              $ifNull: ["$amazon_finance_total.item_promotion_discount", 0],
+            },
+          },
+          item_tax: {
+            $sum: { $ifNull: ["$amazon_finance_total.item_tax", 0] },
+          },
+
           baseCost: { $sum: { $ifNull: ["$base_cost", 0] } },
-          ads: { $sum: { $ifNull: ["$ads", 0] } }, // nếu bạn có lưu ads trên order
-          opCost: { $sum: { $ifNull: ["$op_cost", 0] } }, // chi phí vận hành nếu có
+          ads: { $sum: { $ifNull: ["$ads", 0] } },
+          opCost: { $sum: { $ifNull: ["$op_cost", 0] } },
           refund: { $sum: { $ifNull: ["$refund", 0] } },
         },
       },
@@ -336,7 +344,6 @@ const getReportMatrix = async (req, res) => {
     ]);
 
     // ===== 4) Lấy dữ liệu ADS từ AdsDailySummary =====
-    // (nếu truyền sellerIdSet thì lọc theo; nếu không thì lấy tất cả trong khoảng ngày)
     const adsDocs = await AdsDailySummary.find(
       { day: { $gte: dayList[0], $lte: dayList[dayList.length - 1] } },
       { day: 1, by_seller: 1 }
@@ -348,7 +355,7 @@ const getReportMatrix = async (req, res) => {
       for (const row of doc.by_seller || []) {
         const sid = row?.seller?._id;
         if (!sid) continue;
-        if (sellerIdSet && !sellerIdSet.has(String(sid))) continue; // tôn trọng filter seller
+        if (sellerIdSet && !sellerIdSet.has(String(sid))) continue;
         const key = `${String(sid)}|${dayIso}`;
         adsMap.set(key, {
           spend: Number(row.spend || 0),
@@ -375,6 +382,11 @@ const getReportMatrix = async (req, res) => {
           revenue: zeroArr(),
           baseCost: zeroArr(),
           ads: zeroArr(),
+          // NEW: 3 mảng dùng cho profit1
+          shippingTax: zeroArr(),
+          itemPromotionDiscount: zeroArr(),
+          itemTax: zeroArr(),
+
           profit1: zeroArr(),
           profit2: zeroArr(),
         };
@@ -387,11 +399,17 @@ const getReportMatrix = async (req, res) => {
       S.fee[idx] = +(r.fee || 0).toFixed(2);
       S.opCost[idx] = +(r.opCost || 0).toFixed(2);
       S.refund[idx] = +(r.refund || 0).toFixed(2);
-      // ads từ order (nếu có) — sẽ bị ADS Summary ghi đè ở bước 6
       S.ads[idx] = +(r.ads || 0).toFixed(2);
+
+      // NEW: map 3 trường finance
+      S.shippingTax[idx] = +(r.shipping_tax || 0).toFixed(2);
+      S.itemPromotionDiscount[idx] = +(r.item_promotion_discount || 0).toFixed(
+        2
+      );
+      S.itemTax[idx] = +(r.item_tax || 0).toFixed(2);
     }
 
-    // ===== 6) Ghi đè ADS từ AdsDailySummary (nguồn “chuẩn”) =====
+    // ===== 6) Ghi đè ADS từ AdsDailySummary =====
     for (const [key, val] of adsMap.entries()) {
       const [_, dayIso] = key.split("|");
       const idx = dayIndex.get(dayIso);
@@ -407,6 +425,9 @@ const getReportMatrix = async (req, res) => {
           revenue: zeroArr(),
           baseCost: zeroArr(),
           ads: zeroArr(),
+          shippingTax: zeroArr(),
+          itemPromotionDiscount: zeroArr(),
+          itemTax: zeroArr(),
           profit1: zeroArr(),
           profit2: zeroArr(),
         };
@@ -418,7 +439,15 @@ const getReportMatrix = async (req, res) => {
     for (const sellerName of Object.keys(result)) {
       const S = result[sellerName];
       for (let i = 0; i < dayList.length; i++) {
-        const p1 = S.revenue[i] - (S.baseCost[i] + S.fee[i] + S.ads[i]);
+        // NEW: công thức profit1
+        const p1 =
+          S.revenue[i] -
+          (S.baseCost[i] +
+            S.fee[i] +
+            S.ads[i] +
+            S.shippingTax[i] +
+            S.itemPromotionDiscount[i] +
+            S.itemTax[i]);
         const p2 = p1 - (S.opCost[i] + S.refund[i]);
         S.profit1[i] = +p1.toFixed(2);
         S.profit2[i] = +p2.toFixed(2);
@@ -666,7 +695,12 @@ const getOrderCostStatistics = async (req, res) => {
         $set: {
           profit1: {
             $round: [
-              { $subtract: ["$_rev", { $add: ["$_base", "$_fee"] }] },
+              {
+                $subtract: [
+                  "$_rev",
+                  { $add: ["$_base", "$_fee", "$_itax", "$_promo", "$_stax"] },
+                ],
+              },
               2,
             ],
           },
@@ -675,7 +709,17 @@ const getOrderCostStatistics = async (req, res) => {
               {
                 $subtract: [
                   "$_rev",
-                  { $add: ["$_base", "$_fee", "$_op", "$_ref"] },
+                  {
+                    $add: [
+                      "$_base",
+                      "$_fee",
+                      "$_op",
+                      "$_ref",
+                      "$_itax",
+                      "$_promo",
+                      "$_stax",
+                    ],
+                  },
                 ],
               },
               2,
@@ -691,7 +735,7 @@ const getOrderCostStatistics = async (req, res) => {
           revenue: { $sum: "$_rev" },
           profit: { $sum: "$profit1" }, // nếu muốn profit2 => đổi sang "$profit2"
           lngCost: { $sum: "$_op" },
-          vendorCost: { $sum: "$_vendor" },
+          vendorCost: { $sum: "$_base" },
           refund: { $sum: "$_ref" },
           tax: { $sum: "$taxLine" },
           promo: { $sum: "$_promo" }, // Diff = tổng item_promotion_discount

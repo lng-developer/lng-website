@@ -164,7 +164,23 @@ const importAdsForDay = async (req, res) => {
       }
     }
 
-    // ===== Merge theo SHOP =====
+    // ===== NEW: Reset toàn bộ spend của SHOP này trước khi merge =====
+    // -> Đảm bảo idempotent theo (day, shopId): mỗi lần import sẽ "ghi đè" hoàn toàn shop đó
+    for (const [sid, entry] of bySellerMap.entries()) {
+      if (Array.isArray(entry.by_shop) && entry.by_shop.length) {
+        // bỏ mọi record của shop hiện tại
+        entry.by_shop = entry.by_shop.filter(
+          (bs) => String(bs.shop_id) !== shopIdStr
+        );
+        // tính lại spend seller sau khi remove shop
+        entry.spend = +entry.by_shop
+          .reduce((a, b) => a + toNum(b.spend || 0), 0)
+          .toFixed(2);
+        bySellerMap.set(sid, entry);
+      }
+    }
+
+    // ===== Merge theo SHOP (ghi đè shop hiện tại bằng số mới) =====
     for (const { seller, spend } of perSeller.values()) {
       const sellerId = String(seller._id);
       if (!bySellerMap.has(sellerId)) {
@@ -173,24 +189,17 @@ const importAdsForDay = async (req, res) => {
 
       const entry = bySellerMap.get(sellerId);
 
-      // Tìm shop trùng để GHI ĐÈ
-      const idx = entry.by_shop.findIndex(
-        (x) => String(x.shop_id) === shopIdStr
-      );
-      if (idx >= 0) {
-        entry.by_shop[idx].spend = +spend.toFixed(2); // ghi đè shop hiện tại
-      } else {
-        // Thêm shop mới (KHÁC shop)
-        entry.by_shop.push({
-          shop_id: shopIdObj,
-          spend: +spend.toFixed(2),
-        });
-      }
+      // Sau bước reset ở trên, shop hiện tại sẽ không còn -> chỉ cần push mới
+      entry.by_shop.push({
+        shop_id: shopIdObj,
+        spend: +spend.toFixed(2),
+      });
 
       // Recompute tổng spend của seller
       entry.spend = +entry.by_shop
         .reduce((a, b) => a + toNum(b.spend || 0), 0)
         .toFixed(2);
+
       bySellerMap.set(sellerId, entry);
     }
 
@@ -208,7 +217,7 @@ const importAdsForDay = async (req, res) => {
     );
 
     return res.json({
-      message: "Ads imported (merged by shopId)",
+      message: "Ads imported (merged by shopId with overwrite)",
       day: dayUTC,
       sellersAffected: perSeller.size,
       total_spend,
