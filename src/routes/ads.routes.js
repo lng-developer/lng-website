@@ -4,6 +4,7 @@ const upload = multer({ storage: multer.memoryStorage() });
 const { adsController } = require("../controllers");
 
 const router = express.Router();
+router.get("/", adsController.getAdsSummary);
 router.post(
   "/import-day",
   upload.single("file"),
