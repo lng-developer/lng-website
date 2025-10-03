@@ -573,7 +573,7 @@ const updateOrdersFromXlsx = async (req, res) => {
 
       try {
         fs.unlinkSync(filePath);
-      } catch (_) {}
+      } catch (_) { }
       return res.json({
         message: "Update by latest ship date completed",
         results,
@@ -674,8 +674,8 @@ const updateOrdersFromXlsx = async (req, res) => {
           currentShopIdForThisOrder = existing?.shopId
             ? String(existing.shopId)
             : bodyShopId
-            ? String(bodyShopId)
-            : null;
+              ? String(bodyShopId)
+              : null;
 
           results.push({
             orderId,
@@ -758,8 +758,8 @@ const updateOrdersFromXlsx = async (req, res) => {
           currentShopIdForThisOrder = existing?.shopId
             ? String(existing.shopId)
             : bodyShopId
-            ? String(bodyShopId)
-            : null;
+              ? String(bodyShopId)
+              : null;
 
           skipProcessingZip = true;
 
@@ -803,8 +803,8 @@ const updateOrdersFromXlsx = async (req, res) => {
         currentShopIdForThisOrder = newOrder?.shopId
           ? String(newOrder.shopId)
           : bodyShopId
-          ? String(bodyShopId)
-          : null;
+            ? String(bodyShopId)
+            : null;
 
         const validationResult = await validateAddressWithSmarty(
           basicData.customer_infor
@@ -876,7 +876,7 @@ const updateOrdersFromXlsx = async (req, res) => {
                 bufferForUpload === imageBuffer
                   ? imageName
                   : imageName.replace(/\.(png|jpg|jpeg)$/i, "") +
-                    "_compressed.jpg";
+                  "_compressed.jpg";
 
               const cloudinaryUrl = await uploadToCloudinary(
                 bufferForUpload,
@@ -900,7 +900,7 @@ const updateOrdersFromXlsx = async (req, res) => {
                     cloudinaryUrls.push(url);
                     continue;
                   }
-                } catch (_) {}
+                } catch (_) { }
                 skippedSnapshots.push({
                   image: imageName,
                   reason: "cloudinary: file size too large",
@@ -1043,20 +1043,20 @@ const updateOrdersFromXlsx = async (req, res) => {
     if (pendingSkuMapLogs.length > 0 && !skuMappingDryRun) {
       try {
         await SkuMappingEntry.bulkWrite(pendingSkuMapLogs, { ordered: false });
-      } catch (_) {}
+      } catch (_) { }
     }
     if (pendingMappedSkuOps.length > 0 && !skuMappingDryRun) {
       try {
         await OrderCustomProduct.bulkWrite(pendingMappedSkuOps, {
           ordered: false,
         });
-      } catch (_) {}
+      } catch (_) { }
     }
 
     // dọn file tạm
     try {
       fs.unlinkSync(filePath);
-    } catch (_) {}
+    } catch (_) { }
 
     return res.json({
       message: "Batch import completed with ASIN-Listing base image matching",
@@ -1075,7 +1075,7 @@ const updateOrdersFromXlsx = async (req, res) => {
   } catch (error) {
     try {
       if (req?.file?.path) fs.unlinkSync(req.file.path);
-    } catch (_) {}
+    } catch (_) { }
     return res
       .status(500)
       .json({ message: "Batch import failed", error: error.message });
@@ -1474,10 +1474,10 @@ const getFrontendOrders = async (req, res) => {
           listingId: item.listingId || null,
           listing: ldoc
             ? {
-                asin_type: ldoc.asin_type || null,
-                product_image: ldoc.product_image || null,
-                psd: ldoc.psd || null,
-              }
+              asin_type: ldoc.asin_type || null,
+              product_image: ldoc.product_image || null,
+              psd: ldoc.psd || null,
+            }
             : null,
 
           cost_center: {
@@ -1516,10 +1516,10 @@ const getFrontendOrders = async (req, res) => {
         scale_overall_status: order.scale_overall_status,
         seller: order.seller
           ? {
-              _id: order.seller._id,
-              full_name: order.seller.full_name,
-              email: order.seller.email,
-            }
+            _id: order.seller._id,
+            full_name: order.seller.full_name,
+            email: order.seller.email,
+          }
           : null,
         amazon_finance_total: order.amazon_finance_total,
         amazon_total_quantity: order.amazon_total_quantity,
@@ -2211,9 +2211,9 @@ async function listCandidateVendors(pfItems = [], sizeValue, colorValue) {
 
     const vendorId = String(
       it?.vendor_id ||
-        it?.vendor?._id ||
-        (await getVendorIdByVendorProductId(vendorProductId)) ||
-        ""
+      it?.vendor?._id ||
+      (await getVendorIdByVendorProductId(vendorProductId)) ||
+      ""
     );
     if (vendorId) out.add(vendorId);
   }
@@ -2264,9 +2264,9 @@ async function selectBestVendorProduct(
     if (!vpId) continue;
     const vId = String(
       it?.vendor_id ||
-        it?.vendor?._id ||
-        (await getVendorIdByVendorProductId(vpId)) ||
-        ""
+      it?.vendor?._id ||
+      (await getVendorIdByVendorProductId(vpId)) ||
+      ""
     );
     resolved.push({ ...it, __vendorId: vId, __vendorProductId: vpId });
   }
@@ -2354,9 +2354,9 @@ async function buildVendorRank(preItems) {
       if (!vpId) continue;
       const vId = String(
         it?.vendor_id ||
-          it?.vendor?._id ||
-          (await getVendorIdByVendorProductId(vpId)) ||
-          ""
+        it?.vendor?._id ||
+        (await getVendorIdByVendorProductId(vpId)) ||
+        ""
       );
       if (!vId) continue;
       resolved.push({ ...it, __vendorId: vId, __vendorProductId: vpId });
@@ -2880,7 +2880,7 @@ const computeBaseCostForOrder = async (req, res) => {
           const minus =
             (out.shipping_international_economy || 0) +
             (out.shipping_international_additional_units || 0) *
-              (out.shipping_international_additional_rate || 0);
+            (out.shipping_international_additional_rate || 0);
           out.base_cost_total_for_item_including_shipping = Number(
             (out.base_cost_total_for_item_including_shipping - minus).toFixed(2)
           );
@@ -2908,9 +2908,8 @@ const computeBaseCostForOrder = async (req, res) => {
                 out.base_cost_total_for_item_including_shipping + expensive.eco
               ).toFixed(2)
             );
-            out.formula = `${out.formula || ""} | SPECIAL[${
-              expensive.shipProfile
-            }]: eco(${expensive.eco}) for expensive product`;
+            out.formula = `${out.formula || ""} | SPECIAL[${expensive.shipProfile
+              }]: eco(${expensive.eco}) for expensive product`;
           }
         }
         // additional (1) cho sp "rẻ hơn"
@@ -2926,9 +2925,8 @@ const computeBaseCostForOrder = async (req, res) => {
                 out.base_cost_total_for_item_including_shipping + cheap.add
               ).toFixed(2)
             );
-            out.formula = `${out.formula || ""} | SPECIAL[${
-              cheap.shipProfile
-            }]: add(${cheap.add}) for cheaper product`;
+            out.formula = `${out.formula || ""} | SPECIAL[${cheap.shipProfile
+              }]: add(${cheap.add}) for cheaper product`;
           }
         }
 
@@ -3012,7 +3010,7 @@ const computeBaseCostForOrder = async (req, res) => {
               return (
                 sum +
                 (out.shipping_international_additional_units || 0) *
-                  (out.shipping_international_additional_rate || 0)
+                (out.shipping_international_additional_rate || 0)
               );
             }, 0)
           ).toFixed(2)
@@ -3070,7 +3068,7 @@ const computeBaseCostForOrder = async (req, res) => {
       if (
         it.cost_breakdown &&
         typeof it.cost_breakdown.base_cost_total_for_item_including_shipping ===
-          "number"
+        "number"
       ) {
         orderTotalBaseCost +=
           it.cost_breakdown.base_cost_total_for_item_including_shipping;
@@ -3159,7 +3157,7 @@ function computeOrderStatusFromItems(items = []) {
  */
 const updateItemTracking = async (req, res) => {
   try {
-    const { orderId, orderItemId } = req.params;
+    const { orderId } = req.params;
 
     // an toàn khi req.body undefined
     const body = req.body || {};
@@ -3170,9 +3168,11 @@ const updateItemTracking = async (req, res) => {
       fulfillment !== undefined ? String(fulfillment).trim() : undefined;
     const tTracking =
       tracking !== undefined ? String(tracking).trim() : undefined;
+    const tNote = note !== undefined ? String(note) : undefined;
+    const tStatus = status !== undefined ? String(status).trim() : undefined;
 
     // Validate status nếu có
-    if (status && !ALLOWED.includes(status)) {
+    if (tStatus && !ALLOWED.includes(tStatus)) {
       return res
         .status(400)
         .json({ message: "Invalid status", allowed: ALLOWED });
@@ -3182,8 +3182,8 @@ const updateItemTracking = async (req, res) => {
     if (
       tFulfillment === undefined &&
       tTracking === undefined &&
-      status === undefined &&
-      note === undefined
+      tStatus === undefined &&
+      tNote === undefined
     ) {
       return res.status(400).json({
         message:
@@ -3191,64 +3191,89 @@ const updateItemTracking = async (req, res) => {
       });
     }
 
-    // NEW RULE: có tracking -> ép Shipped
-    let nextStatus = status;
-    if (tTracking !== undefined && tTracking.length > 0) {
+    // RULE ưu tiên:
+    // 1) Nếu status = Cancelled -> ưu tiên Cancelled (bỏ qua auto-ship theo tracking)
+    // 2) Ngược lại, nếu có tracking -> ép Shipped
+    // 3) Còn lại -> dùng status được truyền (nếu có)
+    let nextStatus;
+    if (tStatus === "Cancelled") {
+      nextStatus = "Cancelled";
+    } else if (tTracking !== undefined && tTracking.length > 0) {
       nextStatus = "Shipped";
+    } else {
+      nextStatus = tStatus; // có thể undefined
     }
 
     const $set = {};
+    // Apply cho TẤT CẢ items
     if (tFulfillment !== undefined)
-      $set["items.$[it].tracking_info.fulfillment"] = tFulfillment;
+      $set["items.$[].tracking_info.fulfillment"] = tFulfillment;
     if (tTracking !== undefined)
-      $set["items.$[it].tracking_info.tracking"] = tTracking;
-    if (nextStatus !== undefined)
-      $set["items.$[it].tracking_info.status"] = nextStatus;
-    if (note !== undefined)
-      $set["items.$[it].tracking_info.note"] = String(note);
-    $set["items.$[it].tracking_info.updated_at"] = new Date();
+      $set["items.$[].tracking_info.tracking"] = tTracking;
+    if (tNote !== undefined)
+      $set["items.$[].tracking_info.note"] = tNote;
 
-    // ⭐ NEW: Nếu Fulfilled/Shipped -> set scale_status=Complete và scale_overall_status=Sent
-    if (nextStatus === "Fulfilled" || nextStatus === "Shipped") {
-      $set["items.$[it].scale_status"] = "Complete";
-      $set["scale_overall_status"] = "Sent";
+    // cập nhật updated_at cho tất cả items
+    $set["items.$[].tracking_info.updated_at"] = new Date();
+
+    // Set status cho tất cả items nếu xác định được nextStatus
+    if (nextStatus !== undefined) {
+      $set["items.$[].tracking_info.status"] = nextStatus;
+
+      if (nextStatus === "Fulfilled" || nextStatus === "Shipped") {
+        // Item hoàn tất scale, order coi như đã gửi
+        $set["items.$[].scale_status"] = "Complete";
+        $set["scale_overall_status"] = "Sent";
+      } else if (nextStatus === "Cancelled") {
+        // Scale item dùng "Failed" để bám bộ trạng thái sẵn có
+        $set["items.$[].scale_status"] = "Failed";
+        $set["scale_overall_status"] = "Cancelled";
+      }
+      // (Các trạng thái khác nếu có, ta không ép scale_overall_status)
     }
 
-    const docAfterItemUpdate = await OrderCustomProduct.findOneAndUpdate(
+    // Update & lấy document mới
+    const docAfterAllUpdate = await OrderCustomProduct.findOneAndUpdate(
       { orderId },
       { $set },
-      { arrayFilters: [{ "it.orderItemId": orderItemId }], new: true }
+      { new: true }
     );
 
-    if (!docAfterItemUpdate) {
+    if (!docAfterAllUpdate) {
       return res.status(404).json({ message: "Order not found" });
     }
 
-    // Đồng bộ lại order.status từ items (giữ logic cũ)
+    // Đồng bộ lại order.status từ items
     const newOrderStatus = computeOrderStatusFromItems(
-      docAfterItemUpdate.items
+      docAfterAllUpdate.items
     );
-    if (newOrderStatus !== docAfterItemUpdate.status) {
+    if (newOrderStatus !== docAfterAllUpdate.status) {
       await OrderCustomProduct.updateOne(
-        { _id: docAfterItemUpdate._id },
+        { _id: docAfterAllUpdate._id },
         { $set: { status: newOrderStatus } }
       );
     }
 
-    const updatedItem = (docAfterItemUpdate.items || []).find(
-      (i) => i.orderItemId === orderItemId
-    );
+    // scale_overall_status phản hồi: nếu ta vừa set thì trả về giá trị mới; nếu không, trả doc hiện tại
+    const responseScaleOverall =
+      nextStatus === "Fulfilled" || nextStatus === "Shipped"
+        ? "Sent"
+        : nextStatus === "Cancelled"
+          ? "Cancelled"
+          : docAfterAllUpdate.scale_overall_status;
 
     return res.json({
       message:
-        "Tracking updated (auto Shipped on tracking), item scaled -> Complete, order scale_overall_status -> Sent, & order status synced",
-      orderId: docAfterItemUpdate.orderId,
+        "Tracking updated for ALL items (priority: Cancelled > auto-Ship on tracking). Item & order statuses synced.",
+      orderId: docAfterAllUpdate.orderId,
       orderStatus: newOrderStatus,
-      scale_overall_status:
-        nextStatus === "Fulfilled" || nextStatus === "Shipped"
-          ? "Sent"
-          : docAfterItemUpdate.scale_overall_status,
-      item: updatedItem,
+      scale_overall_status: responseScaleOverall,
+      applied: {
+        fulfillment: tFulfillment,
+        tracking: tTracking,
+        status: nextStatus,
+        note: tNote,
+      },
     });
   } catch (err) {
     console.error(err);
@@ -3257,7 +3282,7 @@ const updateItemTracking = async (req, res) => {
       .json({ message: "Update failed", error: err.message });
   }
 };
-
+ 
 /**
  * Tạo orderId mới với hậu tố -R1 (nếu trùng thì R2, R3...)
  */
