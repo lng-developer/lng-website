@@ -168,53 +168,91 @@ function buildPayload(orderObj = {}) {
 
 /* -------------------- Response parser ------------------- */
 function parseResponseForMangoTee(body) {
-    if (typeof body?.success === "boolean") {
-        if (body.success === true) {
-            const d = body.data || {};
-            const ext =
-                d.order_id || d.id || d.external_id || d.mango_order_id || null;
-            return {
-                ok: true,
-                externalId: ext,
-                normalized: {
-                    success: true,
-                    message: body.message || "OK",
-                    data: d,
-                },
-            };
-        }
-        const err = new Error(body?.message || "MangoTee: Non-success response");
-        err.code = "MANGOTEE_NON_SUCCESS";
-        err.vendorResponse = body;
-        return { ok: false, error: err };
-    }
+    const pickExternalId = (b = {}) => {
+        const d = b.data || {};
+        return (
+            d.order_id ||
+            d.id ||
+            d.external_id ||
+            b.order_id ||
+            b.id ||
+            b.external_id ||
+            null
+        );
+    };
 
+    const msg = String(body?.message || "").trim();
+    const msgLower = msg.toLowerCase();
     const bucket = body?.data || body?.result || body || {};
-    const status = Number(body?.status || bucket?.status);
-    if (!isNaN(status)) {
-        if (status === 200 || status === 201) {
-            const ext =
-                bucket.order_id || bucket.id || bucket.external_id || null;
+    const statusNum = Number(body?.status || bucket?.status);
+
+    // 1) clear success flag
+    if (typeof body?.success === "boolean") {
+        if (body.success) {
             return {
                 ok: true,
-                externalId: ext,
-                normalized: {
-                    status,
-                    message: body?.message || bucket?.message || "OK",
-                    data: bucket,
-                },
+                externalId: pickExternalId(body),
+                normalized: { success: true, message: msg || "OK", data: body.data || body },
             };
         }
-        const err = new Error(body?.message || bucket?.message || "MangoTee: Error");
+        const err = new Error(msg || "MangoTee: Non-success response");
         err.code = "MANGOTEE_NON_SUCCESS";
         err.vendorResponse = body;
         return { ok: false, error: err };
     }
 
+    // 2) numeric status
+    if (!Number.isNaN(statusNum)) {
+        if (statusNum >= 200 && statusNum < 300) {
+            return {
+                ok: true,
+                externalId: pickExternalId(body),
+                normalized: { status: statusNum, message: msg || "OK", data: bucket },
+            };
+        }
+        // Non-2xx nhưng message cho thấy idempotent success
+        if (
+            msgLower.includes("created successfully") ||
+            msgLower.includes("order created") ||
+            msgLower.includes("already exist") ||
+            msgLower.includes("already created") ||
+            msgLower.includes("success")
+        ) {
+            return {
+                ok: true,
+                externalId: pickExternalId(body),
+                normalized: {
+                    status: statusNum,
+                    message: msg || "OK (soft-success)",
+                    data: bucket,
+                    soft: true,
+                },
+            };
+        }
+        const err = new Error(msg || "MangoTee: Error");
+        err.code = "MANGOTEE_NON_SUCCESS";
+        err.vendorResponse = body;
+        return { ok: false, error: err };
+    }
+
+    // 3) Không có success/status nhưng message là success
+    if (
+        msgLower.includes("created successfully") ||
+        msgLower.includes("order created") ||
+        msgLower.includes("success")
+    ) {
+        return {
+            ok: true,
+            externalId: pickExternalId(body),
+            normalized: { message: msg || "OK", data: bucket, soft: true },
+        };
+    }
+
+    // 4) raw fields
     if (body && (body.id || body.order_id)) {
         return {
             ok: true,
-            externalId: body.order_id || body.id,
+            externalId: body.order_id || body.id || null,
             normalized: { data: body },
         };
     }
@@ -253,14 +291,40 @@ async function send(orderDoc) {
 
     const headers = {
         "Content-Type": "application/json",
-        "X-API-Key": apiKey, // chỉ cần header này
+        "X-API-Key": apiKey, // chỉ header này
     };
 
     console.log("[MANGOTEE] Create order endpoint:", endpoint);
     console.log("[MANGOTEE] Sending payload:", JSON.stringify(payload, null, 2));
 
-    const resp = await axios.post(endpoint, payload, { headers });
-    const body = resp?.data;
+    let body;
+    try {
+        const resp = await axios.post(endpoint, payload, { headers });
+        body = resp?.data;
+    } catch (e) {
+        // Nếu vendor trả non-2xx nhưng message nói đã tạo thành công/idempotent
+        const data = e?.response?.data;
+        const msg = String(data?.message || e.message || "").toLowerCase();
+        const looksLikeSuccess =
+            msg.includes("created successfully") ||
+            msg.includes("order created") ||
+            msg.includes("already exist") ||
+            msg.includes("already created") ||
+            msg.includes("success");
+
+        if (looksLikeSuccess && data) {
+            const parsedSoft = parseResponseForMangoTee(data);
+            if (parsedSoft.ok) {
+                return {
+                    data,
+                    externalId: parsedSoft.externalId,
+                    normalized: parsedSoft.normalized,
+                };
+            }
+        }
+        // ném lại lỗi thật sự
+        throw e;
+    }
 
     if (!body || typeof body !== "object") {
         const err = new Error("MangoTee: Empty or invalid JSON response");

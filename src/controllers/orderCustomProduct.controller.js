@@ -2650,7 +2650,7 @@ const computeBaseCostForOrder = async (req, res) => {
         ["EBM", "EBMA"].includes(configCode.toUpperCase()) &&
         pfItems.length > 1
       ) {
-        pfItems = pfItems.slice(3);
+        pfItems = pfItems.slice(4);
       }
 
       preItems.push({
