@@ -18,9 +18,13 @@
 //   # Merchize
 //   MERCHIZE_ACCESS_TOKEN=
 //
-//   # Printway
-//   PRINTWAY_BASE_URL=https://api.printway.io/cdn/api/orders/v1/detail
+//   # Printway (v3)
+//   PRINTWAY_BASE_URL=https://apis.printway.io/v3/order/detail
 //   PRINTWAY_ACCESS_TOKEN=xxxxxxxx     # header: PW-ACCESS-TOKEN
+//
+//   # MangoTee
+//   MANGOTEE_BASE_URL=https://v3.mangoteeprints.com/api/public/v1
+//   MANGOTEE_API_KEY=xxxxxxxx          # header: X-API-Key
 //
 
 const path = require("path");
@@ -51,9 +55,13 @@ const {
     // Merchize
     MERCHIZE_ACCESS_TOKEN = "",
 
-    // Printway
+    // Printway v3
     PRINTWAY_BASE_URL = "https://apis.printway.io/v3/order/detail",
-    PRINTWAY_ACCESS_TOKEN = "U2FsdGVkX18ilTKwXZqZlcCeoaybvGFFaDBHj8mGx9+Mc4WgttYzkYKAh66oCMPQ3X11gHTXOruItKDG/yNSfx1SE49V+fhe/oc6WAXQ6Z78XX/wRYZdB3BjzSn5Rj8c2OZlD7J1b1AuRuErIVDNGZsP56jxq+Q41qyc26qJoZXTQszkjSkahlPi2BaEUC5DCF3gHmpkTKU4HL94RBQ9Rb5iQhbNnE1GR12W+ygPHv9jN56qLtRPBYiU0bwbsubx",
+    PRINTWAY_ACCESS_TOKEN = "",
+
+    // MangoTee
+    MANGOTEE_BASE_URL = "https://v3.mangoteeprints.com/api/public/v1",
+    MANGOTEE_API_KEY = "",
 } = process.env;
 
 // ====== HTTP clients ======
@@ -80,16 +88,25 @@ const httpMerchize = axios.create({
 });
 
 const httpPrintway = axios.create({
-    baseURL: PRINTWAY_BASE_URL,              // v3 endpoint
+    baseURL: PRINTWAY_BASE_URL, // v3 endpoint
     timeout: 20000,
     headers: {
-        "pw-access-token": PRINTWAY_ACCESS_TOKEN, // header key ok (case-insensitive)
+        "pw-access-token": PRINTWAY_ACCESS_TOKEN, // case-insensitive
         Accept: "application/json",
-        "Content-Type": "application/json",       // để gửi JSON body cho GET
+        "Content-Type": "application/json",
     },
     validateStatus: () => true,
 });
 
+const httpMangoTee = axios.create({
+    baseURL: MANGOTEE_BASE_URL, // e.g., https://v3.mangoteeprints.com/api/public/v1
+    timeout: 20000,
+    headers: {
+        "X-API-Key": MANGOTEE_API_KEY,
+        Accept: "application/json",
+    },
+    validateStatus: () => true,
+});
 
 // ====== CLI flags ======
 const argv = process.argv.slice(2);
@@ -110,9 +127,9 @@ function isValidTrackingNumber(s) {
     const t = norm(s);
     if (!t) return false;
     if (t === "-" || t === "---") return false;
-    if (/^0+$/.test(t)) return false;            // toàn số 0
-    if (!/[A-Za-z0-9]/.test(t)) return false;    // không có ký tự chữ/số
-    if (t.length < 8) return false;              // quá ngắn
+    if (/^0+$/.test(t)) return false;
+    if (!/[A-Za-z0-9]/.test(t)) return false;
+    if (t.length < 8) return false;
     return true;
 }
 
@@ -123,7 +140,8 @@ function normalizeVendorKey(nameOrType) {
     if (s.includes("merchfox") || s.includes("merch fox")) return "merchfox";
     if (s.includes("merchize")) return "merchize";
     if (s.includes("printway") || s.includes("print way") || s === "pw") return "printway";
-    if (["beeful", "merchfox", "merchize", "printway"].includes(s)) return s;
+    if (s.includes("mangotee") || s.includes("mango tee") || s.includes("mangoteeprints")) return "mangotee";
+    if (["beeful", "merchfox", "merchize", "printway", "mangotee"].includes(s)) return s;
     return "";
 }
 
@@ -262,32 +280,42 @@ async function fetchMerchFox(orderId) {
 }
 
 async function fetchMerchize(orderId) {
-    // tracking
+    // 1) Ưu tiên endpoint tracking
     let res = await httpMerchize.get("/order/external/orders/tracking", {
         params: { external_number: orderId },
     });
     if (DEBUG) console.log("[Merchize][HTTP tracking]", res.status, "| keys:", Object.keys(res.data || {}));
     if (res.status >= 400) throw new Error(`Merchize HTTP ${res.status} (tracking)`);
+
     if (res.data?.success === true && Array.isArray(res.data.data) && res.data.data.length > 0) {
         const obj = res.data.data[0];
         const tracking = norm(obj?.tracking_number);
         const carrier = norm(obj?.tracking_company);
-        const shipped = lower(obj?.status) === "fulfilled" || Boolean(tracking);
+        // FIX: chỉ shipped khi có tracking hợp lệ
+        const shipped = isValidTrackingNumber(tracking);
+
         return { tracking, carrier, shipped, raw: obj };
     }
-    // order-detail
+
+    // 2) Fallback: order-detail chỉ để THAM KHẢO trạng thái, KHÔNG quyết định shipped
     res = await httpMerchize.get("/order/external/orders/order-detail", {
         params: { external_number: orderId },
     });
     if (DEBUG) console.log("[Merchize][HTTP detail]", res.status, "| keys:", Object.keys(res.data || {}));
     if (res.status >= 400) throw new Error(`Merchize HTTP ${res.status} (detail)`);
+
     if (res.data?.success === true && Array.isArray(res.data.data) && res.data.data.length > 0) {
         const obj = res.data.data[0];
+
+        // Một số shop Merchize đánh dấu "fulfilled" trước khi có tracking.
+        // Ở đây vẫn KHÔNG shipped nếu chưa có mã.
         const tracking = norm(obj?.tracking_number);
         const carrier = norm(obj?.tracking_company);
-        const shipped = lower(obj?.status) === "fulfilled" || Boolean(tracking);
+        const shipped = isValidTrackingNumber(tracking);
+
         return { tracking, carrier, shipped, raw: obj };
     }
+
     throw new Error(`Merchize empty for ${orderId}`);
 }
 
@@ -305,11 +333,6 @@ function _pwPickLatest(list) {
 
 /**
  * Printway v3 only (/v3/order/detail)
- * - Gửi GET + JSON body (và kèm params) như Postman
- * - Ưu tiên order_name (amazon order id); fallback pw_order_id:
- *   + cache doc.printway_submission?.pw_order_id
- *   + nếu orderId khớp /^PW\d+/i
- * - Payload v3: object (hoặc trong raw.data) có: trackings[], orderitems[].tracking
  */
 async function fetchPrintway(orderId, doc) {
     const tries = [];
@@ -329,10 +352,10 @@ async function fetchPrintway(orderId, doc) {
     for (const t of tries) {
         const res = await httpPrintway.request({
             method: "get",
-            url: "",            // baseURL đã trỏ /v3/order/detail
-            params: t.body,     // đề phòng server đọc query
-            data: t.body,       // và body JSON (giống Postman của bạn)
-            transformResponse: [(d) => d], // tự parse JSON
+            url: "", // baseURL đã trỏ /v3/order/detail
+            params: t.body,
+            data: t.body,
+            transformResponse: [(d) => d],
         });
 
         if (DEBUG) console.log("[Printway v3][HTTP]", res.status, "| body:", t.body);
@@ -342,7 +365,6 @@ async function fetchPrintway(orderId, doc) {
             continue;
         }
 
-        // parse JSON an toàn
         let raw;
         try {
             raw = typeof res.data === "string" ? JSON.parse(res.data) : res.data;
@@ -351,14 +373,12 @@ async function fetchPrintway(orderId, doc) {
             continue;
         }
 
-        // v3 có thể trả thẳng object, hoặc bọc trong data
         const payload = (raw && typeof raw === "object" && (raw.data || raw)) || null;
         if (!payload) {
             lastErr = new Error("Printway v3 empty payload");
             continue;
         }
 
-        // gom trackings từ 2 nơi: trackings[] và orderitems[].tracking
         const combined = [];
 
         if (Array.isArray(payload.trackings)) {
@@ -372,7 +392,6 @@ async function fetchPrintway(orderId, doc) {
 
         const latest = _pwPickLatest(combined);
         if (!latest) {
-            // không có tracking -> vẫn coi là chưa shipped
             return { tracking: "", carrier: "", shipped: false, raw };
         }
 
@@ -385,6 +404,66 @@ async function fetchPrintway(orderId, doc) {
 
     throw lastErr || new Error("Printway v3 unknown error");
 }
+
+/**
+ * MangoTee (/api/public/v1/orders/{order_id})
+ * - Header: X-API-Key
+ * - Root có data.tracking_number, data.status ("shipped"), data.events[] (primary, carrier, tracking_url, created_at)
+ */
+function _mtPickLatestEvent(events) {
+    if (!Array.isArray(events) || events.length === 0) return null;
+
+    // Ưu tiên primary === true
+    const primary = events.filter((e) => e && e.primary === true);
+    const pool = primary.length ? primary : events;
+
+    return pool
+        .map((e) => ({
+            trackingNumber: norm(e.tracking_number || e.trackingNumber || ""),
+            carrierName: norm(e.carrier || ""),
+            trackingUrl: norm(e.tracking_url || e.trackingUrl || ""),
+            createdAtMs: new Date(e.created_at || e.updated_at || 0).getTime(),
+        }))
+        .sort((a, b) => (b.createdAtMs || 0) - (a.createdAtMs || 0))[0];
+}
+
+async function fetchMangoTee(orderId) {
+    if (!MANGOTEE_API_KEY) throw new Error("MangoTee missing API key");
+    const url = `/orders/${encodeURIComponent(orderId)}`;
+
+    const res = await httpMangoTee.get(url);
+    if (DEBUG) console.log("[MangoTee][HTTP]", res.status);
+
+    if (res.status >= 400) throw new Error(`MangoTee HTTP ${res.status}`);
+
+    const raw = res.data;
+    if (!raw || typeof raw !== "object") throw new Error("MangoTee empty payload");
+    if (raw.status !== true || raw.code !== "SUCCESS" || !raw.data) {
+        throw new Error(`MangoTee bad response: code=${raw.code}`);
+    }
+
+    const data = raw.data;
+
+    // ưu tiên root tracking_number nếu hợp lệ
+    let tracking = norm(data.tracking_number);
+    if (!isValidTrackingNumber(tracking)) tracking = "";
+
+    let carrier = "";
+    // events: chọn latest (ưu tiên primary)
+    const ev = _mtPickLatestEvent(data.events || []);
+    if (ev) {
+        if (!tracking && isValidTrackingNumber(ev.trackingNumber)) tracking = ev.trackingNumber;
+        carrier = ev.carrierName || carrier;
+    }
+
+    const shipped =
+        lower(data.status) === "shipped" ||
+        lower(data.production_status) === "fulfilled" ||
+        Boolean(tracking);
+
+    return { tracking, carrier, shipped, raw };
+}
+
 // ====== Áp kết quả vào doc cho nhóm item thuộc vendorKey ======
 function applyToItemsOfVendor(doc, vendorKey, { tracking, carrier, shipped, raw }) {
     let changed = 0;
@@ -400,7 +479,7 @@ function applyToItemsOfVendor(doc, vendorKey, { tracking, carrier, shipped, raw 
 
         const ti = it.tracking_info || {};
         const prevTracking = norm(ti.tracking);
-        thePrevStatus = norm(ti.status);
+        const thePrevStatus = norm(ti.status);
 
         const nextTI = {
             ...ti,
@@ -413,7 +492,9 @@ function applyToItemsOfVendor(doc, vendorKey, { tracking, carrier, shipped, raw 
                             ? "Merchize"
                             : vendorKey === "printway"
                                 ? "Printway"
-                                : norm(ti.fulfillment),
+                                : vendorKey === "mangotee"
+                                    ? "MangoTee"
+                                    : norm(ti.fulfillment),
             tracking: tracking || prevTracking,
             status: shipped ? "Shipped" : thePrevStatus || "New",
             updated_at: new Date(),
@@ -460,6 +541,14 @@ function applyToItemsOfVendor(doc, vendorKey, { tracking, carrier, shipped, raw 
             pw_order_id: norm(raw?.order?.pw_order_id),
             order_name: norm(raw?.order?.order_name),
         };
+    } else if (vendorKey === "mangotee") {
+        doc.mangotee_submission = {
+            ...(doc.mangotee_submission || {}),
+            attempt_count: (doc.mangotee_submission?.attempt_count || 0) + 1,
+            last_response: raw,
+            order_id: norm(raw?.data?.order_id),
+            mt_status: norm(raw?.data?.status || raw?.data?.production_status),
+        };
     }
 
     return changed;
@@ -483,7 +572,7 @@ async function updateOrderByVendors(orderId, vpidToVendorPrefetched = null) {
     // nhóm item theo vendor
     const groups = groupItemsByVendorWithMap(doc, vpidToVendor);
     const vendorKeys = Object.keys(groups).filter((k) =>
-        ["beeful", "merchfox", "merchize", "printway"].includes(k)
+        ["beeful", "merchfox", "merchize", "printway", "mangotee"].includes(k)
     );
 
     if (vendorKeys.length === 0) {
@@ -500,6 +589,7 @@ async function updateOrderByVendors(orderId, vpidToVendorPrefetched = null) {
             else if (vk === "merchfox") res = await fetchMerchFox(orderId);
             else if (vk === "merchize") res = await fetchMerchize(orderId);
             else if (vk === "printway") res = await fetchPrintway(orderId, doc);
+            else if (vk === "mangotee") res = await fetchMangoTee(orderId);
             else continue;
 
             totalChanged += applyToItemsOfVendor(doc, vk, res);
@@ -547,7 +637,7 @@ async function runBatch() {
     const vpidToVendor = await buildVendorMapsFromVpidSet(vpidSet);
 
     // B3) Lọc các order thực sự có vendorKey hợp lệ
-    const knownKeys = new Set(["beeful", "merchfox", "merchize", "printway"]);
+    const knownKeys = new Set(["beeful", "merchfox", "merchize", "printway", "mangotee"]);
     const filtered = candidates.filter((o) => {
         const groups = groupItemsByVendorWithMap(o, vpidToVendor);
         return Object.keys(groups).some((k) => knownKeys.has(k));
