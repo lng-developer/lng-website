@@ -51,14 +51,6 @@ function mapShippingMethod(orderObj = {}) {
     return "standard";
 }
 
-function detectFacility(orderObj = {}, item = {}) {
-    return (
-        item?.cost_breakdown?.product_location ||
-        orderObj.facility ||
-        process.env.MANGOTEE_DEFAULT_FACILITY ||
-        "TX"
-    );
-}
 
 function buildPreviewFiles(item = {}) {
     const out = [];
@@ -128,7 +120,6 @@ function buildMangoItem(item = {}, orderObj = {}) {
         sku,
         quantity: Number(item?.quantity || 1),
         production_config: item?.production_config || "default",
-        facility: detectFacility(orderObj, item),
         preview_files: buildPreviewFiles(item),
         print_files: buildPrintFiles(item),
         inserts: buildInserts(orderObj),
@@ -166,6 +157,52 @@ function buildPayload(orderObj = {}) {
     };
 }
 
+/* -------------------- Preflight validation (avoid 422) ------------------- */
+function validatePayload(p) {
+    const errors = [];
+    const need = (field, val) => {
+        if (val === undefined || val === null || String(val).trim() === "") {
+            errors.push(`Missing "${field}"`);
+        }
+    };
+
+    need("order_id", p.order_id);
+    need("first_name", p.first_name);
+    need("last_name", p.last_name);
+    need("email", p.email);
+    need("address_line_1", p.address_line_1);
+    need("city", p.city);
+    need("state", p.state);
+    need("zip", p.zip);
+    need("country", p.country);
+
+    if (!Array.isArray(p.items) || p.items.length === 0) {
+        errors.push("Missing items[]");
+    } else {
+        p.items.forEach((it, idx) => {
+            if (!it) {
+                errors.push(`items[${idx}] is null/undefined`);
+                return;
+            }
+            need(`items[${idx}].sku`, it.sku);
+            if (!(Number(it.quantity) > 0)) {
+                errors.push(`items[${idx}].quantity must be > 0`);
+            }
+            const hasPrint =
+                Array.isArray(it.print_files) && it.print_files.length > 0;
+            if (!hasPrint) {
+                errors.push(`items[${idx}].print_files is required (min 1)`);
+            } else {
+                it.print_files.forEach((pf, j) => {
+                    need(`items[${idx}].print_files[${j}].key`, pf?.key);
+                    need(`items[${idx}].print_files[${j}].url`, pf?.url);
+                });
+            }
+        });
+    }
+    return { ok: errors.length === 0, errors };
+}
+
 /* -------------------- Response parser ------------------- */
 function parseResponseForMangoTee(body) {
     const pickExternalId = (b = {}) => {
@@ -186,7 +223,6 @@ function parseResponseForMangoTee(body) {
     const bucket = body?.data || body?.result || body || {};
     const statusNum = Number(body?.status || bucket?.status);
 
-    // 1) clear success flag
     if (typeof body?.success === "boolean") {
         if (body.success) {
             return {
@@ -201,7 +237,6 @@ function parseResponseForMangoTee(body) {
         return { ok: false, error: err };
     }
 
-    // 2) numeric status
     if (!Number.isNaN(statusNum)) {
         if (statusNum >= 200 && statusNum < 300) {
             return {
@@ -210,7 +245,6 @@ function parseResponseForMangoTee(body) {
                 normalized: { status: statusNum, message: msg || "OK", data: bucket },
             };
         }
-        // Non-2xx nhưng message cho thấy idempotent success
         if (
             msgLower.includes("created successfully") ||
             msgLower.includes("order created") ||
@@ -235,7 +269,6 @@ function parseResponseForMangoTee(body) {
         return { ok: false, error: err };
     }
 
-    // 3) Không có success/status nhưng message là success
     if (
         msgLower.includes("created successfully") ||
         msgLower.includes("order created") ||
@@ -248,7 +281,6 @@ function parseResponseForMangoTee(body) {
         };
     }
 
-    // 4) raw fields
     if (body && (body.id || body.order_id)) {
         return {
             ok: true,
@@ -270,9 +302,13 @@ async function send(orderDoc) {
         : orderDoc;
 
     const payload = buildPayload(orderObj);
-    if (!Array.isArray(payload.items) || payload.items.length === 0) {
-        const err = new Error("MangoTee: No line items to send.");
-        err.code = "NO_LINE_ITEMS";
+
+    // Preflight tránh 422
+    const pre = validatePayload(payload);
+    if (!pre.ok) {
+        const err = new Error(`MangoTee payload validation failed: ${pre.errors.join("; ")}`);
+        err.code = "MANGOTEE_PREVALIDATION_FAILED";
+        err.details = pre.errors;
         throw err;
     }
 
@@ -302,9 +338,11 @@ async function send(orderDoc) {
         const resp = await axios.post(endpoint, payload, { headers });
         body = resp?.data;
     } catch (e) {
-        // Nếu vendor trả non-2xx nhưng message nói đã tạo thành công/idempotent
         const data = e?.response?.data;
+        const status = e?.response?.status;
         const msg = String(data?.message || e.message || "").toLowerCase();
+
+        // Non-2xx nhưng message cho thấy idempotent success
         const looksLikeSuccess =
             msg.includes("created successfully") ||
             msg.includes("order created") ||
@@ -322,7 +360,20 @@ async function send(orderDoc) {
                 };
             }
         }
-        // ném lại lỗi thật sự
+
+        // 422 — trả lỗi giàu thông tin để controller/FE thấy được
+        if (status === 422 && data) {
+            const reason =
+                Array.isArray(data.errors)
+                    ? data.errors.map(x => (x?.message || x)).join("; ")
+                    : (data.message || "Unprocessable Entity");
+            const err = new Error(`MangoTee 422: ${reason}`);
+            err.code = "MANGOTEE_422";
+            err.vendorResponse = data;
+            throw err;
+        }
+
+        // ném lại lỗi mặc định
         throw e;
     }
 
