@@ -2646,11 +2646,28 @@ const computeBaseCostForOrder = async (req, res) => {
         continue;
       }
       // Đặc thù EBM/EBMA
-      if (
-        ["EBM", "EBMA"].includes(configCode.toUpperCase()) &&
-        pfItems.length > 1
-      ) {
-        pfItems = pfItems.slice(4);
+      if (["EBM", "EBMA"].includes(configCode.toUpperCase())) {
+        // Chỉ lấy item Active
+        const activeItems = toArray(cfg?.product_for_seller?.items)
+          .filter(Boolean)
+          .filter(x => (x?.status || "").toLowerCase() === "active");
+
+        // Ưu tiên đúng item order === 5
+        const fifthByOrder = activeItems.find(x => Number(x.order) === 5);
+
+        if (fifthByOrder) {
+          pfItems = [fifthByOrder];
+        } else {
+          // Fallback an toàn: sort theo order rồi lấy phần tử thứ 5 nếu có,
+          // hoặc ném lỗi để bạn biết cấu hình chưa chuẩn.
+          const sorted = [...activeItems].sort((a, b) => Number(a.order) - Number(b.order));
+          if (sorted.length >= 5) {
+            pfItems = [sorted[4]]; // 1-based: phần tử thứ 5
+            console.warn("[EBM/EBMA] order===5 không tồn tại, fallback dùng phần tử thứ 5 sau sort theo 'order'.");
+          } else {
+            throw new Error("[EBM/EBMA] Không tìm thấy item có order===5 và cũng không đủ 5 items để fallback.");
+          }
+        }
       }
 
       preItems.push({
@@ -3282,7 +3299,7 @@ const updateItemTracking = async (req, res) => {
       .json({ message: "Update failed", error: err.message });
   }
 };
- 
+
 /**
  * Tạo orderId mới với hậu tố -R1 (nếu trùng thì R2, R3...)
  */
