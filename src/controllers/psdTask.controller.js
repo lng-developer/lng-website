@@ -27,6 +27,7 @@ const getTasks = async (req, res) => {
       perPage = 10,
       from,
       to,
+      search, // <<<< NEW
     } = req.query;
 
     const filter = {};
@@ -40,6 +41,43 @@ const getTasks = async (req, res) => {
       filter.createdAt = {};
       if (from) filter.createdAt.$gte = new Date(from);
       if (to) filter.createdAt.$lte = new Date(to);
+    }
+
+    // ===== ASIN search (NEW) =====
+    if (search && String(search).trim()) {
+      const asinTokens = String(search)
+        .split(/[,\s]+/) // cho phép "B0XXX,B0YYY" hoặc "B0XXX B0YYY"
+        .map((s) => s.trim())
+        .filter(Boolean);
+
+      // Tạo regex list (khớp chính xác, không phân biệt hoa thường)
+      const asinRegexes = asinTokens.map(
+        (tok) => new RegExp(`^${escapeRegex(tok)}$`, "i")
+      );
+
+      // 1) Tìm các listing có asin khớp
+      const listings = await Listing.find(
+        { asin: { $in: asinRegexes } },
+        { _id: 1 }
+      ).lean();
+
+      const listingIds = listings.map((l) => l._id);
+
+      // 2) Ghép điều kiện vào filter:
+      // - Nếu PsdTask có trường asin trực tiếp: filter theo asin
+      // - Và/hoặc theo reference listing
+      // Dùng $or để bao phủ cả hai schema khả dĩ
+      filter.$or = [
+        { listing: { $in: listingIds } },
+        { asin: { $in: asinRegexes } }, // chỉ hiệu lực nếu task có field asin
+      ];
+
+      // Nếu không tìm thấy listing và bạn không có field asin trong task,
+      // thì $or vẫn an toàn (nhưng sẽ không match gì). Có thể tối ưu trả rỗng sớm:
+      if (listingIds.length === 0) {
+        // Nếu bạn CHẮC CHẮN task không có field asin, có thể trả rỗng sớm để tối ưu:
+        // return res.json({ total: 0, tasks: [] });
+      }
     }
 
     // ===== RBAC gating =====
@@ -61,22 +99,17 @@ const getTasks = async (req, res) => {
       filter.designer = userId; // AND với designer filter nếu có
 
       // Và không thấy New/Requested
-      // - nếu FE gửi status=New|Requested thì vẫn phải chặn
       const excludeForDesigner = ["New", "Requested"];
       if (filter.status) {
-        // Nếu client đang cố chọn New/Requested → trả rỗng luôn
         if (excludeForDesigner.includes(filter.status)) {
           return res.json({ total: 0, tasks: [] });
         }
-        // nếu là 1 trạng thái hợp lệ khác thì giữ nguyên
       } else {
-        // chưa chọn status → thêm điều kiện not-in
         filter.status = { $nin: excludeForDesigner };
       }
     }
 
-    // Admin / Design Leader: không ràng buộc thêm
-
+    // ===== Query =====
     const [tasks, total] = await Promise.all([
       PsdTask.find(filter)
         .populate("seller designer leader listing")
@@ -91,12 +124,17 @@ const getTasks = async (req, res) => {
   }
 };
 
+// ===== Helper: escape regex special chars =====
+function escapeRegex(str) {
+  return String(str).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
 const toObjId = (v) =>
   v && mongoose.isValidObjectId(v) ? new mongoose.Types.ObjectId(String(v)) : v;
 
 const getTaskStatistics = async (req, res) => {
   try {
-    const { seller, designer, from, to, scoped } = req.query;
+    const { seller, designer, from, to, scoped, search } = req.query;
 
     // ===== RBAC =====
     const userId = req.user?.userId;
@@ -121,7 +159,7 @@ const getTaskStatistics = async (req, res) => {
         ? ["Assigned", "In Progress", "Uploaded", "QC Rejected", "QC Passed"] // hide New/Requested
         : ALL_STATUSES;
 
-    // ===== Build match (y như getTasks, nhưng KHÔNG phụ thuộc status) =====
+    // ===== Build match =====
     const match = { status: { $in: ROLE_STATUSES } };
 
     // time range
@@ -131,15 +169,41 @@ const getTaskStatistics = async (req, res) => {
       if (to) match.createdAt.$lte = new Date(to);
     }
 
+    // search theo ASIN (NEW)
+    if (search && String(search).trim()) {
+      const asinTokens = String(search)
+        .split(/[,\s]+/)
+        .map((s) => s.trim())
+        .filter(Boolean);
+
+      const asinRegexes = asinTokens.map(
+        (tok) => new RegExp(`^${escapeRegex(tok)}$`, "i")
+      );
+
+      const listings = await Listing.find(
+        { asin: { $in: asinRegexes } },
+        { _id: 1 }
+      ).lean();
+
+      const listingIds = listings.map((l) => l._id);
+
+      // nếu task có field asin trực tiếp → dùng $or
+      match.$or = [
+        { listing: { $in: listingIds } },
+        { asin: { $in: asinRegexes } },
+      ];
+
+      // Nếu bạn chắc chắn task không có field asin → có thể chỉ cần:
+      // match.listing = { $in: listingIds };
+      // và nếu listingIds.length === 0 thì trả rỗng luôn
+    }
+
     // RBAC scope
     if (isDesigner && !isAdmin && !isDesignLeader) {
-      // chỉ việc của chính designer (cast ObjectId!)
       match.designer = toObjId(userId);
     } else if (isSeller && !isAdmin && !isDesignLeader) {
-      // chỉ listing của chính seller
       match.seller = toObjId(userId);
     } else {
-      // Admin / Leader có thể lọc thêm theo query
       if (seller) match.seller = toObjId(seller);
       if (designer) match.designer = toObjId(designer);
     }
@@ -173,6 +237,11 @@ const getTaskStatistics = async (req, res) => {
     return res.status(500).json({ error: err.message });
   }
 };
+
+// ===== Helper =====
+function escapeRegex(str) {
+  return String(str).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
 
 async function requestPSD(req, res) {
   try {
