@@ -20,20 +20,111 @@ function normalizePhone(raw = "") {
     return cleaned;
 }
 
-function pickUrl(ff, key) {
-    if (!ff) return "";
+/* -------------------- Key whitelist (theo spec Mango) -------------------- */
+const ALLOWED_PRINT_KEYS = new Set([
+    "front", "back", "right_sleeve", "left_sleeve", "neck_label", "right_wrist", "left_wrist",
+    "center_chest", "right_chest", "left_chest", "right_cuff", "left_cuff", "collar",
+    "left_slit", "right_slit", "sock_collar", "center_hat", "left_hat", "right_hat", "back_hat",
+]);
+
+// Alias nội bộ -> key Mango
+const FF_KEY_MAP = {
+    // chuẩn
+    front: "front",
+    back: "back",
+    right_sleeve: "right_sleeve",
+    left_sleeve: "left_sleeve",
+    neck_label: "neck_label",
+    right_wrist: "right_wrist",
+    left_wrist: "left_wrist",
+    center_chest: "center_chest",
+    right_chest: "right_chest",
+    left_chest: "left_chest",
+    right_cuff: "right_cuff",
+    left_cuff: "left_cuff",
+    collar: "collar",
+    left_slit: "left_slit",
+    right_slit: "right_slit",
+    sock_collar: "sock_collar",
+    center_hat: "center_hat",
+    left_hat: "left_hat",
+    right_hat: "right_hat",
+    back_hat: "back_hat",
+
+    // alias phổ biến
+    rightSleeve: "right_sleeve",
+    leftSleeve: "left_sleeve",
+    // key cũ trong hệ thống
+    right_upper_sleeves: "right_sleeve",
+    right_lower_sleeves: "right_sleeve",
+    left_upper_sleeves: "left_sleeve",
+    left_lower_sleeves: "left_sleeve",
+};
+
+function dedupeByKeyUrl(arr) {
+    const seen = new Set();
+    return arr.filter(({ key, url }) => {
+        const k = `${key}|${url}`;
+        if (seen.has(k)) return false;
+        seen.add(k);
+        return true;
+    });
+}
+
+/** Chuẩn hoá 1 cặp (key,url) về key hợp lệ Mango và lọc theo whitelist */
+function normalizePair(rawKey, url) {
+    if (!url) return null;
+    const mapped = FF_KEY_MAP[rawKey] || rawKey;
+    if (!ALLOWED_PRINT_KEYS.has(mapped)) return null;
+    return { key: mapped, url: String(url) };
+}
+
+/** Thu gom file từ fulfillment_file: hỗ trợ Map / Object / Array([{key,url}]) */
+function collectFromFulfillmentFile(ff) {
+    const out = [];
+
+    if (!ff) return out;
+
+    // Array dạng [{key,url}]
+    if (Array.isArray(ff)) {
+        ff.forEach(it => {
+            const k = it?.key; const u = it?.url;
+            const pair = normalizePair(k, u);
+            if (pair) out.push(pair);
+        });
+        return dedupeByKeyUrl(out);
+    }
+
+    // Map (Mongoose Map)
     if (ff instanceof Map) {
-        const v = ff.get(key);
-        return v ? String(v) : "";
+        ff.forEach((v, k) => {
+            const pair = normalizePair(k, v);
+            if (pair) out.push(pair);
+        });
+        return dedupeByKeyUrl(out);
     }
-    if (typeof ff === "object" && !Array.isArray(ff)) {
-        const v = ff[key];
-        return v ? String(v) : "";
+
+    // Plain object
+    if (typeof ff === "object") {
+        Object.keys(ff).forEach(k => {
+            const pair = normalizePair(k, ff[k]);
+            if (pair) out.push(pair);
+        });
+        return dedupeByKeyUrl(out);
     }
-    if (typeof ff === "string") {
-        return key === "front" ? ff : "";
-    }
-    return "";
+
+    return out;
+}
+
+/** Lấy print/preview đã có sẵn nếu upstream truyền đúng schema [{key,url}] */
+function collectFromArray(arr) {
+    if (!Array.isArray(arr)) return [];
+    const out = [];
+    arr.forEach(it => {
+        const pair = normalizePair(it?.key, it?.url);
+        if (pair) out.push(pair);
+    });
+    return dedupeByKeyUrl(out);
 }
 
 function mapShippingMethod(orderObj = {}) {
@@ -45,69 +136,46 @@ function mapShippingMethod(orderObj = {}) {
         "";
 
     const s = String(raw || "").toLowerCase().trim();
-    if (/^standard|economy|ground$/.test(s)) return "standard";
-    if (/^expedited|express|priority|2d|two/.test(s)) return "expedited";
-    if (/^overnight|next/.test(s)) return "overnight";
+    if (/^(standard|economy|ground)$/.test(s)) return "standard";
+    if (/^(expedited|express|priority|2d|two)/.test(s)) return "expedited";
+    if (/^(overnight|next)/.test(s)) return "overnight";
     return "standard";
 }
 
-
 function buildPreviewFiles(item = {}) {
-    const out = [];
+    // 1) nếu upstream có sẵn preview_files hợp lệ thì dùng luôn
+    const preProvided = collectFromArray(item.preview_files);
+    const out = [...preProvided];
+
+    // 2) thêm mock (front) nếu có
     const mock = item?.baseImage?.imageUrl || item?.mockup_url || "";
-    if (mock) out.push({ key: "front", url: String(mock) });
+    if (mock) out.unshift({ key: "front", url: String(mock) });
 
-    const ff = item.fulfillment_file || {};
-    const keys = [
-        "front",
-        "back",
-        "right",
-        "left",
-        "hood",
-        "bothsides",
-        "right_upper_sleeves",
-        "right_lower_sleeves",
-        "left_upper_sleeves",
-        "left_lower_sleeves",
-        "left_chest",
-        "right_chest",
-        "front_bottom_right",
-        "center_upper_back",
-        "across_chest",
-        "across_back",
-    ];
-    keys.forEach((k) => {
-        const u = pickUrl(ff, k);
-        if (u) out.push({ key: k, url: u });
-    });
-
-    return out;
+    // 3) merge từ fulfillment_file
+    const fromFF = collectFromFulfillmentFile(item.fulfillment_file);
+    return dedupeByKeyUrl(out.concat(fromFF));
 }
 
 function buildPrintFiles(item = {}) {
-    const out = [];
-    const ff = item.fulfillment_file || {};
-    const keys = ["front", "back", "right", "left", "hood", "bothsides"];
-    keys.forEach((k) => {
-        const u = pickUrl(ff, k);
-        if (u) out.push({ key: k, url: u });
-    });
-    if (out.length === 0) {
-        const mock = item?.baseImage?.imageUrl || item?.mockup_url || "";
-        if (mock) out.push({ key: "front", url: String(mock) });
-    }
-    return out;
+    // Ưu tiên: nếu upstream đã cung cấp print_files hợp lệ
+    const preProvided = collectFromArray(item.print_files);
+    if (preProvided.length) return preProvided;
+
+    // Sau đó: lấy từ fulfillment_file (Map/Object/Array)
+    const fromFF = collectFromFulfillmentFile(item.fulfillment_file);
+    if (fromFF.length) return fromFF;
+
+    // Fallback: để tránh 422
+    const mock = item?.baseImage?.imageUrl || item?.mockup_url || "";
+    if (mock) return [{ key: "front", url: String(mock) }];
+    return [];
 }
 
 function buildInserts(orderObj = {}) {
     const inserts = [];
     const packing = orderObj.packing_slip_url || orderObj.packingSlipUrl || "";
     if (packing) {
-        inserts.push({
-            name: "packing_slip",
-            size: "8.5x11",
-            url: String(packing),
-        });
+        inserts.push({ name: "packing_slip", size: "8.5x11", url: String(packing) });
     }
     return inserts;
 }
@@ -129,7 +197,6 @@ function buildMangoItem(item = {}, orderObj = {}) {
 function buildPayload(orderObj = {}) {
     const customer = orderObj.customer_infor || {};
     const items = Array.isArray(orderObj.items) ? orderObj.items : [];
-
     const { firstName, lastName } = splitName(customer.name || "");
 
     return {
@@ -148,10 +215,7 @@ function buildPayload(orderObj = {}) {
         zip: customer.zip_code || customer.zip || "",
         country: customer.country_full || customer.country || "United States",
         label_url:
-            orderObj.label_url ||
-            orderObj.labelUrl ||
-            orderObj.shipping_label_url ||
-            "",
+            orderObj.label_url || orderObj.labelUrl || orderObj.shipping_label_url || "",
         note: orderObj.note || orderObj.order_note || "",
         items: items.map((it) => buildMangoItem(it, orderObj)),
     };
@@ -188,14 +252,16 @@ function validatePayload(p) {
             if (!(Number(it.quantity) > 0)) {
                 errors.push(`items[${idx}].quantity must be > 0`);
             }
-            const hasPrint =
-                Array.isArray(it.print_files) && it.print_files.length > 0;
+            const hasPrint = Array.isArray(it.print_files) && it.print_files.length > 0;
             if (!hasPrint) {
                 errors.push(`items[${idx}].print_files is required (min 1)`);
             } else {
                 it.print_files.forEach((pf, j) => {
                     need(`items[${idx}].print_files[${j}].key`, pf?.key);
                     need(`items[${idx}].print_files[${j}].url`, pf?.url);
+                    if (pf?.key && !ALLOWED_PRINT_KEYS.has(pf.key)) {
+                        errors.push(`items[${idx}].print_files[${j}].key "${pf.key}" is not allowed`);
+                    }
                 });
             }
         });
@@ -255,12 +321,7 @@ function parseResponseForMangoTee(body) {
             return {
                 ok: true,
                 externalId: pickExternalId(body),
-                normalized: {
-                    status: statusNum,
-                    message: msg || "OK (soft-success)",
-                    data: bucket,
-                    soft: true,
-                },
+                normalized: { status: statusNum, message: msg || "OK (soft-success)", data: bucket, soft: true },
             };
         }
         const err = new Error(msg || "MangoTee: Error");
@@ -269,24 +330,12 @@ function parseResponseForMangoTee(body) {
         return { ok: false, error: err };
     }
 
-    if (
-        msgLower.includes("created successfully") ||
-        msgLower.includes("order created") ||
-        msgLower.includes("success")
-    ) {
-        return {
-            ok: true,
-            externalId: pickExternalId(body),
-            normalized: { message: msg || "OK", data: bucket, soft: true },
-        };
+    if (msgLower.includes("created successfully") || msgLower.includes("order created") || msgLower.includes("success")) {
+        return { ok: true, externalId: pickExternalId(body), normalized: { message: msg || "OK", data: bucket, soft: true } };
     }
 
     if (body && (body.id || body.order_id)) {
-        return {
-            ok: true,
-            externalId: body.order_id || body.id || null,
-            normalized: { data: body },
-        };
+        return { ok: true, externalId: body.order_id || body.id || null, normalized: { data: body } };
     }
 
     const err = new Error("MangoTee: Unknown/invalid response");
@@ -298,7 +347,7 @@ function parseResponseForMangoTee(body) {
 /* -------------------------- Sender ------------------------- */
 async function send(orderDoc) {
     const orderObj = orderDoc?.toObject
-        ? orderDoc.toObject({ getters: false, virtuals: false })
+        ? orderDoc.toObject({ getters: false, virtuals: false }) // Map có thể vẫn là Map nếu không flattenMaps
         : orderDoc;
 
     const payload = buildPayload(orderObj);
@@ -342,7 +391,6 @@ async function send(orderDoc) {
         const status = e?.response?.status;
         const msg = String(data?.message || e.message || "").toLowerCase();
 
-        // Non-2xx nhưng message cho thấy idempotent success
         const looksLikeSuccess =
             msg.includes("created successfully") ||
             msg.includes("order created") ||
@@ -353,27 +401,20 @@ async function send(orderDoc) {
         if (looksLikeSuccess && data) {
             const parsedSoft = parseResponseForMangoTee(data);
             if (parsedSoft.ok) {
-                return {
-                    data,
-                    externalId: parsedSoft.externalId,
-                    normalized: parsedSoft.normalized,
-                };
+                return { data, externalId: parsedSoft.externalId, normalized: parsedSoft.normalized };
             }
         }
 
-        // 422 — trả lỗi giàu thông tin để controller/FE thấy được
         if (status === 422 && data) {
-            const reason =
-                Array.isArray(data.errors)
-                    ? data.errors.map(x => (x?.message || x)).join("; ")
-                    : (data.message || "Unprocessable Entity");
+            const reason = Array.isArray(data.errors)
+                ? data.errors.map((x) => x?.message || x).join("; ")
+                : data.message || "Unprocessable Entity";
             const err = new Error(`MangoTee 422: ${reason}`);
             err.code = "MANGOTEE_422";
             err.vendorResponse = data;
             throw err;
         }
 
-        // ném lại lỗi mặc định
         throw e;
     }
 
@@ -386,16 +427,11 @@ async function send(orderDoc) {
     const parsed = parseResponseForMangoTee(body);
     if (!parsed.ok) throw parsed.error;
 
-    return {
-        data: body,
-        externalId: parsed.externalId,
-        normalized: parsed.normalized,
-    };
+    return { data: body, externalId: parsed.externalId, normalized: parsed.normalized };
 }
 
 module.exports = {
     key: "mangotee",
-    canHandle: (orderDoc) =>
-        String(orderDoc.vendor || "").toLowerCase() === "mangotee",
+    canHandle: (orderDoc) => String(orderDoc.vendor || "").toLowerCase() === "mangotee",
     send,
 };
