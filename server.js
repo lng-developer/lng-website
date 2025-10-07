@@ -173,13 +173,11 @@ io.on("connection", (socket) => {
           acks: new Set(),
           events: [],
         });
-      jobs
-        .get(jobId)
-        .events.push({
-          ts: Date.now(),
-          clientId: c?.clientId || c?.socketId,
-          ...st,
-        });
+      jobs.get(jobId).events.push({
+        ts: Date.now(),
+        clientId: c?.clientId || c?.socketId,
+        ...st,
+      });
     }
   });
 
@@ -194,6 +192,10 @@ app.get("/health", (_req, res) => res.send("ok"));
 
 app.get("/clients", (_req, res) => {
   res.json([...clients.values()]);
+});
+
+app.get("/jobs", (_req, res) => {
+  res.json([...jobs.values()]);
 });
 
 // /logs?type=STATUS&jobId=123&clientId=ABC&limit=200
