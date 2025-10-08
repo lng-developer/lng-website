@@ -69,7 +69,7 @@ app.use("/APO", APORoutes);
 app.use("/api/psd-task", PsdTaskRoutes);
 app.use("/api/idea-task", ideaTaskRoutes);
 app.use("/api/logs", realtimeLogRoutes); // GIỮ NGUYÊN
-
+app.use('/admin/session', require('./src/routes/admin.session.routes'));
 // Error Handler
 app.use((err, req, res, next) => {
   res.status(err.status || 500).json({
@@ -340,6 +340,138 @@ io.on("connection", (socket) => {
   });
 });
 
+// ===== Helpers build UI từ DB =====
+
+// Build snapshot phase gần nhất cho mỗi client từ DB
+async function buildPhaseSnapshotFromDB({
+  lookbackMs = 48 * 3600 * 1000,
+} = {}) {
+  const fromTs = Date.now() - lookbackMs;
+  const rows = await RealtimeLog.find({
+    type: "STATUS",
+    ts: { $gte: fromTs },
+  })
+    .sort({ ts: -1 })
+    .limit(10000)
+    .lean();
+
+  const out = {}; // id -> snapshot
+  for (const l of rows) {
+    const id = l.clientId || l.label || l.socketId || "unknown";
+    if (!out[id])
+      out[id] = {
+        id,
+        label: l.label || id,
+        phases: {},
+        lastTs: 0,
+        lastJobId: undefined,
+      };
+    if (!out[id].phases[l.phase]) {
+      out[id].phases[l.phase] = {
+        status: l.status,
+        ts: l.ts,
+        jobId: l.jobId,
+        ms: l.ms,
+        error: l.error,
+      };
+      if (l.ts > out[id].lastTs) {
+        out[id].lastTs = l.ts;
+        out[id].lastJobId = l.jobId;
+      }
+    }
+  }
+
+  for (const id of Object.keys(out)) {
+    const phases = out[id].phases;
+    const sts = Object.values(phases).map((p) => p.status);
+    let overall = "idle";
+    if (sts.includes("fail")) overall = "error";
+    else if (sts.includes("start")) overall = "running";
+    else if (sts.includes("success")) overall = "success";
+    out[id].overall = overall;
+  }
+  return out;
+}
+
+// Activity entry (câu chữ) cho UI
+function makeActivityEntry(l) {
+  const d = l.meta || {};
+  const label = d.label || d.clientId || "Unknown";
+  if (l.type === "RUN_NOW") {
+    return {
+      ts: l.ts,
+      type: "info",
+      text: "Bắt đầu import orders...",
+      meta: { jobId: l.jobId },
+    };
+  }
+  if (l.type === "STATUS") {
+    const phaseName =
+      l.phase === "import"
+        ? "Import"
+        : l.phase === "report"
+          ? "Import report"
+          : l.phase === "ads"
+            ? "Ads"
+            : l.phase;
+    if (l.status === "start")
+      return {
+        ts: l.ts,
+        type: "info",
+        text: `Đang xử lý ${label} (${phaseName})...`,
+        meta: { client: label, phase: l.phase, jobId: l.jobId },
+      };
+    if (l.status === "success") {
+      const extra = d.count ? ` ${d.count} orders` : "";
+      return {
+        ts: l.ts,
+        type: "success",
+        text: `${label}: ${phaseName} thành công${extra}`,
+        meta: { client: label, phase: l.phase, jobId: l.jobId },
+      };
+    }
+    if (l.status === "fail")
+      return {
+        ts: l.ts,
+        type: "error",
+        text: `${label}: Lỗi ở ${phaseName}${l.error ? ` — ${l.error}` : ""}`,
+        meta: { client: label, phase: l.phase, jobId: l.jobId },
+      };
+  }
+  if (l.type === "CONNECT")
+    return {
+      ts: l.ts,
+      type: "info",
+      text: `Client ${l.socketId} đã kết nối`,
+      meta: {},
+    };
+  if (l.type === "DISCONNECT")
+    return {
+      ts: l.ts,
+      type: "info",
+      text: `Client ${l.socketId} ngắt kết nối`,
+      meta: {},
+    };
+  return null;
+}
+
+async function buildActivityLogsFromDB({ since, limit = 200 }) {
+  const q = {};
+  if (since) q.ts = { $gt: Number(since) };
+
+  const rows = await RealtimeLog.find(q)
+    .sort({ ts: 1 }) // chronological để append vào UI
+    .limit(Math.min(Number(limit) || 200, 2000))
+    .lean();
+
+  const out = [];
+  for (const l of rows) {
+    const item = makeActivityEntry(l);
+    if (item) out.push(item);
+  }
+  return out;
+}
+
 // ===== REST: health / clients / jobs / logs =====
 app.get("/health", (_req, res) => res.send("ok"));
 
@@ -409,8 +541,8 @@ app.get("/logs", async (req, res) => {
       const nextSince = entries.length
         ? entries[entries.length - 1].ts
         : since
-        ? Number(since)
-        : Date.now();
+          ? Number(since)
+          : Date.now();
       return res.json({ since: Number(since) || 0, nextSince, entries });
     }
 
@@ -446,7 +578,7 @@ app.get("/logs/stream", async (req, res) => {
   const hb = setInterval(() => {
     try {
       res.write(`: ping ${Date.now()}\n\n`);
-    } catch {}
+    } catch { }
   }, 15000);
 
   const client = { res, hb };
@@ -456,7 +588,7 @@ app.get("/logs/stream", async (req, res) => {
     sseClients.delete(client);
     try {
       res.end();
-    } catch {}
+    } catch { }
   });
 });
 
