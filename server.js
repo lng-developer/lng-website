@@ -31,8 +31,8 @@ const {
   realtimeLogRoutes, // GIỮ NGUYÊN
 } = require("./src/routes");
 
-// ====== NEW: Model lưu log ======
-const RealtimeLog = require("./src/models/RealtimeLog");
+const db = require("./src/models");
+const RealtimeLog = db.RealtimeLog;
 
 const app = express();
 app.set("trust proxy", true);
