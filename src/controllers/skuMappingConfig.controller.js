@@ -48,9 +48,16 @@ exports.getActiveConfigs = async (req, res) => {
         const now = new Date();
         const items = await SkuMappingConfig.find({
             is_active: true,
-            $or: [{ valid_from: null }, { valid_from: { $lte: now } }],
-            $or: [{ valid_to: null }, { valid_to: { $gte: now } }],
-        }).sort({ priority: 1, updatedAt: -1 }).lean();
+            $and: [
+                { $or: [{ valid_from: null }, { valid_from: { $lte: now } }] },
+                { $or: [{ valid_to: null }, { valid_to: { $gte: now } }] },
+            ],
+        })
+            .sort({ priority: 1, updatedAt: -1 })
+            .lean();
+
         res.json(items);
-    } catch (e) { res.status(500).json({ message: 'Get active failed', error: e.message }); }
+    } catch (e) {
+        res.status(500).json({ message: 'Get active failed', error: e.message });
+    }
 };
