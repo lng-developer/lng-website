@@ -31,8 +31,8 @@ const {
   realtimeLogRoutes, // GIỮ NGUYÊN
 } = require("./src/routes");
 
-const db = require("./src/models");
-const RealtimeLog = db.RealtimeLog;
+// ====== NEW: Model lưu log ======
+const RealtimeLog = require("./src/models/RealtimeLog");
 
 const app = express();
 app.set("trust proxy", true);
@@ -265,7 +265,7 @@ function makeActivityEntry(l) {
     return {
       ts: l.ts,
       type: "info",
-      text: "Start import orders...",
+      text: "Bắt đầu import orders...",
       meta: { jobId: l.jobId },
     };
   }
@@ -282,7 +282,7 @@ function makeActivityEntry(l) {
       return {
         ts: l.ts,
         type: "info",
-        text: `Processing ${label} (${phaseName})...`,
+        text: `Đang xử lý ${label} (${phaseName})...`,
         meta: { client: label, phase: l.phase, jobId: l.jobId },
       };
     if (l.status === "success") {
@@ -290,7 +290,7 @@ function makeActivityEntry(l) {
       return {
         ts: l.ts,
         type: "success",
-        text: `${label}: ${phaseName} success${extra}`,
+        text: `${label}: ${phaseName} thành công${extra}`,
         meta: { client: label, phase: l.phase, jobId: l.jobId },
       };
     }
@@ -298,9 +298,7 @@ function makeActivityEntry(l) {
       return {
         ts: l.ts,
         type: "error",
-        text: `${label}: Error in ${phaseName}${
-          l.error ? ` — ${l.error}` : ""
-        }`,
+        text: `${label}: Lỗi ở ${phaseName}${l.error ? ` — ${l.error}` : ""}`,
         meta: { client: label, phase: l.phase, jobId: l.jobId },
       };
   }
@@ -308,14 +306,14 @@ function makeActivityEntry(l) {
     return {
       ts: l.ts,
       type: "info",
-      text: `Client ${l.socketId} connected`,
+      text: `Client ${l.socketId} đã kết nối`,
       meta: {},
     };
   if (l.type === "DISCONNECT")
     return {
       ts: l.ts,
       type: "info",
-      text: `Client ${l.socketId} disconnect`,
+      text: `Client ${l.socketId} ngắt kết nối`,
       meta: {},
     };
   return null;
@@ -339,10 +337,10 @@ async function buildActivityLogsFromDB({ since, limit = 200 }) {
 }
 
 // ===== REST: health / clients / jobs / logs =====
-app.get("/api/health", (_req, res) => res.send("ok"));
+app.get("/health", (_req, res) => res.send("ok"));
 
 // /clients -> online + kèm statusSummary từ DB
-app.get("/api/clients", async (_req, res) => {
+app.get("/clients", async (_req, res) => {
   try {
     const snapshot = await buildPhaseSnapshotFromDB();
     const now = Date.now();
@@ -367,7 +365,7 @@ app.get("/api/clients", async (_req, res) => {
 });
 
 // (tuỳ chọn) liệt kê job gần đây từ DB
-app.get("/api/jobs", async (_req, res) => {
+app.get("/jobs", async (_req, res) => {
   try {
     const last = Date.now() - 7 * 24 * 3600 * 1000;
     const rows = await RealtimeLog.aggregate([
@@ -389,7 +387,7 @@ app.get("/api/jobs", async (_req, res) => {
 });
 
 // /logs: raw (đọc DB) | view=activity (+ since, limit)
-app.get("/api/logs", async (req, res) => {
+app.get("/logs", async (req, res) => {
   try {
     const {
       type,
@@ -432,7 +430,7 @@ app.get("/api/logs", async (req, res) => {
 });
 
 // SSE stream (realtime log)
-app.get("/api/logs/stream", (req, res) => {
+app.get("/logs/stream", (req, res) => {
   res.setHeader("Content-Type", "text/event-stream");
   res.setHeader("Cache-Control", "no-cache");
   res.setHeader("Connection", "keep-alive");
@@ -454,8 +452,22 @@ app.get("/api/logs/stream", (req, res) => {
   });
 });
 
+// ===== Legacy: phát job test (giữ nguyên) =====
+app.post("/run-now", (req, res) => {
+  const jobId = String(Date.now());
+  const reason = req.body?.reason || "manual";
+  const payload = { jobId, reason };
+
+  io.emit("RUN_JOB", payload);
+  io.emit("RUN_NOW", { type: "RUN_NOW", ...payload });
+  addLog("RUN_JOB", payload);
+  addLog("RUN_NOW", payload);
+
+  res.json({ ok: true, ...payload });
+});
+
 // ===== Admin APIs để backend điều khiển extension =====
-app.post("/api/admin/schedule", (req, res) => {
+app.post("/admin/schedule", (req, res) => {
   const { enabled = true, intervalMin, intervalMs } = req.body || {};
   const payload = { type: "SYNC_CONFIG", enabled: !!enabled };
   if (typeof intervalMin === "number")
@@ -467,7 +479,7 @@ app.post("/api/admin/schedule", (req, res) => {
   res.json({ ok: true, payload });
 });
 
-app.post("/api/admin/run-now", (req, res) => {
+app.post("/admin/run-now", (req, res) => {
   const jobId = String(Date.now());
   const reason = req.body?.reason || "manual";
 
@@ -479,7 +491,7 @@ app.post("/api/admin/run-now", (req, res) => {
 });
 
 // Tóm tắt 1 job: đọc trực tiếp từ DB (không dùng RAM)
-app.get("/api/admin/job/:jobId", async (req, res) => {
+app.get("/admin/job/:jobId", async (req, res) => {
   try {
     const jobId = req.params.jobId;
 
