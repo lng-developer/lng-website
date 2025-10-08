@@ -1,82 +1,76 @@
 // src/utils/sku-migrate.util.js
 
-// ✅ Helper: Map/PlainObject safe -> Plain object
 function mapLikeToPlain(obj) {
     if (!obj) return {};
-    if (typeof obj.toObject === 'function') return obj.toObject(); // Mongoose Map on doc
-    if (obj instanceof Map) return Object.fromEntries(obj);        // Native Map
-    if (typeof obj === 'object' && !Array.isArray(obj)) return obj; // Plain
+    if (typeof obj.toObject === 'function') return obj.toObject();
+    if (obj instanceof Map) return Object.fromEntries(obj);
+    if (typeof obj === 'object' && !Array.isArray(obj)) return obj;
     return {};
 }
 
-// ✅ Parse + transform
-function applyRulesToSku(sku, rules) {
-    if (!sku || typeof sku !== 'string') {
-        return { ok: false, changed: false, next: sku };
-    }
-
-    const raw = sku.trim();
-    const parts = raw.split('-');
-    // dạng linh hoạt: EMP - ...middle... - DATE(DDMMYY|DDMM) - SEQ
-    if (parts.length < 4) return { ok: false, changed: false, next: sku };
-
-    let emp = parts[0];
-    let seq = parts[parts.length - 1];
-    let date = parts[parts.length - 2];
-    let middle = parts.slice(1, -2);
-
-    // DATE phải là 6 số (DDMMYY) hoặc 4 số (DDMM)
-    if (!/^\d{6}$/.test(date) && !/^\d{4}$/.test(date)) {
-        return { ok: false, changed: false, next: sku };
-    }
-
-    // employeeMap: case-insensitive (key chuẩn hoá UPPER)
-    const empKey = emp.toUpperCase();
-    const empMap = rules?.employeeMap ? mapLikeToPlain(rules.employeeMap) : {};
-    if (empMap[empKey]) emp = empMap[empKey];
-
-    // upperProduct (default true)
-    const shouldUpper = rules?.upperProduct !== false;
-    if (shouldUpper) {
-        middle = middle.map(t => String(t).toUpperCase());
-    }
-
-    // productMap
-    const prodMap = rules?.productMap ? mapLikeToPlain(rules.productMap) : {};
-    if (prodMap && typeof prodMap === 'object') {
-        middle = middle.map(t => prodMap[t] || t);
-    }
-
-    // useToday -> thay date = hôm nay (DDMMYY)
-    if (rules?.useToday) {
-        const d = new Date();
-        const dd = String(d.getDate()).padStart(2, '0');
-        const mm = String(d.getMonth() + 1).padStart(2, '0');
-        const yy = String(d.getFullYear()).slice(-2);
-        date = `${dd}${mm}${yy}`;
-    }
-
-    // KHÔNG pad seq (theo yêu cầu mới)
-    const next = [emp, ...middle, date, seq].join('-');
-    return { ok: true, changed: next !== sku, next };
-}
-
-// ✅ Build rules từ config (dùng nội bộ & export)
 function buildRulesFromConfig(cfg) {
     return {
         employeeMap: mapLikeToPlain(cfg?.employeeMap),
         productMap: mapLikeToPlain(cfg?.productMap),
         upperProduct: cfg?.options?.upperProduct !== false,
-        useToday: !!cfg?.options?.useToday,
-        // Không còn minSeqDigits (đã bỏ pad)
+        // ❌ KHÔNG còn useToday
+        // Cho phép SKU không có day token vẫn chạy (mặc định true để "xóa option chèn ngày")
+        dateOptional: cfg?.options?.dateOptional !== false,
         restrictEmployee: Array.isArray(cfg?.options?.restrictEmployee)
             ? cfg.options.restrictEmployee
             : [],
     };
 }
 
-module.exports = {
-    mapLikeToPlain,
-    applyRulesToSku,
-    buildRulesFromConfig,
-};
+function applyRulesToSku(sku, rules) {
+    if (!sku || typeof sku !== 'string') {
+        return { ok: false, changed: false, next: sku, reason: 'empty' };
+    }
+
+    const raw = sku.trim();
+    const parts = raw.split('-');
+    if (parts.length < 3) {
+        return { ok: false, changed: false, next: sku, reason: 'too_few_tokens' };
+    }
+
+    let emp = parts[0];
+    const seq = parts[parts.length - 1];
+
+    // phát hiện date token (áp chót)
+    const dateCandidate = parts[parts.length - 2];
+    const hasDate = /^\d{6}$/.test(dateCandidate) || /^\d{4}$/.test(dateCandidate);
+
+    // middle tokens
+    let middle = hasDate ? parts.slice(1, -2) : parts.slice(1, -1);
+
+    // restrict employee (nếu cấu hình)
+    const restr = rules?.restrictEmployee || [];
+    if (restr.length && !restr.includes(emp)) {
+        return { ok: false, changed: false, next: sku, reason: 'emp_restricted' };
+    }
+
+    // employee map (key case-insensitive)
+    const empMap = mapLikeToPlain(rules?.employeeMap);
+    const mappedEmp = empMap[emp.toUpperCase()];
+    if (mappedEmp) emp = mappedEmp;
+
+    // upper product
+    if (rules?.upperProduct !== false) {
+        middle = middle.map(t => String(t).toUpperCase());
+    }
+
+    // product map
+    const prodMap = mapLikeToPlain(rules?.productMap);
+    if (prodMap && typeof prodMap === 'object') {
+        middle = middle.map(t => prodMap[t] || t);
+    }
+
+    // ❌ KHÔNG chèn ngày trong bất kỳ trường hợp nào
+    const next = hasDate
+        ? [emp, ...middle, dateCandidate, seq].join('-') // có day → giữ nguyên
+        : [emp, ...middle, seq].join('-');               // không có day → giữ nguyên format
+
+    return { ok: true, changed: next !== sku, next };
+}
+
+module.exports = { mapLikeToPlain, buildRulesFromConfig, applyRulesToSku };
