@@ -28,10 +28,14 @@ const {
   APORoutes,
   PsdTaskRoutes,
   ideaTaskRoutes,
+  realtimeLogRoutes, // GIỮ NGUYÊN
 } = require("./src/routes");
 
+const db = require("./src/models");
+const RealtimeLog = db.RealtimeLog;
+
 const app = express();
-app.set("trust proxy", true); // tốt cho IP sau Nginx
+app.set("trust proxy", true);
 app.use(express.json());
 app.use(morgan("dev"));
 app.use(cors());
@@ -64,6 +68,7 @@ app.use("/api/sku-mapping", skuMappingRoutes);
 app.use("/APO", APORoutes);
 app.use("/api/psd-task", PsdTaskRoutes);
 app.use("/api/idea-task", ideaTaskRoutes);
+app.use("/api/logs", realtimeLogRoutes); // GIỮ NGUYÊN
 
 // Error Handler
 app.use((err, req, res, next) => {
@@ -83,23 +88,62 @@ const io = new Server(httpServer, {
   transports: ["websocket", "polling"],
 });
 
-// Sổ client + log + job (in-memory)
-const clients = new Map(); // socket.id -> { clientId, label, version, ua, ip, connectedAt, lastSeen }
-const logs = []; // push { ts, type, data }
-const jobs = new Map(); // jobId -> { createdAt, reason, acks:Set, events:[] }
-const MAX_LOGS = Number(process.env.MAX_RT_LOGS || 5000);
+// ========== STATE NHẸ ==========
+const clients = new Map(); // chỉ giữ thông tin "ai đang online"
 
-function addLog(type, data = {}) {
-  logs.push({ ts: Date.now(), type, data });
-  if (logs.length > MAX_LOGS) logs.splice(0, logs.length - MAX_LOGS);
-  // log nhẹ cho console
+// --- SSE subscribers (realtime stream) ---
+const sseClients = new Set(); // res objects
+function pushSSE(evt) {
+  if (!sseClients.size) return;
+  const line = `data: ${JSON.stringify(evt)}\n\n`;
+  for (const res of sseClients) {
+    try {
+      res.write(line);
+    } catch {
+      sseClients.delete(res);
+    }
+  }
+}
+
+// ====== Ghi log vào DB + đẩy SSE ======
+async function addLog(type, data = {}) {
+  const ts = Date.now();
+  const ttlDays = Number(process.env.LOG_TTL_DAYS || 0);
+  const expireAt = ttlDays > 0 ? new Date(ts + ttlDays * 86400000) : undefined;
+
+  const doc = {
+    ts,
+    day: new Date(ts).toISOString().slice(0, 10),
+    type,
+    clientId: data.clientId || null,
+    label: data.label || null,
+    socketId: data.socketId || null,
+    jobId: data.jobId || data.payload?.jobId || null,
+    phase: data.phase || null,
+    status: data.status || null,
+    ms: data.ms || null,
+    error: data.error || null,
+    meta: data,
+    ...(expireAt ? { expireAt } : {}),
+  };
+
+  try {
+    await RealtimeLog.create(doc);
+  } catch (e) {
+    console.warn("[LOG-PERSIST] error:", e.message);
+  }
+
+  // in console gọn
   const slim = { ...data };
   if (slim.text && String(slim.text).length > 120)
     slim.text = String(slim.text).slice(0, 120) + "…";
   console.log(`[${type}]`, slim);
+
+  // Đẩy realtime nếu có client SSE
+  pushSSE({ ts, type, data });
 }
 
-// Socket events
+// ===== Socket events =====
 io.on("connection", (socket) => {
   const ip =
     socket.handshake.headers["x-forwarded-for"] || socket.handshake.address;
@@ -130,30 +174,19 @@ io.on("connection", (socket) => {
     });
   });
 
+  // Extension báo đã nhận job
   socket.on("ACK", (ack) => {
     const c = clients.get(socket.id);
     if (c) c.lastSeen = Date.now();
-
-    const jobId = ack?.jobId;
-    if (jobId) {
-      if (!jobs.has(jobId))
-        jobs.set(jobId, {
-          createdAt: Date.now(),
-          reason: "unknown",
-          acks: new Set(),
-          events: [],
-        });
-      jobs.get(jobId).acks.add(c?.clientId || c?.socketId);
-    }
     addLog("ACK", {
       socketId: socket.id,
       clientId: c?.clientId,
       label: c?.label,
-      jobId,
+      jobId: ack?.jobId,
     });
   });
 
-  // STATUS: { jobId, phase:'import'|'report'|'ads'|'config', status:'start'|'success'|'fail', httpStatus?, ms?, error? }
+  // STATUS: { jobId, phase, status, ms?, error? }
   socket.on("STATUS", (st) => {
     const c = clients.get(socket.id);
     if (c) c.lastSeen = Date.now();
@@ -163,22 +196,6 @@ io.on("connection", (socket) => {
       label: c?.label,
       ...st,
     });
-
-    const jobId = st?.jobId;
-    if (jobId) {
-      if (!jobs.has(jobId))
-        jobs.set(jobId, {
-          createdAt: Date.now(),
-          reason: "unknown",
-          acks: new Set(),
-          events: [],
-        });
-      jobs.get(jobId).events.push({
-        ts: Date.now(),
-        clientId: c?.clientId || c?.socketId,
-        ...st,
-      });
-    }
   });
 
   socket.on("disconnect", (reason) => {
@@ -187,51 +204,264 @@ io.on("connection", (socket) => {
   });
 });
 
-// ===== REST: health / clients / logs =====
+// ===== Helpers build UI từ DB =====
+
+// Build snapshot phase gần nhất cho mỗi client từ DB
+async function buildPhaseSnapshotFromDB({
+  lookbackMs = 48 * 3600 * 1000,
+} = {}) {
+  const fromTs = Date.now() - lookbackMs;
+  const rows = await RealtimeLog.find({
+    type: "STATUS",
+    ts: { $gte: fromTs },
+  })
+    .sort({ ts: -1 })
+    .limit(10000)
+    .lean();
+
+  const out = {}; // id -> snapshot
+  for (const l of rows) {
+    const id = l.clientId || l.label || l.socketId || "unknown";
+    if (!out[id])
+      out[id] = {
+        id,
+        label: l.label || id,
+        phases: {},
+        lastTs: 0,
+        lastJobId: undefined,
+      };
+    if (!out[id].phases[l.phase]) {
+      out[id].phases[l.phase] = {
+        status: l.status,
+        ts: l.ts,
+        jobId: l.jobId,
+        ms: l.ms,
+        error: l.error,
+      };
+      if (l.ts > out[id].lastTs) {
+        out[id].lastTs = l.ts;
+        out[id].lastJobId = l.jobId;
+      }
+    }
+  }
+
+  for (const id of Object.keys(out)) {
+    const phases = out[id].phases;
+    const sts = Object.values(phases).map((p) => p.status);
+    let overall = "idle";
+    if (sts.includes("fail")) overall = "error";
+    else if (sts.includes("start")) overall = "running";
+    else if (sts.includes("success")) overall = "success";
+    out[id].overall = overall;
+  }
+  return out;
+}
+
+// Activity entry (câu chữ) cho UI
+function makeActivityEntry(l) {
+  const d = l.meta || {};
+  const label = d.label || d.clientId || "Unknown";
+  if (l.type === "RUN_NOW") {
+    return {
+      ts: l.ts,
+      type: "info",
+      text: "Start import orders...",
+      meta: { jobId: l.jobId },
+    };
+  }
+  if (l.type === "STATUS") {
+    const phaseName =
+      l.phase === "import"
+        ? "Import"
+        : l.phase === "report"
+        ? "Import report"
+        : l.phase === "ads"
+        ? "Ads"
+        : l.phase;
+    if (l.status === "start")
+      return {
+        ts: l.ts,
+        type: "info",
+        text: `Processing ${label} (${phaseName})...`,
+        meta: { client: label, phase: l.phase, jobId: l.jobId },
+      };
+    if (l.status === "success") {
+      const extra = d.count ? ` ${d.count} orders` : "";
+      return {
+        ts: l.ts,
+        type: "success",
+        text: `${label}: ${phaseName} success${extra}`,
+        meta: { client: label, phase: l.phase, jobId: l.jobId },
+      };
+    }
+    if (l.status === "fail")
+      return {
+        ts: l.ts,
+        type: "error",
+        text: `${label}: Error in ${phaseName}${
+          l.error ? ` — ${l.error}` : ""
+        }`,
+        meta: { client: label, phase: l.phase, jobId: l.jobId },
+      };
+  }
+  if (l.type === "CONNECT")
+    return {
+      ts: l.ts,
+      type: "info",
+      text: `Client ${l.socketId} connected`,
+      meta: {},
+    };
+  if (l.type === "DISCONNECT")
+    return {
+      ts: l.ts,
+      type: "info",
+      text: `Client ${l.socketId} disconnect`,
+      meta: {},
+    };
+  return null;
+}
+
+async function buildActivityLogsFromDB({ since, limit = 200 }) {
+  const q = {};
+  if (since) q.ts = { $gt: Number(since) };
+
+  const rows = await RealtimeLog.find(q)
+    .sort({ ts: 1 }) // chronological để append vào UI
+    .limit(Math.min(Number(limit) || 200, 2000))
+    .lean();
+
+  const out = [];
+  for (const l of rows) {
+    const item = makeActivityEntry(l);
+    if (item) out.push(item);
+  }
+  return out;
+}
+
+// ===== REST: health / clients / jobs / logs =====
 app.get("/health", (_req, res) => res.send("ok"));
 
-app.get("/clients", (_req, res) => {
-  res.json([...clients.values()]);
+// /clients -> online + kèm statusSummary từ DB
+app.get("/clients", async (_req, res) => {
+  try {
+    const snapshot = await buildPhaseSnapshotFromDB();
+    const now = Date.now();
+    const actives = [...clients.values()].map((c) => {
+      const sum = snapshot[c.clientId || c.label || c.socketId] || {};
+      return {
+        ...c,
+        statusSummary: {
+          overall: sum.overall || "idle",
+          lastJobId: sum.lastJobId,
+          lastTs: sum.lastTs || 0,
+          phases: sum.phases || {},
+          onlineForSec: Math.round((now - c.connectedAt) / 1000),
+          idleForSec: Math.round((now - (c.lastSeen || c.connectedAt)) / 1000),
+        },
+      };
+    });
+    res.json(actives);
+  } catch (e) {
+    res.status(500).json({ ok: false, message: e.message });
+  }
 });
 
-app.get("/jobs", (_req, res) => {
-  res.json([...jobs.values()]);
+// (tuỳ chọn) liệt kê job gần đây từ DB
+app.get("/jobs", async (_req, res) => {
+  try {
+    const last = Date.now() - 7 * 24 * 3600 * 1000;
+    const rows = await RealtimeLog.aggregate([
+      { $match: { jobId: { $ne: null }, ts: { $gte: last } } },
+      {
+        $group: {
+          _id: "$jobId",
+          first: { $min: "$ts" },
+          last: { $max: "$ts" },
+        },
+      },
+      { $sort: { last: -1 } },
+      { $limit: 500 },
+    ]);
+    res.json(rows);
+  } catch (e) {
+    res.status(500).json({ ok: false, message: e.message });
+  }
 });
 
-// /logs?type=STATUS&jobId=123&clientId=ABC&limit=200
-app.get("/logs", (req, res) => {
-  const { type, jobId, clientId } = req.query;
-  let out = logs;
-  if (type) out = out.filter((l) => l.type === type);
-  if (jobId)
-    out = out.filter(
-      (l) => l.data?.jobId === jobId || l.data?.payload?.jobId === jobId
-    );
-  if (clientId)
-    out = out.filter(
-      (l) => l.data?.clientId === clientId || l.data?.label === clientId
-    );
-  const n = Math.min(parseInt(req.query.limit || "200", 10), 1000);
-  res.json(out.slice(-n));
+// /logs: raw (đọc DB) | view=activity (+ since, limit)
+app.get("/logs", async (req, res) => {
+  try {
+    const {
+      type,
+      jobId,
+      clientId,
+      view,
+      since,
+      limit,
+      sort = "asc",
+    } = req.query;
+
+    if (view === "activity") {
+      const entries = await buildActivityLogsFromDB({
+        since: since ? Number(since) : undefined,
+        limit: limit ? Number(limit) : 200,
+      });
+      const nextSince = entries.length
+        ? entries[entries.length - 1].ts
+        : since
+        ? Number(since)
+        : Date.now();
+      return res.json({ since: Number(since) || 0, nextSince, entries });
+    }
+
+    // RAW từ DB
+    const q = {};
+    if (type) q.type = type;
+    if (jobId) q.jobId = jobId;
+    if (clientId) q.$or = [{ clientId }, { label: clientId }];
+
+    const rows = await RealtimeLog.find(q)
+      .sort({ ts: sort === "desc" ? -1 : 1 })
+      .limit(Math.min(Number(limit) || 200, 5000))
+      .lean();
+
+    res.json(rows);
+  } catch (e) {
+    res.status(500).json({ ok: false, message: e.message });
+  }
+});
+
+// SSE stream (realtime log)
+app.get("/logs/stream", (req, res) => {
+  res.setHeader("Content-Type", "text/event-stream");
+  res.setHeader("Cache-Control", "no-cache");
+  res.setHeader("Connection", "keep-alive");
+  res.flushHeaders?.();
+
+  // Bootstrap: gửi 50 dòng activity gần nhất từ DB
+  buildActivityLogsFromDB({ limit: 50 }).then((first) => {
+    try {
+      res.write(`data: ${JSON.stringify({ bootstrap: first })}\n\n`);
+    } catch {}
+  });
+
+  sseClients.add(res);
+  req.on("close", () => {
+    sseClients.delete(res);
+    try {
+      res.end();
+    } catch {}
+  });
 });
 
 // ===== Legacy: phát job test (giữ nguyên) =====
-// Phát "RUN_JOB" + đồng thời phát "RUN_NOW" kèm jobId để client mới chạy luôn
 app.post("/run-now", (req, res) => {
   const jobId = String(Date.now());
   const reason = req.body?.reason || "manual";
   const payload = { jobId, reason };
 
-  if (!jobs.has(jobId))
-    jobs.set(jobId, {
-      createdAt: Date.now(),
-      reason,
-      acks: new Set(),
-      events: [],
-    });
-
-  io.emit("RUN_JOB", payload); // client cũ (ack/log)
-  io.emit("RUN_NOW", { type: "RUN_NOW", ...payload }); // client mới (thực thi 3 bước)
+  io.emit("RUN_JOB", payload);
+  io.emit("RUN_NOW", { type: "RUN_NOW", ...payload });
   addLog("RUN_JOB", payload);
   addLog("RUN_NOW", payload);
 
@@ -239,8 +469,6 @@ app.post("/run-now", (req, res) => {
 });
 
 // ===== Admin APIs để backend điều khiển extension =====
-
-// Đặt lịch auto (bật/tắt + chu kỳ phút/ms)
 app.post("/admin/schedule", (req, res) => {
   const { enabled = true, intervalMin, intervalMs } = req.body || {};
   const payload = { type: "SYNC_CONFIG", enabled: !!enabled };
@@ -253,16 +481,9 @@ app.post("/admin/schedule", (req, res) => {
   res.json({ ok: true, payload });
 });
 
-// Chạy ngay 3 bước và theo dõi bằng jobId
 app.post("/admin/run-now", (req, res) => {
   const jobId = String(Date.now());
   const reason = req.body?.reason || "manual";
-  jobs.set(jobId, {
-    createdAt: Date.now(),
-    reason,
-    acks: new Set(),
-    events: [],
-  });
 
   const payload = { type: "RUN_NOW", jobId, reason };
   io.emit("RUN_NOW", payload);
@@ -271,44 +492,64 @@ app.post("/admin/run-now", (req, res) => {
   res.json({ ok: true, jobId, reason });
 });
 
-// Tóm tắt 1 job: ai ACK, phase success/fail theo từng client
-app.get("/admin/job/:jobId", (req, res) => {
-  const jobId = req.params.jobId;
-  const j = jobs.get(jobId);
-  if (!j) return res.status(404).json({ ok: false, message: "job not found" });
+// Tóm tắt 1 job: đọc trực tiếp từ DB (không dùng RAM)
+app.get("/admin/job/:jobId", async (req, res) => {
+  try {
+    const jobId = req.params.jobId;
 
-  const phases = ["import", "report", "ads", "config"];
-  const summary = {
-    jobId,
-    createdAt: j.createdAt,
-    reason: j.reason,
-    ackCount: j.acks.size,
-    acks: [...j.acks],
-  };
+    const events = await RealtimeLog.find({ jobId })
+      .sort({ ts: 1 })
+      .limit(5000)
+      .lean();
 
-  const perClient = {}; // clientId -> { import:'success'|'fail'|'start'|undefined, ... }
-  for (const ev of j.events) {
-    const cid = ev.clientId || "unknown";
-    if (!perClient[cid]) perClient[cid] = {};
-    perClient[cid][ev.phase] = ev.status;
-  }
+    if (!events.length) {
+      return res.status(404).json({ ok: false, message: "job not found" });
+    }
 
-  const counts = {};
-  for (const p of phases) {
-    counts[p] = { success: 0, fail: 0 };
-    Object.values(perClient).forEach((pc) => {
-      if (pc[p] === "success") counts[p].success++;
-      if (pc[p] === "fail") counts[p].fail++;
+    // ACK count
+    const ackSet = new Set(
+      events
+        .filter((e) => e.type === "ACK")
+        .map((e) => e.clientId || e.label || e.socketId)
+    );
+
+    // perClient & counts
+    const phases = ["import", "report", "ads", "config"];
+    const perClient = {};
+    for (const ev of events) {
+      if (ev.type !== "STATUS") continue;
+      const cid = ev.clientId || ev.label || "unknown";
+      if (!perClient[cid]) perClient[cid] = {};
+      perClient[cid][ev.phase] = ev.status;
+    }
+    const counts = {};
+    for (const p of phases) {
+      counts[p] = { success: 0, fail: 0 };
+      Object.values(perClient).forEach((pc) => {
+        if (pc[p] === "success") counts[p].success++;
+        if (pc[p] === "fail") counts[p].fail++;
+      });
+    }
+
+    const summary = {
+      jobId,
+      createdAt: events[0].ts,
+      reason:
+        events.find((e) => e.type === "RUN_NOW")?.meta?.reason || "unknown",
+      ackCount: ackSet.size,
+      acks: [...ackSet],
+    };
+
+    res.json({
+      ok: true,
+      summary,
+      counts,
+      perClient,
+      events: events.slice(-200),
     });
+  } catch (e) {
+    res.status(500).json({ ok: false, message: e.message });
   }
-
-  res.json({
-    ok: true,
-    summary,
-    counts,
-    perClient,
-    events: j.events.slice(-200),
-  });
 });
 
 // ===== Run Server =====

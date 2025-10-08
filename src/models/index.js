@@ -18,7 +18,8 @@ const Ads = require("./ads.model");
 const SkuMappingConfig = require("./skuMappingConfig.model");
 const SkuMappingEntry = require("./skuMappingEntry.model");
 const PsdTask = require("./psdTask.model");
-const IdeaTask = require('./ideaTask.model')
+const IdeaTask = require("./ideaTask.model");
+const RealtimeLog = require("./realtimeLog.model");
 // Cau hinh mongoose dang global
 mongoose.Promise = global.Promise;
 // Dinh nghia doi tuong DB
@@ -45,6 +46,7 @@ db.SkuMappingConfig = SkuMappingConfig;
 db.SkuMappingEntry = SkuMappingEntry;
 db.PsdTask = PsdTask;
 db.IdeaTask = IdeaTask;
+db.RealtimeLog = RealtimeLog;
 db.connectDB = async () => {
   await mongoose
     .connect(process.env.MONGO_URI, {
