@@ -64,19 +64,13 @@ const getTasks = async (req, res) => {
       const listingIds = listings.map((l) => l._id);
 
       // 2) Ghép điều kiện vào filter:
-      // - Nếu PsdTask có trường asin trực tiếp: filter theo asin
-      // - Và/hoặc theo reference listing
-      // Dùng $or để bao phủ cả hai schema khả dĩ
       filter.$or = [
         { listing: { $in: listingIds } },
-        { asin: { $in: asinRegexes } }, // chỉ hiệu lực nếu task có field asin
+        { asin: { $in: asinRegexes } },
       ];
 
-      // Nếu không tìm thấy listing và bạn không có field asin trong task,
-      // thì $or vẫn an toàn (nhưng sẽ không match gì). Có thể tối ưu trả rỗng sớm:
       if (listingIds.length === 0) {
-        // Nếu bạn CHẮC CHẮN task không có field asin, có thể trả rỗng sớm để tối ưu:
-        // return res.json({ total: 0, tasks: [] });
+        // có thể return rỗng sớm nếu muốn, nhưng giữ nguyên logic cũ
       }
     }
 
@@ -90,15 +84,12 @@ const getTasks = async (req, res) => {
     const isDesigner = hasRole(role, "Designer");
 
     if (isSeller && !isAdmin && !isDesignLeader) {
-      // Seller chỉ xem task thuộc listing của mình
-      filter.seller = userId; // AND với seller filter nếu có
+      filter.seller = userId;
     }
 
     if (isDesigner && !isAdmin && !isDesignLeader) {
-      // Designer chỉ xem task assigned cho mình
-      filter.designer = userId; // AND với designer filter nếu có
+      filter.designer = userId;
 
-      // Và không thấy New/Requested
       const excludeForDesigner = ["New", "Requested"];
       if (filter.status) {
         if (excludeForDesigner.includes(filter.status)) {
@@ -109,10 +100,11 @@ const getTasks = async (req, res) => {
       }
     }
 
-    // ===== Query =====
+    // ===== Query (CHỈ THÊM SORT) =====
     const [tasks, total] = await Promise.all([
       PsdTask.find(filter)
         .populate("seller designer leader listing")
+        .sort({ createdAt: -1 }) // <<<< NEW: sắp xếp mới nhất lên đầu
         .skip((page - 1) * Number(perPage))
         .limit(Number(perPage)),
       PsdTask.countDocuments(filter),
