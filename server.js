@@ -96,11 +96,11 @@ const sseClients = new Set(); // res objects
 function pushSSE(evt) {
   if (!sseClients.size) return;
   const line = `data: ${JSON.stringify(evt)}\n\n`;
-  for (const res of sseClients) {
+  for (const { res } of sseClients) {
     try {
       res.write(line);
     } catch {
-      sseClients.delete(res);
+      /* client đóng */
     }
   }
 }
@@ -431,21 +431,32 @@ app.get("/logs", async (req, res) => {
 
 // SSE stream (realtime log)
 app.get("/logs/stream", (req, res) => {
-  res.setHeader("Content-Type", "text/event-stream");
-  res.setHeader("Cache-Control", "no-cache");
+  // headers SSE + tắt buffer
+  res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
+  res.setHeader("Cache-Control", "no-cache, no-transform");
   res.setHeader("Connection", "keep-alive");
-  res.flushHeaders?.();
+  res.setHeader("X-Accel-Buffering", "no"); // Nginx
+  // nếu có dùng helmet có thể thêm: res.removeHeader('Content-Encoding')
+  res.flushHeaders?.(); // flush ngay
 
-  // Bootstrap: gửi 50 dòng activity gần nhất từ DB
-  buildActivityLogsFromDB({ limit: 50 }).then((first) => {
+  // Bootstrap activity lần đầu
+  const first = buildActivityLogs({ limit: 50 });
+  res.write(`data: ${JSON.stringify({ bootstrap: first })}\n\n`);
+
+  // Heartbeat mỗi 15s để proxy không đóng/không buffer
+  const hb = setInterval(() => {
     try {
-      res.write(`data: ${JSON.stringify({ bootstrap: first })}\n\n`);
+      res.write(`: ping ${Date.now()}\n\n`);
     } catch {}
-  });
+  }, 15000);
 
-  sseClients.add(res);
+  // Lưu subscriber để đẩy sự kiện ngay khi addLog()
+  const client = { res, hb };
+  sseClients.add(client);
+
   req.on("close", () => {
-    sseClients.delete(res);
+    clearInterval(hb);
+    sseClients.delete(client);
     try {
       res.end();
     } catch {}
