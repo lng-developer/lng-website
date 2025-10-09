@@ -9,16 +9,24 @@ exports.createConfig = async (req, res) => {
             updated_by: req.user?._id || null,
         });
         res.json(cfg);
-    } catch (e) { res.status(500).json({ message: 'Create config failed', error: e.message }); }
+    } catch (e) {
+        res.status(500).json({ message: 'Create config failed', error: e.message });
+    }
 };
 
 exports.updateConfig = async (req, res) => {
     try {
         const { id } = req.params;
-        const cfg = await SkuMappingConfig.findByIdAndUpdate(id, { ...req.body, updated_by: req.user?._id || null }, { new: true });
+        const cfg = await SkuMappingConfig.findByIdAndUpdate(
+            id,
+            { ...req.body, updated_by: req.user?._id || null },
+            { new: true }
+        );
         if (!cfg) return res.status(404).json({ message: 'Config not found' });
         res.json(cfg);
-    } catch (e) { res.status(500).json({ message: 'Update config failed', error: e.message }); }
+    } catch (e) {
+        res.status(500).json({ message: 'Update config failed', error: e.message });
+    }
 };
 
 exports.listConfigs = async (req, res) => {
@@ -27,19 +35,29 @@ exports.listConfigs = async (req, res) => {
         const filter = {};
         if (active === 'true') filter.is_active = true;
         if (q) filter.name = new RegExp(q, 'i');
-        const items = await SkuMappingConfig.find(filter).sort({ is_active: -1, priority: 1, updatedAt: -1 }).lean();
+        const items = await SkuMappingConfig.find(filter)
+            .sort({ is_active: -1, priority: 1, updatedAt: -1 })
+            .lean();
         res.json(items);
-    } catch (e) { res.status(500).json({ message: 'List failed', error: e.message }); }
+    } catch (e) {
+        res.status(500).json({ message: 'List failed', error: e.message });
+    }
 };
 
 exports.toggleActive = async (req, res) => {
     try {
         const { id } = req.params;
         const { is_active } = req.body;
-        const cfg = await SkuMappingConfig.findByIdAndUpdate(id, { is_active: !!is_active, updated_by: req.user?._id || null }, { new: true });
+        const cfg = await SkuMappingConfig.findByIdAndUpdate(
+            id,
+            { is_active: !!is_active, updated_by: req.user?._id || null },
+            { new: true }
+        );
         if (!cfg) return res.status(404).json({ message: 'Config not found' });
         res.json(cfg);
-    } catch (e) { res.status(500).json({ message: 'Toggle failed', error: e.message }); }
+    } catch (e) {
+        res.status(500).json({ message: 'Toggle failed', error: e.message });
+    }
 };
 
 /** Lấy danh sách config “đang hiệu lực” theo ngày/ưu tiên */
