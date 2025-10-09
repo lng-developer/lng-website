@@ -69,7 +69,7 @@ app.use("/APO", APORoutes);
 app.use("/api/psd-task", PsdTaskRoutes);
 app.use("/api/idea-task", ideaTaskRoutes);
 app.use("/api/logs", realtimeLogRoutes); // GIỮ NGUYÊN
-app.use('/admin/session', require('./src/routes/admin.session.routes'));
+app.use("/admin/session", require("./src/routes/admin.session.routes"));
 // Error Handler
 app.use((err, req, res, next) => {
   res.status(err.status || 500).json({
@@ -158,6 +158,7 @@ async function buildPhaseSnapshotFromDB({
   }
   return out;
 }
+// map phase -> tiếng Việt ngắn gọn
 const phaseVi = (p) =>
   p === "import"
     ? "Import"
@@ -165,36 +166,64 @@ const phaseVi = (p) =>
     ? "Import report"
     : p === "ads"
     ? "Ads"
-    : p;
+    : p || "";
 
+// GHÉP phần “phụ lục” kết quả (nếu có)
+function formatExtras(d = {}) {
+  const parts = [];
+  // các field phổ biến bạn có thể đẩy từ extension
+  if (Number.isFinite(d.count)) parts.push(`${d.count} orders`);
+  if (Number.isFinite(d.created)) parts.push(`tạo ${d.created}`);
+  if (Number.isFinite(d.updated)) parts.push(`cập nhật ${d.updated}`);
+  if (Number.isFinite(d.skipped)) parts.push(`bỏ qua ${d.skipped}`);
+  if (d.file) parts.push(`file ${d.file}`);
+  if (d.reportId) parts.push(`report ${d.reportId}`);
+  if (Number.isFinite(d.ms)) parts.push(`${d.ms}ms`);
+  return parts.length ? ` (${parts.join(", ")})` : "";
+}
+
+// CHUYỂN 1 document -> 1 dòng activity cho UI
 function makeActivityEntryFromDoc(l) {
   const d = l.meta || {};
   const label = d.label || d.clientId || "Unknown";
-  if (l.type === "RUN_NOW")
-    return { ts: l.ts, type: "info", text: "Bắt đầu import orders..." };
+
+  if (l.type === "RUN_NOW") {
+    return {
+      ts: l.ts,
+      type: "info",
+      text: "Bắt đầu import orders...",
+      meta: { jobId: l.jobId },
+    };
+  }
+
   if (l.type === "STATUS") {
     const phaseName = phaseVi(l.phase);
-    if (l.status === "start")
-      return {
-        ts: l.ts,
-        type: "processing",
-        text: `Đang xử lý ${label} (${phaseName})...`,
-      };
+    // Chỉ in S/F (start dùng cho realtime, không cần trong feed DB)
     if (l.status === "success") {
-      const extra = Number.isFinite(d.count) ? ` ${d.count} orders` : "";
+      const extra = formatExtras(d);
       return {
         ts: l.ts,
         type: "success",
         text: `${label}: ${phaseName} thành công${extra}`,
+        meta: { client: label, phase: l.phase, jobId: l.jobId },
       };
     }
-    if (l.status === "fail")
+    if (l.status === "fail") {
+      const extra = formatExtras(d);
       return {
         ts: l.ts,
         type: "error",
-        text: `${label}: Lỗi ở ${phaseName}${l.error ? ` — ${l.error}` : ""}`,
+        text: `${label}: Lỗi ở ${phaseName}${
+          l.error ? ` — ${l.error}` : ""
+        }${extra}`,
+        meta: { client: label, phase: l.phase, jobId: l.jobId },
       };
+    }
+    // nếu vẫn muốn thấy start trong realtime SSE/Socket,
+    // DB view bỏ qua, realtime đã được push qua ADMIN_ACTIVITY rồi.
+    return null;
   }
+
   if (l.type === "SYNC_CONFIG") {
     if (d?.enabled === true) {
       const hours = d.intervalMin
@@ -211,20 +240,19 @@ function makeActivityEntryFromDoc(l) {
     if (d?.enabled === false)
       return { ts: l.ts, type: "success", text: "Đã tắt auto import" };
   }
+
   if (l.type === "CONNECT")
-    return {
-      ts: l.ts,
-      type: "processing",
-      text: `Client ${l.socketId} đã kết nối`,
-    };
+    return { ts: l.ts, type: "info", text: `Client ${l.socketId} đã kết nối` };
   if (l.type === "DISCONNECT")
     return {
       ts: l.ts,
-      type: "processing",
+      type: "info",
       text: `Client ${l.socketId} ngắt kết nối`,
     };
+
   return null;
 }
+
 async function buildActivityLogsFromDB({ since, limit = 200 }) {
   const q = {};
   if (since) q.ts = { $gt: Number(since) };
@@ -422,10 +450,10 @@ function makeActivityEntry(l) {
       l.phase === "import"
         ? "Import"
         : l.phase === "report"
-          ? "Import report"
-          : l.phase === "ads"
-            ? "Ads"
-            : l.phase;
+        ? "Import report"
+        : l.phase === "ads"
+        ? "Ads"
+        : l.phase;
     if (l.status === "start")
       return {
         ts: l.ts,
@@ -553,8 +581,8 @@ app.get("/logs", async (req, res) => {
       const nextSince = entries.length
         ? entries[entries.length - 1].ts
         : since
-          ? Number(since)
-          : Date.now();
+        ? Number(since)
+        : Date.now();
       return res.json({ since: Number(since) || 0, nextSince, entries });
     }
 
@@ -603,7 +631,7 @@ app.get("/logs/stream", (req, res) => {
   const hb = setInterval(() => {
     try {
       res.write(`: ping ${Date.now()}\n\n`);
-    } catch { }
+    } catch {}
   }, 15000);
 
   const client = { res, hb };
@@ -613,7 +641,7 @@ app.get("/logs/stream", (req, res) => {
     sseClients.delete(client);
     try {
       res.end();
-    } catch { }
+    } catch {}
   });
 });
 
