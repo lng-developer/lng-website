@@ -10,7 +10,7 @@ const crypto = require('crypto');
 
 // helper: tạo access token (iat tự sinh)
 function signAccessToken(payload) {
-    return jwt.sign(payload, process.env.JWT_SECRET, { expiresIn: '15m' });
+    return jwt.sign(payload, process.env.JWT_SECRET);
 }
 
 const login = async (req, res) => {
