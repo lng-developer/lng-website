@@ -1,23 +1,26 @@
-// src/models/SkuMappingConfig.js
 const mongoose = require('mongoose');
 
 const skuMappingConfigSchema = new mongoose.Schema({
-    name: { type: String, required: true },                 // Tên cấu hình
+    name: { type: String, required: true },           // Tên cấu hình
     description: { type: String, default: '' },
 
     // Rules
-    employeeMap: { type: Map, of: String, default: {} },     // { OLD: NEW }
-    productMap: { type: Map, of: String, default: {} },     // { OLD: NEW } (áp sau khi upper nếu upperProduct=true)
+    employeeMap: { type: Map, of: String, default: {} }, // Map token đầu (OLD -> NEW)
+    productMap: { type: Map, of: String, default: {} }, // Map token sản phẩm ở giữa (OLD -> NEW)
+    exactMap: { type: Map, of: String, default: {} }, // Map đúng-hệt SKU cũ -> SKU mới
+
     options: {
         upperProduct: { type: Boolean, default: true },
+        // Giữ useToday cho tương thích cũ; nhưng util sẽ ưu tiên dateOptional
         useToday: { type: Boolean, default: false },
+        dateOptional: { type: Boolean, default: true }, // Không ép chèn ngày
         minSeqDigits: { type: Number, default: null },
-        restrictEmployee: { type: [String], default: [] },     // chỉ áp với các mã này (nếu có)
+        restrictEmployee: { type: [String], default: [] },  // chỉ áp với các mã này (nếu có)
     },
 
     // Quản trị
     is_active: { type: Boolean, default: false },
-    priority: { type: Number, default: 100 },                // số nhỏ = ưu tiên cao
+    priority: { type: Number, default: 100 },           // số nhỏ = ưu tiên cao
     valid_from: { type: Date, default: null },
     valid_to: { type: Date, default: null },
 

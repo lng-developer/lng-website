@@ -1,10 +1,9 @@
-// controllers/skuMapping.controller.js
 const db = require("../models");
 const SkuMappingConfig = db.SkuMappingConfig;
 const SkuMappingEntry = db.SkuMappingEntry;
 const OrderCustomProduct = db.orderCustomProduct;
 
-// 👉 ĐÚNG PATH utils: nếu file là src/utils/sku-migrate.util.js
+// Import util (dùng alias để dễ bảo trì)
 const {
     applyRulesToSku,
     buildRulesFromConfig,
@@ -49,7 +48,7 @@ exports.previewWithConfig = async (req, res) => {
     }
 };
 
-/** Apply: ghi log vào SkuMappingEntry (không sửa items[].sku) */
+/** Apply: ghi log vào SkuMappingEntry + set items[].mapped_sku (không sửa items[].sku) */
 exports.applyConfigLogOnly = async (req, res) => {
     try {
         const { scope = {}, configId, source = "bulk", dryRun = true } = req.body || {};
@@ -76,7 +75,7 @@ exports.applyConfigLogOnly = async (req, res) => {
         const limitOrders = Number(req.body?.limitOrders || 0);
 
         // queues
-        const logOps = []; // SkuMappingEntry
+        const logOps = [];   // SkuMappingEntry
         const orderOps = []; // OrderCustomProduct (set items.$.mapped_sku)
         const samples = [];
 

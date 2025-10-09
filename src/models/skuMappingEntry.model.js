@@ -1,4 +1,3 @@
-// src/models/SkuMappingEntry.js
 const mongoose = require('mongoose');
 
 const skuMappingEntrySchema = new mongoose.Schema({
