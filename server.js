@@ -213,6 +213,54 @@ async function buildActivityLogsFromDB({ since, limit = 200 }) {
   return out;
 }
 
+// ===== Snapshot phases gần nhất từ DB (phục vụ /clients) =====
+async function buildPhaseSnapshotFromDB({
+  lookbackMs = 48 * 3600 * 1000,
+} = {}) {
+  const fromTs = Date.now() - lookbackMs;
+  const rows = await RealtimeLog.find({ type: "STATUS", ts: { $gte: fromTs } })
+    .sort({ ts: -1 })
+    .limit(10000)
+    .lean();
+
+  const out = {};
+  for (const l of rows) {
+    const id = l.clientId || l.label || l.socketId || "unknown";
+    if (!out[id]) {
+      out[id] = {
+        id,
+        label: l.label || id,
+        phases: {},
+        lastTs: 0,
+        lastJobId: undefined,
+      };
+    }
+    if (!out[id].phases[l.phase]) {
+      out[id].phases[l.phase] = {
+        status: l.status,
+        ts: l.ts,
+        jobId: l.jobId,
+        ms: l.ms,
+        error: l.error,
+      };
+      if (l.ts > out[id].lastTs) {
+        out[id].lastTs = l.ts;
+        out[id].lastJobId = l.jobId;
+      }
+    }
+  }
+
+  for (const id of Object.keys(out)) {
+    const sts = Object.values(out[id].phases).map((p) => p.status);
+    let overall = "idle";
+    if (sts.includes("fail")) overall = "error";
+    else if (sts.includes("start")) overall = "running";
+    else if (sts.includes("success")) overall = "success";
+    out[id].overall = overall;
+  }
+  return out;
+}
+
 // ===== Quy tắc lưu DB: CHỈ import success|fail =====
 function shouldPersist(type, data = {}) {
   if (type !== "STATUS") return false;
@@ -373,8 +421,119 @@ app.get("/logs/stream", (_req, res) => {
 // ===== REST: health / clients / jobs / logs =====
 app.get("/health", (_req, res) => res.send("ok"));
 
-// (rút gọn: bạn có thể giữ nguyên 2 hàm buildPhaseSnapshotFromDB và /clients, /jobs, /logs như bản trước của bạn)
-// Để tránh câu trả lời quá dài, các route /clients, /jobs, /logs bạn copy nguyên từ bản đang chạy (không đổi).
+// GET /clients -> online + statusSummary từ DB
+// ?onlyExt=1 để lọc chỉ client "thực" (extension) nếu muốn
+app.get("/clients", async (req, res) => {
+  try {
+    const onlyExt = String(req.query.onlyExt || "0") === "1";
+    const snapshot = await buildPhaseSnapshotFromDB();
+    const now = Date.now();
+
+    let actives = [...clients.values()].map((c) => {
+      const key = c.clientId || c.label || c.socketId;
+      const sum = snapshot[key] || {};
+      return {
+        socketId: c.socketId,
+        clientId: c.clientId,
+        label: c.label,
+        version: c.version,
+        ua: c.ua,
+        ip: c.ip,
+        connectedAt: c.connectedAt,
+        lastSeen: c.lastSeen,
+        statusSummary: {
+          overall: sum.overall || "idle",
+          lastJobId: sum.lastJobId,
+          lastTs: sum.lastTs || 0,
+          phases: sum.phases || {},
+          onlineForSec: Math.round((now - c.connectedAt) / 1000),
+          idleForSec: Math.round((now - (c.lastSeen || c.connectedAt)) / 1000),
+        },
+      };
+    });
+
+    if (onlyExt) {
+      actives = actives.filter(
+        (c) =>
+          (c.clientId && c.clientId.trim() !== "") ||
+          (c.version && String(c.version).startsWith("ext-")) ||
+          (c.label && String(c.label).startsWith("Machine-"))
+      );
+    }
+
+    actives.sort(
+      (a, b) => (b.statusSummary.lastTs || 0) - (a.statusSummary.lastTs || 0)
+    );
+
+    res.json(actives);
+  } catch (e) {
+    res.status(500).json({ ok: false, message: e.message });
+  }
+});
+
+// Jobs gần đây (tổng hợp theo jobId)
+app.get("/jobs", async (_req, res) => {
+  try {
+    const last = Date.now() - 7 * 24 * 3600 * 1000;
+    const rows = await RealtimeLog.aggregate([
+      { $match: { jobId: { $ne: null }, ts: { $gte: last } } },
+      {
+        $group: {
+          _id: "$jobId",
+          first: { $min: "$ts" },
+          last: { $max: "$ts" },
+        },
+      },
+      { $sort: { last: -1 } },
+      { $limit: 500 },
+    ]);
+    res.json(rows);
+  } catch (e) {
+    res.status(500).json({ ok: false, message: e.message });
+  }
+});
+
+// /logs: raw (DB) | view=activity (DB)
+app.get("/logs", async (req, res) => {
+  try {
+    const {
+      type,
+      jobId,
+      clientId,
+      view,
+      since,
+      limit,
+      sort = "asc",
+    } = req.query;
+
+    if (view === "activity") {
+      const entries = await buildActivityLogsFromDB({
+        since: since ? Number(since) : undefined,
+        limit: limit ? Number(limit) : 200,
+      });
+      const nextSince = entries.length
+        ? entries[entries.length - 1].ts
+        : since
+        ? Number(since)
+        : Date.now();
+      return res.json({ since: Number(since) || 0, nextSince, entries });
+    }
+
+    const q = {};
+    if (type) q.type = type;
+    if (jobId) q.jobId = jobId;
+    if (clientId) q.$or = [{ clientId }, { label: clientId }];
+
+    const rows = await RealtimeLog.find(q)
+      .sort({ ts: sort === "desc" ? -1 : 1 })
+      .limit(Math.min(Number(limit) || 200, 5000))
+      .lean();
+
+    res.json(rows);
+  } catch (e) {
+    res.status(500).json({ ok: false, message: e.message });
+  }
+});
 
 // ========== FIXED SCHEDULER (server-side) ==========
 const scheduler = {
@@ -422,15 +581,12 @@ async function fireScheduledTick(reason = "schedule") {
 // Nếu mốc gần nhất chưa có import success/fail → phát lại
 async function maybeEmitCatchUp() {
   if (!scheduler.enabled) return;
-  // Lấy mốc lịch gần nhất (theo căn bậc)
   const prevTs = (() => {
     const now = Date.now();
     const next = nextAlignedTs(now);
-    // mốc trước đó
     return next - scheduler.everyHours * 3600 * 1000;
   })();
 
-  // kiểm tra có bản ghi import success/fail sau mốc đó chưa
   const ok = await RealtimeLog.findOne({
     type: "STATUS",
     phase: "import",
@@ -439,7 +595,6 @@ async function maybeEmitCatchUp() {
   }).lean();
 
   if (!ok) {
-    // chưa có ai chạy → phát lại 1 lần
     await fireScheduledTick("catch-up");
   }
 }
