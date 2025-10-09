@@ -91,8 +91,11 @@ const io = new Server(httpServer, {
 // ========== STATE NHẸ ==========
 const clients = new Map(); // ai đang online
 
-// --- SSE (tuỳ chọn) ---
+// --- SSE + live buffer (chỉ để hiển thị realtime, không vào DB) ---
 const sseClients = new Set();
+const liveBuffer = [];
+const LIVE_MAX = 1000;
+
 function pushSSE(evt) {
   if (!sseClients.size) return;
   const line = `data: ${JSON.stringify(evt)}\n\n`;
@@ -101,6 +104,13 @@ function pushSSE(evt) {
       res.write(line);
     } catch {}
   }
+}
+function bufferAndPushSSE(evt) {
+  liveBuffer.push(evt);
+  if (liveBuffer.length > LIVE_MAX) {
+    liveBuffer.splice(0, liveBuffer.length - LIVE_MAX);
+  }
+  pushSSE(evt);
 }
 
 // ===== Helpers build UI/Activity từ DB =====
@@ -148,7 +158,6 @@ async function buildPhaseSnapshotFromDB({
   }
   return out;
 }
-
 const phaseVi = (p) =>
   p === "import"
     ? "Import"
@@ -161,20 +170,14 @@ const phaseVi = (p) =>
 function makeActivityEntryFromDoc(l) {
   const d = l.meta || {};
   const label = d.label || d.clientId || "Unknown";
-  if (l.type === "RUN_NOW") {
-    return {
-      ts: l.ts,
-      type: "info",
-      text: "Bắt đầu import orders...",
-      meta: { jobId: l.jobId },
-    };
-  }
+  if (l.type === "RUN_NOW")
+    return { ts: l.ts, type: "info", text: "Bắt đầu import orders..." };
   if (l.type === "STATUS") {
     const phaseName = phaseVi(l.phase);
     if (l.status === "start")
       return {
         ts: l.ts,
-        type: "info",
+        type: "processing",
         text: `Đang xử lý ${label} (${phaseName})...`,
       };
     if (l.status === "success") {
@@ -189,9 +192,7 @@ function makeActivityEntryFromDoc(l) {
       return {
         ts: l.ts,
         type: "error",
-        text: `${label}: Lỗi ở ${phaseVi(l.phase)}${
-          l.error ? ` — ${l.error}` : ""
-        }`,
+        text: `${label}: Lỗi ở ${phaseName}${l.error ? ` — ${l.error}` : ""}`,
       };
   }
   if (l.type === "SYNC_CONFIG") {
@@ -211,16 +212,19 @@ function makeActivityEntryFromDoc(l) {
       return { ts: l.ts, type: "success", text: "Đã tắt auto import" };
   }
   if (l.type === "CONNECT")
-    return { ts: l.ts, type: "info", text: `Client ${l.socketId} đã kết nối` };
+    return {
+      ts: l.ts,
+      type: "processing",
+      text: `Client ${l.socketId} đã kết nối`,
+    };
   if (l.type === "DISCONNECT")
     return {
       ts: l.ts,
-      type: "info",
+      type: "processing",
       text: `Client ${l.socketId} ngắt kết nối`,
     };
   return null;
 }
-
 async function buildActivityLogsFromDB({ since, limit = 200 }) {
   const q = {};
   if (since) q.ts = { $gt: Number(since) };
@@ -236,16 +240,25 @@ async function buildActivityLogsFromDB({ since, limit = 200 }) {
   return out;
 }
 
-// ====== Ghi log vào DB + đẩy realtime (Socket.IO + SSE) ======
+// ===== Quy tắc lưu DB: CHỈ import success|fail =====
+function shouldPersist(type, data = {}) {
+  if (type !== "STATUS") return false;
+  const phase = String(data.phase || "").toLowerCase();
+  const status = String(data.status || "").toLowerCase();
+  return phase === "import" && (status === "success" || status === "fail");
+}
+
+// ====== addLog: đẩy realtime (luôn), lưu DB (có điều kiện) ======
 async function addLog(type, data = {}) {
   const ts = Date.now();
   const ttlDays = Number(process.env.LOG_TTL_DAYS || 0);
   const expireAt = ttlDays > 0 ? new Date(ts + ttlDays * 86400000) : undefined;
 
-  const doc = {
+  const evt = {
     ts,
-    day: new Date(ts).toISOString().slice(0, 10),
     type,
+    data,
+    day: new Date(ts).toISOString().slice(0, 10),
     clientId: data.clientId || null,
     label: data.label || null,
     socketId: data.socketId || null,
@@ -254,14 +267,22 @@ async function addLog(type, data = {}) {
     status: data.status || null,
     ms: data.ms || null,
     error: data.error || null,
-    meta: data,
     ...(expireAt ? { expireAt } : {}),
   };
 
-  try {
-    await RealtimeLog.create(doc);
-  } catch (e) {
-    console.warn("[LOG-PERSIST] error:", e.message);
+  // realtime cho FE
+  bufferAndPushSSE({ ts, type, data });
+  io.emit("ADMIN_EVENT", { ts, type, data });
+  const act = makeActivityEntryFromDoc({ ...evt, meta: data });
+  if (act) io.emit("ADMIN_ACTIVITY", act);
+
+  // lưu DB nếu đạt điều kiện
+  if (shouldPersist(type, data)) {
+    try {
+      await RealtimeLog.create({ ...evt, meta: data });
+    } catch (e) {
+      console.warn("[LOG-PERSIST] error:", e.message);
+    }
   }
 
   // console gọn
@@ -269,15 +290,6 @@ async function addLog(type, data = {}) {
   if (slim.text && String(slim.text).length > 120)
     slim.text = String(slim.text).slice(0, 120) + "…";
   console.log(`[${type}]`, slim);
-
-  // --- realtime push ---
-  const rawEvt = { ts, type, data }; // NEW: raw event cho FE nếu muốn tự render
-  io.emit("ADMIN_EVENT", rawEvt); // NEW: phát qua Socket.IO
-  const act = makeActivityEntryFromDoc(doc); // NEW: build activity 1 dòng
-  if (act) io.emit("ADMIN_ACTIVITY", act); // NEW: phát activity sẵn dùng
-
-  // vẫn hỗ trợ SSE (nếu FE cũ dùng)
-  pushSSE(rawEvt);
 }
 
 // ===== Socket events (extension) =====
@@ -562,18 +574,31 @@ app.get("/logs", async (req, res) => {
   }
 });
 
-// SSE stream (tuỳ chọn, sửa bootstrap dùng DB)
-app.get("/logs/stream", async (req, res) => {
+// SSE stream (bootstrap từ liveBuffer để realtime ngay)
+app.get("/logs/stream", (req, res) => {
   res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
   res.setHeader("Cache-Control", "no-cache, no-transform");
   res.setHeader("Connection", "keep-alive");
   res.setHeader("X-Accel-Buffering", "no");
   res.flushHeaders?.();
 
-  try {
-    const first = await buildActivityLogsFromDB({ limit: 50 }); // <- dùng DB
-    res.write(`data: ${JSON.stringify({ bootstrap: first })}\n\n`);
-  } catch {}
+  // bootstrap 50 sự kiện gần nhất từ liveBuffer
+  const first = liveBuffer
+    .slice(-50)
+    .map((e) => {
+      // map sang activity dòng đơn
+      const fakeDoc = {
+        ts: e.ts,
+        type: e.type,
+        phase: e.data?.phase,
+        status: e.data?.status,
+        socketId: e.data?.socketId,
+        meta: e.data,
+      };
+      return makeActivityEntryFromDoc(fakeDoc);
+    })
+    .filter(Boolean);
+  res.write(`data: ${JSON.stringify({ bootstrap: first })}\n\n`);
 
   const hb = setInterval(() => {
     try {
