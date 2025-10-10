@@ -9,7 +9,7 @@ router.put("/:id", shopController.updateShop);
 router.delete("/:id", shopController.deleteShop);
 router.post("/add-user", shopController.addUserToShop);
 router.post("/update-status", shopController.updateShopStatus);
-router.get("/clients", shopController.getClients);
+router.get("/ext/clients", shopController.getClients);
 router.post("/ext/connect", shopController.connectExtension);
 
 module.exports = router;
