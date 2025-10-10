@@ -101,7 +101,7 @@ const connectExtension = async (req, res) => {
 
     // upsert client trong mảng
     const updated = await Shop.findOneAndUpdate(
-      { store: shopId, "clients.clientId": clientId },
+      { _id: shopId },
       {
         $set: {
           "clients.$.label": label || shopId,
@@ -116,7 +116,7 @@ const connectExtension = async (req, res) => {
     if (!updated) {
       // chưa tồn tại → push mới
       await Shop.updateOne(
-        { store: shopId },
+        { _id: shopId },
         {
           $push: {
             clients: {
