@@ -6,11 +6,8 @@ const {
   authorizeRoles,
 } = require("../middlewares/auth.middleware");
 
-router.get(
-  "/",
-  authenticateToken,
-  authorizeRoles("Admin"),
-  realtimeLogController.getLogs
-);
+router.get("/", authenticateToken, realtimeLogController.getLogs);
+
+router.post("/ext/log", authenticateToken, realtimeLogController.addLog);
 
 module.exports = router;

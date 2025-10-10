@@ -1,5 +1,6 @@
 const db = require("../models");
 const RealtimeLog = db.RealtimeLog;
+const Shop = db.shop;
 
 const getLogs = async (req, res) => {
   try {
@@ -40,4 +41,48 @@ const getLogs = async (req, res) => {
   }
 };
 
-module.exports = { getLogs };
+const addLog = async (req, res) => {
+  try {
+    const { shopId, clientId, label, phase, status, ms, error } =
+      req.body || {};
+    if (!phase || !status) {
+      return res
+        .status(400)
+        .json({ ok: false, message: "phase & status required" });
+    }
+
+    const ts = Date.now();
+    await RealtimeLog.create({
+      ts,
+      type: "STATUS",
+      day: new Date(ts).toISOString().slice(0, 10),
+      clientId: clientId || null,
+      label: label || null,
+      phase,
+      status,
+      ms: Number.isFinite(ms) ? ms : undefined,
+      error: error || undefined,
+      meta: { shopId: shopId || null },
+    });
+
+    // Nếu là CONNECTED client trong Shop → cập nhật lastSeen + trạng thái
+    if (clientId && shopId) {
+      await Shop.updateOne(
+        { store: shopId, "clients.clientId": clientId },
+        {
+          $set: {
+            "clients.$.lastSeen": new Date(),
+            "clients.$.status": "online",
+          },
+        }
+      ).catch(() => {});
+    }
+
+    return res.json({ ok: true });
+  } catch (e) {
+    console.error("POST /ext/log error:", e);
+    return res.status(500).json({ ok: false, message: e.message });
+  }
+};
+
+module.exports = { getLogs, addLog };

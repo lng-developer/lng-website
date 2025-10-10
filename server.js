@@ -5,21 +5,22 @@ const cors = require("cors");
 const dotenv = require("dotenv");
 dotenv.config();
 
-const connectDB = require("./src/config/db.config");
 const http = require("http");
+const connectDB = require("./src/config/db.config");
 
 // ===== App
 const app = express();
 app.set("trust proxy", true);
-app.use(express.json());
+app.use(express.json({ limit: "10mb" }));
 app.use(morgan("dev"));
 app.use(cors());
 
+// Health
 app.get("/", (_req, res) =>
   res.json({ message: "Welcome to RESTful API - Node.js" })
 );
 
-// ===== Your existing routes (giữ nguyên)
+// ===== Existing routes (giữ nguyên)
 const {
   roleRoutes,
   userRoutes,
@@ -43,11 +44,7 @@ const {
   APORoutes,
   PsdTaskRoutes,
   ideaTaskRoutes,
-  realtimeLogRoutes,
-  jobRoutes,
-  adminRoutes,
-  realtimeRoutes,
-  clientsRoutes,
+  realtimeLogRoutes, // vẫn có thể dùng lại để FE xem /logs (activity)
 } = require("./src/routes");
 
 app.use("/api/role", roleRoutes);
@@ -74,36 +71,17 @@ app.use("/api/psd-task", PsdTaskRoutes);
 app.use("/api/idea-task", ideaTaskRoutes);
 app.use("/api/logs", realtimeLogRoutes);
 
-// ===== New routes (jobs / admin / realtime / clients)
-app.use("/jobs", jobRoutes);
-app.use("/admin", adminRoutes);
-app.use("/logs", realtimeRoutes);
-app.use("/clients", clientsRoutes);
-
-// Error handler
 app.use((err, _req, res, _next) => {
   res
     .status(err.status || 500)
     .json({ error: { message: err.message || "Internal Server Error" } });
 });
 
-// ===== HTTP + Socket.IO
+// ===== HTTP server (không Socket.IO)
 const httpServer = http.createServer(app);
-const { initSocket } = require("./src/socket");
-initSocket(httpServer);
-
-// ===== DB + Scheduler
-const {
-  start: schedStart,
-  scheduler,
-} = require("./src/service/scheduler.service");
 
 const PORT = process.env.PORT || 5000;
 connectDB();
 httpServer.listen(PORT, "0.0.0.0", () => {
-  console.log(`🚀 API + Socket.IO on http://localhost:${PORT} (path /socket)`);
-  if (process.env.AUTO_START_FIXED === "1") {
-    scheduler.enabled = true;
-    schedStart();
-  }
+  console.log(`🚀 API running at http://localhost:${PORT}`);
 });
