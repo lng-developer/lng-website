@@ -7,6 +7,7 @@ const FulfillmentService = require("../service/fulfillment"); // <<< NEW
 const OrderCustomProduct = db.orderCustomProduct;
 const VendorProduct = db.vendorProduct;
 const Listing = db.listing;
+const Shop = db.shop;
 const upload = multer({ storage: multer.memoryStorage() });
 
 // ============ Helpers (giữ nguyên) ============
@@ -40,6 +41,29 @@ function computeOverallScaleStatus(orderDoc) {
   if (noneNeedScale) return "Pending";
 
   return "Need Scale";
+}
+
+// Detect if an order belongs to LNG Group based on Shop info
+async function isLNGGroupOrder(orderDoc) {
+  try {
+    const shopId = orderDoc?.shopId;
+    if (!shopId) return false;
+    const shop = await Shop.findById(shopId).lean();
+    if (!shop) return false;
+
+    const merchant = String(shop.merchant || '').toLowerCase();
+    const name = String(shop.name || '').toLowerCase();
+    const teamArr = Array.isArray(shop.team) ? shop.team : [];
+
+    const hasTeamLNG = teamArr.some((t) => String(t || '').toLowerCase().includes('lng'));
+    const isMerchantLNG = merchant.includes('lng');
+    const isNameLNG = name.includes('lng');
+
+    // Adjust this predicate if you want exact match with "lng group"
+    return isMerchantLNG || isNameLNG || hasTeamLNG;
+  } catch (_) {
+    return false;
+  }
 }
 
 // ============ Controllers ============
@@ -274,8 +298,23 @@ const confirmScaleForItem = async (req, res) => {
     // Tính trạng thái tổng thể (Ready nếu tất cả Complete)
     order.scale_overall_status = computeOverallScaleStatus(order);
 
-    // === Nếu order đã "Ready", xác định provider và gửi ===
+    // === Nếu order đã "Ready" ===
     if (order.scale_overall_status === "Ready") {
+      // Đơn nội bộ LNG Group: tự đánh dấu Sent + Fulfilled, không gửi vendor
+      const isLNG = await isLNGGroupOrder(order);
+      if (isLNG) {
+        order.scale_overall_status = "Sent";
+        order.status = "Fulfilled";
+        order.fulfilled_at = new Date();
+        await order.save();
+        return res.json({
+          message: "Approved and marked Sent/Fulfilled for LNG Group order.",
+          item_scale_status: item.scale_status,
+          order_scale_overall_status: order.scale_overall_status,
+          submission_vendor: "internal",
+        });
+      }
+
       let providerKey = String(provider || "").trim();
 
       try {
