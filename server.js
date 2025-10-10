@@ -6,6 +6,20 @@ const dotenv = require("dotenv");
 dotenv.config();
 
 const connectDB = require("./src/config/db.config");
+const http = require("http");
+
+// ===== App
+const app = express();
+app.set("trust proxy", true);
+app.use(express.json());
+app.use(morgan("dev"));
+app.use(cors());
+
+app.get("/", (_req, res) =>
+  res.json({ message: "Welcome to RESTful API - Node.js" })
+);
+
+// ===== Your existing routes (giữ nguyên)
 const {
   roleRoutes,
   userRoutes,
@@ -30,22 +44,12 @@ const {
   PsdTaskRoutes,
   ideaTaskRoutes,
   realtimeLogRoutes,
+  jobRoutes,
+  adminRoutes,
+  realtimeRoutes,
+  clientsRoutes,
 } = require("./src/routes");
 
-const db = require("./src/models");
-const RealtimeLog = db.RealtimeLog;
-
-const app = express();
-app.set("trust proxy", true);
-app.use(express.json());
-app.use(morgan("dev"));
-app.use(cors());
-
-app.get("/", (_req, res) =>
-  res.json({ message: "Welcome to RESTful API - Node.js" })
-);
-
-// APIs (giữ nguyên)
 app.use("/api/role", roleRoutes);
 app.use("/api/user", userRoutes);
 app.use("/api/account", accountRoutes);
@@ -69,645 +73,37 @@ app.use("/APO", APORoutes);
 app.use("/api/psd-task", PsdTaskRoutes);
 app.use("/api/idea-task", ideaTaskRoutes);
 app.use("/api/logs", realtimeLogRoutes);
-app.use("/admin/session", require("./src/routes/admin.session.routes"));
 
+// ===== New routes (jobs / admin / realtime / clients)
+app.use("/jobs", jobRoutes);
+app.use("/admin", adminRoutes);
+app.use("/logs", realtimeRoutes);
+app.use("/clients", clientsRoutes);
+
+// Error handler
 app.use((err, _req, res, _next) => {
   res
     .status(err.status || 500)
     .json({ error: { message: err.message || "Internal Server Error" } });
 });
 
-// ======= Realtime (Socket.IO) =======
-const http = require("http");
-const { Server } = require("socket.io");
+// ===== HTTP + Socket.IO
 const httpServer = http.createServer(app);
-const io = new Server(httpServer, {
-  path: "/socket",
-  cors: { origin: "*" },
-  transports: ["websocket", "polling"],
-});
+const { initSocket } = require("./src/socket");
+initSocket(httpServer);
 
-// ======= State nhẹ =======
-const clients = new Map();
+// ===== DB + Scheduler
+const {
+  start: schedStart,
+  scheduler,
+} = require("./src/service/scheduler.service");
 
-// ---- SSE + live buffer (hiển thị realtime) ----
-const sseClients = new Set();
-const liveBuffer = [];
-const LIVE_MAX = 1000;
-function pushSSE(evt) {
-  if (!sseClients.size) return;
-  const line = `data: ${JSON.stringify(evt)}\n\n`;
-  for (const { res } of sseClients) {
-    try {
-      res.write(line);
-    } catch {}
-  }
-}
-function bufferAndPushSSE(evt) {
-  liveBuffer.push(evt);
-  if (liveBuffer.length > LIVE_MAX)
-    liveBuffer.splice(0, liveBuffer.length - LIVE_MAX);
-  pushSSE(evt);
-}
-
-// ====== Helper: build activity 1 dòng từ document (rút gọn) ======
-const phaseVi = (p) =>
-  p === "import"
-    ? "Import"
-    : p === "report"
-    ? "Import report"
-    : p === "ads"
-    ? "Ads"
-    : p || "";
-
-function formatExtras(d = {}) {
-  const parts = [];
-  if (Number.isFinite(d.count)) parts.push(`${d.count} orders`);
-  if (Number.isFinite(d.created)) parts.push(`created ${d.created}`);
-  if (Number.isFinite(d.updated)) parts.push(`updated ${d.updated}`);
-  if (Number.isFinite(d.skipped)) parts.push(`skip ${d.skipped}`);
-  if (d.file) parts.push(`file ${d.file}`);
-  if (d.reportId) parts.push(`report ${d.reportId}`);
-  if (Number.isFinite(d.ms)) parts.push(`${d.ms}ms`);
-  return parts.length ? ` (${parts.join(", ")})` : "";
-}
-
-function makeActivityEntryFromDoc(l) {
-  const d = l.meta || {};
-  const label = d.label || d.clientId || "Unknown";
-
-  if (l.type === "RUN_NOW") {
-    return {
-      ts: l.ts,
-      type: "info",
-      text: "Start import orders...",
-      meta: { jobId: l.jobId },
-    };
-  }
-  if (l.type === "RUN_SCHEDULED") {
-    return {
-      ts: l.ts,
-      type: "info",
-      text: "Scheduled import tick",
-      meta: { jobId: l.jobId },
-    };
-  }
-  if (l.type === "STATUS") {
-    const phaseName = phaseVi(l.phase);
-    if (l.status === "success")
-      return {
-        ts: l.ts,
-        type: "success",
-        text: `${label}: ${phaseName} success${formatExtras(d)}`,
-      };
-    if (l.status === "fail")
-      return {
-        ts: l.ts,
-        type: "error",
-        text: `${label}: Error in ${phaseName}${
-          l.error ? ` — ${l.error}` : ""
-        }${formatExtras(d)}`,
-      };
-    return null; // start chỉ dùng realtime
-  }
-  if (l.type === "SYNC_CONFIG") {
-    if (d.enabled === true) {
-      if (d.mode === "fixed") {
-        return {
-          ts: l.ts,
-          type: "success",
-          text: `Auto import enabled (fixed every ${d.everyHours}h from ${d.baseHour}:00)`,
-        };
-      }
-      const hours = d.intervalMin
-        ? Math.round(d.intervalMin / 60)
-        : (d.intervalMs / 3600000).toFixed(1);
-      return {
-        ts: l.ts,
-        type: "success",
-        text: `Auto import enabled (every ${hours || "?"} hours)`,
-      };
-    }
-    if (d.enabled === false)
-      return { ts: l.ts, type: "success", text: "Auto import disabled" };
-  }
-  if (l.type === "CONNECT")
-    return { ts: l.ts, type: "info", text: `Client ${l.socketId} connected` };
-  if (l.type === "DISCONNECT")
-    return { ts: l.ts, type: "info", text: `Client ${l.socketId} disconnect` };
-  return null;
-}
-
-async function buildActivityLogsFromDB({ since, limit = 200 }) {
-  const q = {};
-  if (since) q.ts = { $gt: Number(since) };
-  const rows = await RealtimeLog.find(q)
-    .sort({ ts: 1 })
-    .limit(Math.min(Number(limit) || 200, 2000))
-    .lean();
-  const out = [];
-  for (const l of rows) {
-    const item = makeActivityEntryFromDoc(l);
-    if (item) out.push(item);
-  }
-  return out;
-}
-
-// ===== Snapshot phases gần nhất từ DB (phục vụ /clients) =====
-async function buildPhaseSnapshotFromDB({
-  lookbackMs = 48 * 3600 * 1000,
-} = {}) {
-  const fromTs = Date.now() - lookbackMs;
-  const rows = await RealtimeLog.find({ type: "STATUS", ts: { $gte: fromTs } })
-    .sort({ ts: -1 })
-    .limit(10000)
-    .lean();
-
-  const out = {};
-  for (const l of rows) {
-    const id = l.clientId || l.label || l.socketId || "unknown";
-    if (!out[id]) {
-      out[id] = {
-        id,
-        label: l.label || id,
-        phases: {},
-        lastTs: 0,
-        lastJobId: undefined,
-      };
-    }
-    if (!out[id].phases[l.phase]) {
-      out[id].phases[l.phase] = {
-        status: l.status,
-        ts: l.ts,
-        jobId: l.jobId,
-        ms: l.ms,
-        error: l.error,
-      };
-      if (l.ts > out[id].lastTs) {
-        out[id].lastTs = l.ts;
-        out[id].lastJobId = l.jobId;
-      }
-    }
-  }
-
-  for (const id of Object.keys(out)) {
-    const sts = Object.values(out[id].phases).map((p) => p.status);
-    let overall = "idle";
-    if (sts.includes("fail")) overall = "error";
-    else if (sts.includes("start")) overall = "running";
-    else if (sts.includes("success")) overall = "success";
-    out[id].overall = overall;
-  }
-  return out;
-}
-
-// ===== Quy tắc lưu DB: CHỈ import success|fail =====
-function shouldPersist(type, data = {}) {
-  if (type !== "STATUS") return false;
-  const phase = String(data.phase || "").toLowerCase();
-  const status = String(data.status || "").toLowerCase();
-  return phase === "import" && (status === "success" || status === "fail");
-}
-
-// ===== addLog: push realtime + (có điều kiện) lưu DB =====
-async function addLog(type, data = {}) {
-  const ts = Date.now();
-  const ttlDays = Number(process.env.LOG_TTL_DAYS || 0);
-  const expireAt = ttlDays > 0 ? new Date(ts + ttlDays * 86400000) : undefined;
-
-  const evt = {
-    ts,
-    type,
-    data,
-    day: new Date(ts).toISOString().slice(0, 10),
-    clientId: data.clientId || null,
-    label: data.label || null,
-    socketId: data.socketId || null,
-    jobId: data.jobId || data.payload?.jobId || null,
-    phase: data.phase || null,
-    status: data.status || null,
-    ms: data.ms || null,
-    error: data.error || null,
-    ...(expireAt ? { expireAt } : {}),
-  };
-
-  // realtime cho FE
-  bufferAndPushSSE({ ts, type, data });
-  io.emit("ADMIN_EVENT", { ts, type, data });
-  const act = makeActivityEntryFromDoc({ ...evt, meta: data });
-  if (act) io.emit("ADMIN_ACTIVITY", act);
-
-  // lưu DB nếu đạt điều kiện
-  if (shouldPersist(type, data)) {
-    try {
-      await RealtimeLog.create({ ...evt, meta: data });
-    } catch (e) {
-      console.warn("[LOG-PERSIST] error:", e.message);
-    }
-  }
-
-  // console gọn
-  const slim = { ...data };
-  if (slim.text && String(slim.text).length > 120)
-    slim.text = String(slim.text).slice(0, 120) + "…";
-  console.log(`[${type}]`, slim);
-}
-
-// ===== Socket events (extension) =====
-io.on("connection", (socket) => {
-  const ip =
-    socket.handshake.headers["x-forwarded-for"] || socket.handshake.address;
-  clients.set(socket.id, {
-    socketId: socket.id,
-    clientId: null,
-    label: null,
-    version: null,
-    ua: socket.handshake.headers["user-agent"],
-    ip,
-    connectedAt: Date.now(),
-    lastSeen: Date.now(),
-  });
-  addLog("CONNECT", { socketId: socket.id, ip });
-
-  socket.on("HELLO", async (info) => {
-    const c = clients.get(socket.id);
-    if (!c) return;
-    c.clientId = info?.clientId || null;
-    c.label = info?.label || null;
-    c.version = info?.version || null;
-    c.lastSeen = Date.now();
-    addLog("HELLO", {
-      socketId: socket.id,
-      clientId: c.clientId,
-      label: c.label,
-      version: c.version,
-    });
-
-    // Khi client online lại: nếu tick gần nhất chưa có import success/fail → phát RUN_NOW (catch-up)
-    try {
-      await maybeEmitCatchUp();
-    } catch {}
-  });
-
-  socket.on("ACK", (ack) => {
-    const c = clients.get(socket.id);
-    if (c) c.lastSeen = Date.now();
-    addLog("ACK", {
-      socketId: socket.id,
-      clientId: c?.clientId,
-      label: c?.label,
-      jobId: ack?.jobId,
-    });
-  });
-
-  // STATUS: { jobId, phase, status, ms?, error?, count? }
-  socket.on("STATUS", (st) => {
-    const c = clients.get(socket.id);
-    if (c) c.lastSeen = Date.now();
-    addLog("STATUS", {
-      socketId: socket.id,
-      clientId: c?.clientId,
-      label: c?.label,
-      ...st,
-    });
-  });
-
-  socket.on("disconnect", (reason) => {
-    addLog("DISCONNECT", { socketId: socket.id, reason });
-    clients.delete(socket.id);
-  });
-});
-
-// ===== SSE stream (bootstrap từ liveBuffer) =====
-app.get("/logs/stream", (_req, res) => {
-  res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
-  res.setHeader("Cache-Control", "no-cache, no-transform");
-  res.setHeader("Connection", "keep-alive");
-  res.setHeader("X-Accel-Buffering", "no");
-  res.flushHeaders?.();
-
-  const first = liveBuffer
-    .slice(-50)
-    .map((e) => {
-      const fakeDoc = {
-        ts: e.ts,
-        type: e.type,
-        phase: e.data?.phase,
-        status: e.data?.status,
-        socketId: e.data?.socketId,
-        meta: e.data,
-      };
-      return makeActivityEntryFromDoc(fakeDoc);
-    })
-    .filter(Boolean);
-  res.write(`data: ${JSON.stringify({ bootstrap: first })}\n\n`);
-
-  const hb = setInterval(() => {
-    try {
-      res.write(`: ping ${Date.now()}\n\n`);
-    } catch {}
-  }, 15000);
-  const client = { res, hb };
-  sseClients.add(client);
-  res.on("close", () => {
-    clearInterval(hb);
-    sseClients.delete(client);
-    try {
-      res.end();
-    } catch {}
-  });
-});
-
-// ===== REST: health / clients / jobs / logs =====
-app.get("/health", (_req, res) => res.send("ok"));
-
-// GET /clients -> online + statusSummary từ DB
-// ?onlyExt=1 để lọc chỉ client "thực" (extension) nếu muốn
-app.get("/clients", async (req, res) => {
-  try {
-    const onlyExt = String(req.query.onlyExt || "0") === "1";
-    const snapshot = await buildPhaseSnapshotFromDB();
-    const now = Date.now();
-
-    let actives = [...clients.values()].map((c) => {
-      const key = c.clientId || c.label || c.socketId;
-      const sum = snapshot[key] || {};
-      return {
-        socketId: c.socketId,
-        clientId: c.clientId,
-        label: c.label,
-        version: c.version,
-        ua: c.ua,
-        ip: c.ip,
-        connectedAt: c.connectedAt,
-        lastSeen: c.lastSeen,
-        statusSummary: {
-          overall: sum.overall || "idle",
-          lastJobId: sum.lastJobId,
-          lastTs: sum.lastTs || 0,
-          phases: sum.phases || {},
-          onlineForSec: Math.round((now - c.connectedAt) / 1000),
-          idleForSec: Math.round((now - (c.lastSeen || c.connectedAt)) / 1000),
-        },
-      };
-    });
-
-    if (onlyExt) {
-      actives = actives.filter(
-        (c) =>
-          (c.clientId && c.clientId.trim() !== "") ||
-          (c.version && String(c.version).startsWith("ext-")) ||
-          (c.label && String(c.label).startsWith("Machine-"))
-      );
-    }
-
-    actives.sort(
-      (a, b) => (b.statusSummary.lastTs || 0) - (a.statusSummary.lastTs || 0)
-    );
-
-    res.json(actives);
-  } catch (e) {
-    res.status(500).json({ ok: false, message: e.message });
-  }
-});
-
-// Jobs gần đây (tổng hợp theo jobId)
-app.get("/jobs", async (_req, res) => {
-  try {
-    const last = Date.now() - 7 * 24 * 3600 * 1000;
-    const rows = await RealtimeLog.aggregate([
-      { $match: { jobId: { $ne: null }, ts: { $gte: last } } },
-      {
-        $group: {
-          _id: "$jobId",
-          first: { $min: "$ts" },
-          last: { $max: "$ts" },
-        },
-      },
-      { $sort: { last: -1 } },
-      { $limit: 500 },
-    ]);
-    res.json(rows);
-  } catch (e) {
-    res.status(500).json({ ok: false, message: e.message });
-  }
-});
-
-// /logs: raw (DB) | view=activity (DB)
-app.get("/logs", async (req, res) => {
-  try {
-    const {
-      type,
-      jobId,
-      clientId,
-      view,
-      since,
-      limit,
-      sort = "asc",
-    } = req.query;
-
-    if (view === "activity") {
-      const entries = await buildActivityLogsFromDB({
-        since: since ? Number(since) : undefined,
-        limit: limit ? Number(limit) : 200,
-      });
-      const nextSince = entries.length
-        ? entries[entries.length - 1].ts
-        : since
-        ? Number(since)
-        : Date.now();
-      return res.json({ since: Number(since) || 0, nextSince, entries });
-    }
-
-    const q = {};
-    if (type) q.type = type;
-    if (jobId) q.jobId = jobId;
-    if (clientId) q.$or = [{ clientId }, { label: clientId }];
-
-    const rows = await RealtimeLog.find(q)
-      .sort({ ts: sort === "desc" ? -1 : 1 })
-      .limit(Math.min(Number(limit) || 200, 5000))
-      .lean();
-
-    res.json(rows);
-  } catch (e) {
-    res.status(500).json({ ok: false, message: e.message });
-  }
-});
-
-// ========== FIXED SCHEDULER (server-side) ==========
-const scheduler = {
-  enabled: false,
-  mode: "fixed", // "fixed" (0,4,8...) hoặc "interval" (tương thích cũ)
-  everyHours: Number(process.env.FIXED_EVERY_HOURS || 4),
-  baseHour: Number(process.env.FIXED_BASE_HOUR || 0), // 0h mặc định
-  timer: null,
-  lastTickTs: 0,
-};
-
-// Tính mốc kế tiếp theo giờ máy (local)
-function nextAlignedTs(fromTs = Date.now()) {
-  const d = new Date(fromTs);
-  d.setMinutes(0, 0, 0); // tròn giờ
-  let h = d.getHours();
-  const { baseHour, everyHours } = scheduler;
-  const mod = (((h - baseHour) % everyHours) + everyHours) % everyHours;
-  if (mod !== 0 || fromTs > d.getTime()) {
-    // chuyển tới giờ tiếp theo trùng lớp
-    h = h + (everyHours - mod);
-    d.setHours(h, 0, 0, 0);
-  }
-  if (d.getTime() <= fromTs) d.setHours(d.getHours() + everyHours, 0, 0, 0);
-  return d.getTime();
-}
-
-async function fireScheduledTick(reason = "schedule") {
-  const jobId = String(Date.now());
-  const payload = { type: "RUN_NOW", jobId, reason };
-  addLog("RUN_SCHEDULED", {
-    jobId,
-    reason,
-    schedule: {
-      mode: scheduler.mode,
-      baseHour: scheduler.baseHour,
-      everyHours: scheduler.everyHours,
-    },
-  });
-  io.emit("RUN_NOW", payload);
-  addLog("RUN_NOW", payload);
-  scheduler.lastTickTs = Date.now();
-}
-
-// Nếu mốc gần nhất chưa có import success/fail → phát lại
-async function maybeEmitCatchUp() {
-  if (!scheduler.enabled) return;
-  const prevTs = (() => {
-    const now = Date.now();
-    const next = nextAlignedTs(now);
-    return next - scheduler.everyHours * 3600 * 1000;
-  })();
-
-  const ok = await RealtimeLog.findOne({
-    type: "STATUS",
-    phase: "import",
-    status: { $in: ["success", "fail"] },
-    ts: { $gte: prevTs },
-  }).lean();
-
-  if (!ok) {
-    await fireScheduledTick("catch-up");
-  }
-}
-
-function scheduleStart() {
-  if (!scheduler.enabled || scheduler.timer) return;
-  const plan = () => {
-    const nextTs = nextAlignedTs();
-    const delay = Math.max(1000, nextTs - Date.now());
-    scheduler.timer = setTimeout(async () => {
-      scheduler.timer = null;
-      await fireScheduledTick("schedule");
-      plan(); // loop
-    }, delay);
-    console.log(
-      `[SCHEDULER] next tick at ${new Date(nextTs).toLocaleString()}`
-    );
-  };
-  plan();
-}
-
-function scheduleStop() {
-  if (scheduler.timer) {
-    clearTimeout(scheduler.timer);
-    scheduler.timer = null;
-  }
-}
-
-// ----- Admin APIs -----
-app.post("/admin/run-now", (req, res) => {
-  const jobId = String(Date.now());
-  const reason = req.body?.reason || "manual";
-  const payload = { type: "RUN_NOW", jobId, reason };
-  io.emit("RUN_NOW", payload);
-  addLog("RUN_NOW", payload);
-  res.json({ ok: true, jobId, reason });
-});
-
-/**
- * Bật/tắt lịch
- * Body hỗ trợ:
- *  - { enabled: true }  → bật fixed 4h (mặc định) bắt đầu từ baseHour=0
- *  - { enabled: true, mode:"fixed", everyHours, baseHour }
- *  - { enabled: false }
- * (Giữ tương thích cũ: nếu gửi intervalMin/intervalMs thì chỉ log lại, nhưng lịch chạy vẫn fixed.)
- */
-app.post("/admin/schedule", async (req, res) => {
-  const { enabled } = req.body || {};
-  if (enabled === true) {
-    const every = Number.isFinite(req.body?.everyHours)
-      ? Number(req.body.everyHours)
-      : scheduler.everyHours;
-    const base = Number.isFinite(req.body?.baseHour)
-      ? Number(req.body.baseHour)
-      : scheduler.baseHour;
-    scheduler.enabled = true;
-    scheduler.mode = "fixed";
-    scheduler.everyHours = Math.max(1, every);
-    scheduler.baseHour = Math.min(23, Math.max(0, base));
-    scheduleStop();
-    scheduleStart();
-
-    await RealtimeLog.create({
-      ts: Date.now(),
-      type: "SYNC_CONFIG",
-      meta: {
-        enabled: true,
-        mode: "fixed",
-        everyHours: scheduler.everyHours,
-        baseHour: scheduler.baseHour,
-      },
-      day: new Date().toISOString().slice(0, 10),
-    });
-
-    addLog("SYNC_CONFIG", {
-      enabled: true,
-      mode: "fixed",
-      everyHours: scheduler.everyHours,
-      baseHour: scheduler.baseHour,
-    });
-    return res.json({
-      ok: true,
-      payload: {
-        enabled: true,
-        mode: "fixed",
-        everyHours: scheduler.everyHours,
-        baseHour: scheduler.baseHour,
-      },
-    });
-  }
-
-  // disable
-  scheduler.enabled = false;
-  scheduleStop();
-  await RealtimeLog.create({
-    ts: Date.now(),
-    type: "SYNC_CONFIG",
-    meta: { enabled: false },
-    day: new Date().toISOString().slice(0, 10),
-  });
-  addLog("SYNC_CONFIG", { enabled: false });
-  return res.json({ ok: true, payload: { enabled: false } });
-});
-
-// ===== Run Server =====
 const PORT = process.env.PORT || 5000;
 connectDB();
 httpServer.listen(PORT, "0.0.0.0", () => {
-  console.log(
-    `🚀 HTTP + Socket.IO running at http://localhost:${PORT} (path /socket)`
-  );
+  console.log(`🚀 API + Socket.IO on http://localhost:${PORT} (path /socket)`);
   if (process.env.AUTO_START_FIXED === "1") {
     scheduler.enabled = true;
-    scheduleStart();
+    schedStart();
   }
 });

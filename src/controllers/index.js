@@ -20,6 +20,8 @@ const APOController = require("./APO.controller");
 const PsdTaskController = require("./psdTask.controller");
 const ideaTaskController = require("./ideaTask.controller");
 const realtimeLogController = require("./realtimeLog.controller");
+const jobController = require("./job.controller");
+const adminController = require("./admin.controller");
 module.exports = {
   roleController,
   userController,
@@ -43,4 +45,6 @@ module.exports = {
   PsdTaskController,
   ideaTaskController,
   realtimeLogController,
+  jobController,
+  adminController,
 };
