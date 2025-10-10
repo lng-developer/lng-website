@@ -93,7 +93,7 @@ const connectExtension = async (req, res) => {
     }
 
     // Tìm shop theo store = shopId (nếu shop của bạn dùng _id, hãy đổi điều kiện)
-    const shop = await Shop.findOne({ store: shopId }).lean();
+    const shop = await Shop.findOne({ _id: shopId }).lean();
     if (!shop)
       return res.status(404).json({ ok: false, message: "Shop not found" });
 
