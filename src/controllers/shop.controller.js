@@ -51,17 +51,26 @@ const updateShopStatus = async (req, res) => {
 
 const getClients = async (_req, res) => {
   try {
-    const shops = await Shop.find({}, { store: 1, name: 1, clients: 1 }).lean();
+    // lấy cả _id để làm key hiển thị
+    const shops = await Shop.find(
+      {},
+      { _id: 1, store: 1, name: 1, clients: 1 }
+    ).lean();
     const out = [];
+
     for (const s of shops) {
-      for (const c of s.clients || []) {
+      const list = Array.isArray(s.clients) ? s.clients : [];
+      list.forEach((c, idx) => {
         out.push({
+          // trước đây có socketId/clientId; giờ không có nữa
           socketId: null,
-          clientId: c.clientId,
-          label: c.label || `${s.name || s.store}`,
+          clientId: null, // giữ field cho FE cũ nếu cần
+          label: c.label || `${s.name || s.store || s._id}`,
           version: c.version || "",
           ua: "",
           ip: "",
+          // tạo một id ổn định để FE dùng làm key
+          id: `${String(s._id)}:${idx}`,
           connectedAt: c.firstSeen ? new Date(c.firstSeen).getTime() : 0,
           lastSeen: c.lastSeen ? new Date(c.lastSeen).getTime() : 0,
           statusSummary: {
@@ -73,8 +82,9 @@ const getClients = async (_req, res) => {
             idleForSec: 0,
           },
         });
-      }
+      });
     }
+
     // sắp xếp theo lastSeen giảm dần
     out.sort((a, b) => (b.lastSeen || 0) - (a.lastSeen || 0));
     res.json(out);
@@ -85,62 +95,48 @@ const getClients = async (_req, res) => {
 
 const connectExtension = async (req, res) => {
   try {
-    const { shopId, clientId, label, version } = req.body || {};
-    if (!shopId || !clientId) {
-      return res
-        .status(400)
-        .json({ ok: false, message: "shopId & clientId required" });
+    const { shopId, label, version } = req.body || {};
+    if (!shopId) {
+      return res.status(400).json({ ok: false, message: "shopId required" });
     }
 
-    // Tìm shop theo store = shopId (nếu shop của bạn dùng _id, hãy đổi điều kiện)
-    const shop = await Shop.findOne({ _id: shopId }).lean();
+    // 1) Tìm shop theo _id
+    const shop = await Shop.findOne(
+      { _id: shopId },
+      { _id: 1, name: 1, store: 1 }
+    ).lean();
     if (!shop)
       return res.status(404).json({ ok: false, message: "Shop not found" });
 
+    // 2) Chỉ PUSH thêm 1 phần tử clients (không check trùng, theo yêu cầu)
     const now = new Date();
-
-    // upsert client trong mảng
-    const updated = await Shop.findOneAndUpdate(
+    await Shop.updateOne(
       { _id: shopId },
       {
-        $set: {
-          "clients.$.label": label || shopId,
-          "clients.$.version": version || "",
-          "clients.$.status": "online",
-          "clients.$.lastSeen": now,
+        $push: {
+          clients: {
+            // KHÔNG có clientId nữa
+            label: label || shop.name || shop.store || String(shopId),
+            version: version || "",
+            status: "online",
+            firstSeen: now,
+            lastSeen: now,
+          },
         },
-      },
-      { new: true }
+      }
     );
 
-    if (!updated) {
-      // chưa tồn tại → push mới
-      await Shop.updateOne(
-        { _id: shopId },
-        {
-          $push: {
-            clients: {
-              clientId,
-              label: label || shopId,
-              version: version || "",
-              status: "online",
-              firstSeen: now,
-              lastSeen: now,
-            },
-          },
-        }
-      );
-    }
-
-    // log nhẹ
-    await RealtimeLog.create({
-      ts: Date.now(),
-      type: "CONNECT",
-      day: now.toISOString().slice(0, 10),
-      clientId,
-      label: label || null,
-      meta: { shopId, version: version || "" },
-    });
+    // 3) (Tuỳ chọn) log nhẹ
+    try {
+      await RealtimeLog.create({
+        ts: Date.now(),
+        type: "CONNECT",
+        day: now.toISOString().slice(0, 10),
+        clientId: null,
+        label: label || null,
+        meta: { shopId, version: version || "" },
+      });
+    } catch (_) {}
 
     return res.json({ ok: true });
   } catch (e) {
