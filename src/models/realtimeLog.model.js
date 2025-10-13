@@ -37,9 +37,6 @@ const RealtimeLogSchema = new mongoose.Schema(
     // ---- MỚI: mảng kết quả từng pha của 1 lần chạy
     // [{ type:'import'|'report'|'ads', status:'success'|'fail', ... }]
     phases: { type: [PhasedItemSchema], default: undefined },
-
-    // ---- GIỮ TƯƠNG THÍCH CŨ (tùy chọn): log đơn lẻ theo phase/status
-    phase: { type: String, index: true }, // import | report | ads | config
     status: { type: String, index: true }, // start | success | fail
     ms: Number,
     error: String,

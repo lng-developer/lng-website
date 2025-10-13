@@ -125,7 +125,7 @@ const addLog = async (req, res) => {
       day: new Date(ts).toISOString().slice(0, 10),
       clientId: clientId || null,
       label: label || null,
-      phase: phaseArr, // <-- LƯU DƯỚI DẠNG MẢNG
+      phases: phaseArr, // <-- LƯU DƯỚI DẠNG MẢNG
       status: overall, // overall dựa trên mảng phases
       ms: Number.isFinite(ms) ? ms : undefined,
       error: error || undefined,
