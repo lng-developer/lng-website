@@ -69,6 +69,7 @@ const getClients = async (_req, res) => {
           version: c.version || "",
           ua: "",
           ip: "",
+          shopName: s.name,
           // tạo một id ổn định để FE dùng làm key
           id: `${String(s._id)}:${idx}`,
           connectedAt: c.firstSeen ? new Date(c.firstSeen).getTime() : 0,
