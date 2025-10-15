@@ -106,32 +106,55 @@ const connectExtension = async (req, res) => {
       { _id: shopId },
       { _id: 1, name: 1, store: 1 }
     ).lean();
-    if (!shop)
+    if (!shop) {
       return res.status(404).json({ ok: false, message: "Shop not found" });
+    }
 
-    // 2) Chỉ PUSH thêm 1 phần tử clients (không check trùng, theo yêu cầu)
     const now = new Date();
-    await Shop.updateOne(
-      { _id: shopId },
-      {
-        $push: {
-          clients: {
-            // KHÔNG có clientId nữa
-            label: label || shop.name || shop.store || String(shopId),
-            version: version || "",
-            status: "online",
-            firstSeen: now,
-            lastSeen: now,
-          },
-        },
-      }
-    );
 
-    // 3) (Tuỳ chọn) log nhẹ
+    // 2) Kiểm tra trong mảng clients đã có phần tử có shopId này chưa
+    const existed = await Shop.exists({
+      _id: shopId,
+      "clients.shopId": shopId,
+    });
+
+    if (existed) {
+      // ĐÃ TỒN TẠI: không tạo mới, chỉ cập nhật phần tử trùng shopId
+      await Shop.updateOne(
+        { _id: shopId, "clients.shopId": shopId },
+        {
+          $set: {
+            "clients.$.lastSeen": now,
+            "clients.$.status": "online",
+            ...(version ? { "clients.$.version": version } : {}),
+            ...(label ? { "clients.$.label": label } : {}),
+          },
+        }
+      );
+    } else {
+      // CHƯA TỒN TẠI: thêm mới 1 phần tử vào clients
+      await Shop.updateOne(
+        { _id: shopId },
+        {
+          $push: {
+            clients: {
+              shopId, // quan trọng: để lần sau nhận diện trùng theo shopId
+              label: label || shop.name || shop.store || String(shopId),
+              version: version || "",
+              status: "online",
+              firstSeen: now,
+              lastSeen: now,
+            },
+          },
+        }
+      );
+    }
+
+    // 3) (Tuỳ chọn) log
     try {
       await RealtimeLog.create({
         ts: Date.now(),
-        type: "CONNECT",
+        type: existed ? "CONNECT_UPDATE" : "CONNECT_CREATE",
         day: now.toISOString().slice(0, 10),
         clientId: null,
         label: label || null,
