@@ -252,6 +252,9 @@ const getReportMatrix = async (req, res) => {
     const matchStage = {
       purchase_date: { $gte: fromDate, $lte: toDate },
       amazon_finance_total: { $exists: true, $ne: null },
+
+      // NEW: loại bỏ đơn hủy khỏi report
+      status: { $nin: ["Cancelled", "Canceled"] },
     };
 
     let sellerIdSet = null;
@@ -321,7 +324,6 @@ const getReportMatrix = async (req, res) => {
           items: { $sum: 1 },
           revenue: { $sum: { $ifNull: ["$amazon_finance_total.revenue", 0] } },
           fee: { $sum: { $ifNull: ["$amazon_finance_total.fee", 0] } },
-          // NEW:
           shipping_tax: {
             $sum: { $ifNull: ["$amazon_finance_total.shipping_tax", 0] },
           },
@@ -333,7 +335,6 @@ const getReportMatrix = async (req, res) => {
           item_tax: {
             $sum: { $ifNull: ["$amazon_finance_total.item_tax", 0] },
           },
-
           baseCost: { $sum: { $ifNull: ["$base_cost", 0] } },
           ads: { $sum: { $ifNull: ["$ads", 0] } },
           opCost: { $sum: { $ifNull: ["$op_cost", 0] } },
@@ -382,11 +383,10 @@ const getReportMatrix = async (req, res) => {
           revenue: zeroArr(),
           baseCost: zeroArr(),
           ads: zeroArr(),
-          // NEW: 3 mảng dùng cho profit1
+          // 3 mảng finance
           shippingTax: zeroArr(),
           itemPromotionDiscount: zeroArr(),
           itemTax: zeroArr(),
-
           profit1: zeroArr(),
           profit2: zeroArr(),
         };
@@ -401,7 +401,6 @@ const getReportMatrix = async (req, res) => {
       S.refund[idx] = +(r.refund || 0).toFixed(2);
       S.ads[idx] = +(r.ads || 0).toFixed(2);
 
-      // NEW: map 3 trường finance
       S.shippingTax[idx] = +(r.shipping_tax || 0).toFixed(2);
       S.itemPromotionDiscount[idx] = +(r.item_promotion_discount || 0).toFixed(
         2
@@ -439,7 +438,6 @@ const getReportMatrix = async (req, res) => {
     for (const sellerName of Object.keys(result)) {
       const S = result[sellerName];
       for (let i = 0; i < dayList.length; i++) {
-        // NEW: công thức profit1
         const p1 =
           S.revenue[i] -
           (S.baseCost[i] +
