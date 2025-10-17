@@ -150,13 +150,13 @@ function buildLineItem(item = {}) {
 
     return {
         name: item?.cost_breakdown?.itemDisplayName || item?.title || item?.name || 'Custom Product',
-        product_id: item?.cost_breakdown?.matchedSku || undefined,
-        sku: item?.cost_breakdown?.matchedSku || item?.sku || undefined,
-        merchize_sku: item?.cost_breakdown?.matchedSku || item?.vendorVariantSku || undefined,
+        product_id: item?.cost_breakdown?.matchedSku || null,
+        sku: item?.cost_breakdown?.matchedSku || item?.sku || null,
+        merchize_sku: item?.cost_breakdown?.matchedSku || item?.vendorVariantSku || null,
         quantity: Number(item?.quantity || 1),
-        price: Number(item?.price) || Number(item?.cost_breakdown?.unit_price) || undefined,
+        price: Number(item?.price) || Number(item?.cost_breakdown?.unit_price) || null,
         currency: item?.currency || 'USD',
-        image: pickMockup(item) || undefined,
+        image: pickMockup(item) || null,
         ...designs,
         attributes: buildAttributes(item),
     };
