@@ -137,7 +137,7 @@ function mapShippingMethod(orderObj = {}) {
 
     const s = String(raw || "").toLowerCase().trim();
     if (/^(standard|economy|ground)$/.test(s)) return "standard";
-    if (/^(expedited|express|priority|2d|two)/.test(s)) return "expedited";
+    if (/^(expedited|express|priority|2d|two)/.test(s)) return "priority";
     if (/^(overnight|next)/.test(s)) return "overnight";
     return "standard";
 }
