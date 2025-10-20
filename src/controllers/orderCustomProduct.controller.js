@@ -1160,11 +1160,10 @@ const getFrontendOrders = async (req, res) => {
     const isAdmin = /^admin$/i.test(role);
     const isSeller = /^seller$/i.test(role);
     const isProduction = /^production$/i.test(role);
+    const isDesignLeader = /^design[-_\s]?leader$/i.test(role);
 
-    if (!isAdmin && !isSeller && !isProduction) {
-      return res
-        .status(403)
-        .json({ message: "Access denied: insufficient permissions" });
+    if (!isAdmin && !isSeller && !isProduction && !isDesignLeader) {
+      return res.status(403).json({ message: "Access denied: insufficient permissions" });
     }
 
     // We'll collect individual filter clauses into `filters` then compose $and
