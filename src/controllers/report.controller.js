@@ -27,23 +27,42 @@ const importReportFromFile = async (req, res) => {
     }
 
     const raw = req.file.buffer.toString("utf8");
-    const rows = parse(raw, {
-      columns: true,
-      delimiter: "\t",
-      skip_empty_lines: true,
-      bom: true,
-      trim: true,
-      relax_column_count: true,
-    }).map(norm);
 
-    // Gom theo orderId
+    // ✅ Parse TSV, tắt cơ chế quote để không nổ khi gặp dấu "
+    let rows;
+    try {
+      rows = parse(raw, {
+        columns: true,
+        delimiter: "\t",
+        skip_empty_lines: true,
+        bom: true,
+        trim: true,
+        relax_column_count: true,
+        quote: false,              // <<-- QUAN TRỌNG: tắt quote parsing
+        record_delimiter: ["\r\n", "\n"], // ổn định xuống dòng hỗn hợp
+      }).map(norm);
+    } catch (e1) {
+      // Fallback rất “nới tay” nếu có dòng hỏng lẻ tẻ
+      rows = parse(raw, {
+        columns: true,
+        delimiter: "\t",
+        skip_empty_lines: true,
+        bom: true,
+        trim: true,
+        relax_column_count: true,
+        relax_quotes: true,        // chấp nhận quote “lệch chuẩn”
+        quote: false,              // vẫn tắt quote để không coi " là đặc biệt
+        on_record: (rec) => rec,   // giữ nguyên bản ghi
+      }).map(norm);
+    }
+
+    // ====== (phần còn lại giữ nguyên) ======
     const bucket = new Map();
 
     for (const r of rows) {
       const orderId = r["amazon-order-id"]?.trim();
       if (!orderId) continue;
 
-      // Amazon report đã là số tiền tổng của dòng (không nhân quantity)
       const qty = num(r["quantity"]);
       const itemPrice = num(r["item-price"]);
       const itemTax = num(r["item-tax"]);
@@ -51,7 +70,6 @@ const importReportFromFile = async (req, res) => {
       const shippingTax = num(r["shipping-tax"]);
       const discount = num(r["item-promotion-discount"]);
 
-      // ✅ Công thức mới
       const revenue = itemPrice + shippingPrice;
       const fee = 0.17 * (itemPrice + shippingPrice);
 
@@ -80,13 +98,11 @@ const importReportFromFile = async (req, res) => {
       bucket.set(orderId, acc);
     }
 
-    // ===== Bulk updates bằng native driver =====
     const col = mongoose.connection.collection("ordercustomproducts");
     const ops = [];
 
     for (const acc of bucket.values()) {
       const aft = {
-        // các trường sẽ GHI ĐÈ toàn bộ amazon_finance_total
         item_price: +acc.item_price.toFixed(2),
         item_tax: +acc.item_tax.toFixed(2),
         shipping_price: +acc.shipping_price.toFixed(2),
@@ -94,8 +110,8 @@ const importReportFromFile = async (req, res) => {
         item_promotion_discount: +acc.item_promotion_discount.toFixed(2),
         fee: +acc.fee.toFixed(2),
         revenue: +acc.revenue.toFixed(2),
-        opCost: 0, // ghi đè mặc định 0
-        refund: 0, // ghi đè mặc định 0
+        opCost: 0,
+        refund: 0,
         computed_at: new Date(),
       };
 
@@ -104,21 +120,16 @@ const importReportFromFile = async (req, res) => {
 
       ops.push({
         updateOne: {
-          filter: { orderId: acc.orderId }, // chỉ update đơn đã tồn tại
+          filter: { orderId: acc.orderId },
           update: [
-            // Stage 1: GHI ĐÈ
-            {
-              $set: {
+            { $set: {
                 amazon_total_quantity: acc.quantity,
-                amazon_finance_total: aft, // ❗ ghi đè toàn bộ object
+                amazon_finance_total: aft,
                 ...(hasValidPurchaseDate
                   ? { purchase_date: { $ifNull: ["$purchase_date", d] } }
                   : {}),
-              },
-            },
-            // Stage 2: tính profit1 theo công thức mới
-            {
-              $set: {
+            }},
+            { $set: {
                 "amazon_finance_total.profit1": {
                   $round: [
                     {
@@ -138,11 +149,8 @@ const importReportFromFile = async (req, res) => {
                     2,
                   ],
                 },
-              },
-            },
-            // Stage 3: profit2 = profit1 - (opCost + refund)
-            {
-              $set: {
+            }},
+            { $set: {
                 "amazon_finance_total.profit2": {
                   $round: [
                     {
@@ -159,10 +167,9 @@ const importReportFromFile = async (req, res) => {
                     2,
                   ],
                 },
-              },
-            },
+            }},
           ],
-          upsert: false, // ❗ KHÔNG tạo mới — chỉ ghi đè order đã có
+          upsert: false,
         },
       });
     }
@@ -192,6 +199,7 @@ const importReportFromFile = async (req, res) => {
     res.status(500).json({ message: "Import failed", error: err.message });
   }
 };
+
 
 // helpers
 function makeDayList(fromISO, toISO) {
