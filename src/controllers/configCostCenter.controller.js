@@ -43,7 +43,7 @@ const listConfigs = async (req, res) => {
             product_for_seller,
             product_for_seller_name,
             search,
-            sort = '-created_at'
+            sort = 'config_code:asc'
         } = req.query;
 
         const skip = (parseInt(page) - 1) * parseInt(perPage);
