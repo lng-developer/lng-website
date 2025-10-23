@@ -3443,12 +3443,36 @@ async function createReplacementOrder(req, res) {
     // 6) Tạo đơn
     const created = await OrderCustomProduct.create(dstPayload);
 
+    try {
+      const validationResult = await validateAddressWithSmarty(created.customer_infor);
+
+      // cập nhật trường theo đúng model
+      created.address_validation = {
+        isValid: !!validationResult?.isValid,
+        smartyResponse: validationResult?.smartyResponse || validationResult || null,
+      };
+
+      // Nếu địa chỉ không hợp lệ => đánh dấu trạng thái tổng để chặn tuyến fulfill/gửi Grabink
+      if (created.address_validation.isValid === false) {
+        created.scale_overall_status = "Address Invalid"; // enum đã có trong model
+      }
+
+      await created.save();
+    } catch (e) {
+      // Nếu gọi dịch vụ validate lỗi: giữ nguyên null để có thể retry sau
+      created.address_validation = { isValid: null, smartyResponse: null };
+      await created.save();
+    }
+
+    // 6.2) Trả về chi tiết rõ ràng để FE hiển thị ngay
     return res.json({
       message: "Replacement order created",
       source_order_id: src.orderId,
       replacement_order_id: created.orderId,
       items_copied: newItems.length,
       selected_order_item_ids: newItems.map((i) => i.orderItemId),
+      address_validation: created.address_validation,             // <-- khớp model
+      scale_overall_status: created.scale_overall_status          // <-- khớp model
     });
   } catch (err) {
     console.error("createReplacementOrder error:", err);
