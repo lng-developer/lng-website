@@ -263,6 +263,7 @@ const orderCustomProductSchema = new mongoose.Schema({
       "Failed",
       "QC Rejected",
       "Cancelled",
+      "Address Invalid"
     ],
     default: "Need Scale",
     index: true,
