@@ -135,8 +135,9 @@ const listMappings = async (req, res) => {
                 sortObj[k] = String(dir || 'asc').toLowerCase() === 'desc' ? -1 : 1;
             });
         }
+
         if (Object.keys(sortObj).length === 0) {
-            sortObj = { created_at: -1 }; // mặc định sắp xếp mới nhất
+            sortObj = { config_code: 1 };
         }
 
         const limit = String(perPage).toLowerCase() === 'all' ? 0 : Math.max(1, parseInt(perPage));
