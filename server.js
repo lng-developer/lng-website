@@ -8,6 +8,7 @@ dotenv.config();
 const http = require("http");
 const connectDB = require("./src/config/db.config");
 const registerSocketHandlers = require("./src/socket/index");
+const presence = require("./src/lib/presence");
 
 // ===== App
 const app = express();
@@ -89,6 +90,7 @@ const io = new Server(httpServer, {
 // Cho các nơi khác (routes) lấy ra dùng
 app.set("io", io);
 app.set("ackMap", new Map());
+app.set("presence", presence);
 
 registerSocketHandlers({ app, io });
 app.use("/api/ext", extRoutes);

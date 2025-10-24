@@ -14,4 +14,12 @@ router.post("/connect", extController.connectExtension);
 //  - IMPORT_ADS_SPEND  -> payload: { status, date }
 router.post("/command", extController.requestExtension);
 
+router.get("/online", extController.getClientOnline);
+
+router.get("/logs", extController.getLogs);
+
+router.get("/logs/summary", extController.getLogsSummary);
+
+router.get("/logs/export", extController.exportLogs);
+
 module.exports = router;

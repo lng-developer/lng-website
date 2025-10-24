@@ -1,6 +1,7 @@
 const db = require("../models");
 const Shop = db.shop;
 const RealtimeLog = db.RealtimeLog;
+const logbus = require("../lib/logbus");
 
 // Helpers
 function newJobId() {
@@ -297,4 +298,139 @@ const requestExtension = async (req, res) => {
   }
 };
 
-module.exports = { getClients, connectExtension, requestExtension };
+// GET /api/ext/clients/online
+const getClientOnline = async (req, res) => {
+  try {
+    const presence = req.app.get("presence");
+    if (!presence) return res.json([]);
+
+    // snapshot() đã lọc theo TTL → coi như online
+    const snap = presence.snapshot(); // [{machineId, shopId, label, version, ua, ip, lastSeen, socketId, ...}]
+    if (!snap.length) return res.json([]);
+
+    // Lấy thông tin shop name/store cho các shopId xuất hiện
+    const uniqueShopIds = [
+      ...new Set(snap.map((c) => String(c.shopId)).filter(Boolean)),
+    ];
+
+    const shops = await Shop.find(
+      { _id: { $in: uniqueShopIds } },
+      { _id: 1, name: 1, store: 1 }
+    ).lean();
+
+    const shopMap = new Map(shops.map((s) => [String(s._id), s]));
+
+    const out = snap.map((c) => {
+      const shop = shopMap.get(String(c.shopId));
+      const lastSeenMs = c.lastSeen || Date.now();
+      return {
+        // tương thích FE cũ
+        socketId: c.socketId || null,
+        clientId: c.machineId || null,
+
+        // thông tin hiển thị
+        machineId: c.machineId || null,
+        label: c.label || shop?.name || shop?.store || `Client ${c.machineId}`,
+        version: c.version || "",
+        ua: c.ua || "",
+        ip: c.ip || "",
+
+        // shop
+        shopId: String(c.shopId || ""),
+        shopName: shop?.name || shop?.store || String(c.shopId || ""),
+
+        // key ổn định cho FE
+        id: `${String(c.shopId)}:${String(c.machineId)}`,
+
+        // thời gian
+        connectedAt: lastSeenMs, // presence không giữ firstSeen → dùng lastSeen làm mốc gần nhất
+        lastSeen: lastSeenMs,
+
+        // trạng thái luôn online vì lấy từ RAM realtime
+        status: "online",
+        statusSummary: {
+          overall: "success",
+          lastJobId: null,
+          lastTs: lastSeenMs,
+          phases: {},
+          onlineForSec: 0,
+          idleForSec: 0,
+        },
+      };
+    });
+
+    // sort theo lastSeen giảm dần
+    out.sort((a, b) => (b.lastSeen || 0) - (a.lastSeen || 0));
+    return res.json(out);
+  } catch (e) {
+    return res.status(500).json({ ok: false, message: e.message });
+  }
+};
+
+const getLogs = (req, res) => {
+  const {
+    shopId = "",
+    machineId = "",
+    since = 0,
+    limit = 200,
+  } = req.query || {};
+  try {
+    const logs = logbus.query({
+      shopId: shopId || undefined,
+      machineId: machineId || undefined,
+      since: Number(since) || 0,
+      limit: Math.min(Math.max(Number(limit) || 200, 1), 1000),
+    });
+    res.json({ ok: true, logs });
+  } catch (e) {
+    res.status(500).json({ ok: false, message: e.message });
+  }
+};
+
+const getLogsSummary = (req, res) => {
+  const {
+    shopId = "",
+    machineId = "",
+    from = 0,
+    to = Date.now(),
+  } = req.query || {};
+  try {
+    const s = logbus.summary({
+      shopId: shopId || undefined,
+      machineId: machineId || undefined,
+      from: Number(from) || 0,
+      to: Number(to) || Date.now(),
+    });
+    res.json({ ok: true, ...s });
+  } catch (e) {
+    res.status(500).json({ ok: false, message: e.message });
+  }
+};
+
+const exportLogs = (req, res) => {
+  const {
+    shopId = "",
+    machineId = "",
+    since = 0,
+    limit = 1000,
+  } = req.query || {};
+  const rows = logbus.query({
+    shopId: shopId || undefined,
+    machineId: machineId || undefined,
+    since: Number(since) || 0,
+    limit: Math.min(Math.max(Number(limit) || 1000, 1), 5000),
+  });
+  res.setHeader("Content-Type", "application/x-ndjson; charset=utf-8");
+  for (const r of rows) res.write(JSON.stringify(r) + "\n");
+  res.end();
+};
+
+module.exports = {
+  getClients,
+  connectExtension,
+  requestExtension,
+  getClientOnline,
+  getLogs,
+  getLogsSummary,
+  exportLogs,
+};
