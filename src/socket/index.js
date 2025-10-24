@@ -38,6 +38,10 @@ module.exports = function registerSocketHandlers({ app, io }) {
       socket.handshake.address ||
       "";
 
+    // --- JOIN ROOMS (QUAN TRỌNG) ---
+    socket.join(`shop:${shopId}`);
+    socket.join(`machine:${machineId}`);
+
     // Mark presence ONLINE in RAM
     presence.online({
       shopId,

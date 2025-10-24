@@ -209,91 +209,79 @@ const connectExtension = async (req, res) => {
   }
 };
 
+function makeJobId() {
+  return "job_" + Date.now() + "_" + Math.random().toString(36).slice(2, 7);
+}
+
 const requestExtension = async (req, res) => {
   try {
-    const io = req.app.get("io");
-    if (!io)
-      return res.status(500).json({ ok: false, message: "io not ready" });
-
     const {
       shopId,
       machineId,
       type,
-      status,
-      date,
+      payload,
       requireAck = false,
     } = req.body || {};
-    if (!shopId)
-      return res.status(400).json({ ok: false, message: "shopId required" });
-    if (!machineId)
-      return res.status(400).json({ ok: false, message: "machineId required" });
-    if (!type)
-      return res.status(400).json({ ok: false, message: "type required" });
-    if (!status)
-      return res.status(400).json({ ok: false, message: "status required" });
-
-    const allowed = new Set(["IMPORT_ORDERS", "IMPORT_ADS_SPEND"]);
-    if (!allowed.has(type))
+    if (!shopId || !machineId || !type) {
       return res
         .status(400)
-        .json({ ok: false, message: "Unsupported command type" });
-
-    const shop = await Shop.findOne(
-      { _id: shopId },
-      { _id: 1, clients: 1 }
-    ).lean();
-    if (!shop)
-      return res.status(404).json({ ok: false, message: "Shop not found" });
-
-    const client = (shop.clients || []).find(
-      (c) => (c.machineId || c.clientId) === machineId
-    );
-    if (!client)
-      return res
-        .status(404)
-        .json({ ok: false, message: "Client not found in shop" });
-    if (client.status !== "online")
-      return res.status(409).json({ ok: false, message: "Client is offline" });
-
-    const jobId = newJobId();
-    const payload = { status: String(status) };
-    if (type === "IMPORT_ADS_SPEND") {
-      payload.date = date || new Date().toISOString().slice(0, 10);
+        .json({ ok: false, message: "shopId, machineId, type required" });
     }
 
-    const task = { jobId, type, payload, ts: Date.now(), from: "API" };
-    io.to(`machine:${machineId}`).emit("server:task", task);
+    const io = req.app.get("io");
+    const presence = req.app.get("presence");
+    const ackMap = req.app.get("ackMap") || new Map();
+    req.app.set("ackMap", ackMap);
 
-    try {
-      await RealtimeLog.create({
-        ts: Date.now(),
-        type: "SERVER_TASK_EMIT",
-        day: new Date().toISOString().slice(0, 10),
-        clientId: machineId,
-        meta: { shopId, jobId, action: type, payload },
+    // tìm client trong presence để lấy socketId (nếu có)
+    const client =
+      presence.getByMachine?.(machineId) ||
+      presence.findBy?.({ shopId, machineId });
+    const socketId = client?.socketId;
+
+    const jobId = makeJobId();
+    const task = { jobId, type, payload: payload || {} };
+
+    let delivered = false;
+
+    // 1) emit trực tiếp theo socketId (chắc chắn nhất)
+    if (socketId && io.sockets.sockets.get(socketId)) {
+      io.to(socketId).emit("server:task", task);
+      delivered = true;
+      console.log("[CMD] emit by socketId:", socketId, task);
+    } else {
+      console.warn("[CMD] no socketId/live socket for machine:", machineId);
+    }
+
+    // 2) fallback: emit theo ROOM (chỉ được nếu extension đã join room)
+    if (!delivered) {
+      io.to(`machine:${machineId}`).emit("server:task", task);
+      delivered = true; // coi như đã phát (không kiểm chứng được có ai nghe)
+      console.log("[CMD] emit by room:", `machine:${machineId}`, task);
+    }
+
+    // nếu không yêu cầu ACK → trả OK ngay
+    if (!requireAck) {
+      return res.json({ ok: true, jobId, delivered });
+    }
+
+    // nếu requireAck → chờ client:ack jobId
+    const timeoutMs = 5000; // 5s
+    const waitAck = new Promise((resolve) => {
+      const to = setTimeout(
+        () => resolve({ ok: false, timeout: true }),
+        timeoutMs
+      );
+      ackMap.set(jobId, (ackResult) => {
+        clearTimeout(to);
+        resolve(ackResult);
       });
-    } catch {}
+    });
 
-    if (!requireAck) return res.json({ ok: true, enqueued: true, jobId });
-
-    // Chờ ACK ngắn (5s)
-    const ackMap = ensureAckMap(req.app);
-    const waitMs = 5000;
-    let resolveAck;
-    const p = new Promise((resolve) => (resolveAck = resolve));
-    ackMap.set(jobId, resolveAck);
-
-    const timer = setTimeout(() => {
-      if (ackMap.has(jobId)) {
-        ackMap.delete(jobId);
-        resolveAck({ ok: false, timeout: true });
-      }
-    }, waitMs);
-
-    const ack = await p;
-    clearTimeout(timer);
-    res.json({ ok: true, jobId, ack });
+    const ack = await waitAck;
+    return res.json({ ok: true, jobId, ack });
   } catch (e) {
+    console.error("POST /api/ext/command error:", e);
     res.status(500).json({ ok: false, message: e.message });
   }
 };
