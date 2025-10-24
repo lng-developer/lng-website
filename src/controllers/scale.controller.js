@@ -229,6 +229,25 @@ async function resolveProviderFromOrder(orderDoc, VendorProductModel) {
   return { providerKey: [...provSet][0], reasons: [] };
 }
 
+const isAddressInvalid = (order) =>
+  order?.address_validation && order.address_validation.isValid === false;
+
+const buildInvalidAddressMessage = (order) => {
+  const ci = order?.customer_infor || {};
+  // gom ít thông tin để người dùng thấy họ cần sửa gì
+  const addr = [
+    ci?.name,
+    ci?.address,
+    ci?.address_2,
+    `${ci?.city || ""}${ci?.state ? ", " + ci.state : ""} ${ci?.zip_code || ""}`,
+    ci?.country,
+  ]
+    .filter(Boolean)
+    .join(" | ");
+
+  return `Invalid Address: address validation failed. Please correct the address before sending. Address: ${addr}`;
+};
+
 const confirmScaleForItem = async (req, res) => {
   try {
     const { orderId, orderItemId } = req.params;
@@ -302,6 +321,16 @@ const confirmScaleForItem = async (req, res) => {
 
     // === Nếu order đã "Ready" ===
     if (order.scale_overall_status === "Ready") {
+
+      if (isAddressInvalid(order)) {
+        order.scale_overall_status = "Address Invalid"; // bạn có thể đổi tên status nếu muốn
+        await order.save();
+        return res.status(409).json({
+          message: buildInvalidAddressMessage(order),
+          address_validation: order.address_validation || null,
+        });
+      }
+
       // Đơn nội bộ LNG Group: tự đánh dấu Sent + Fulfilled, không gửi vendor
       const isLNG = await isLNGGroupOrder(order);
       if (isLNG) {
@@ -400,6 +429,14 @@ const retrySendFulfillment = async (req, res) => {
 
     const order = await OrderCustomProduct.findOne({ orderId });
     if (!order) return res.status(404).json({ message: "Order not found" });
+
+    if (isAddressInvalid(order)) {
+      // (không đổi status ở đây để tránh “dẫm” trạng thái đang có, chỉ báo lỗi)
+      return res.status(409).json({
+        message: buildInvalidAddressMessage(order),
+        address_validation: order.address_validation || null,
+      });
+    }
 
     // Danh sách provider hợp lệ từ service (tránh hard-code)
     const AVAILABLE_PROVIDERS = (FulfillmentService.PROVIDERS || []).map(

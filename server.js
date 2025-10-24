@@ -7,6 +7,7 @@ dotenv.config();
 
 const http = require("http");
 const connectDB = require("./src/config/db.config");
+const registerSocketHandlers = require("./src/socket/index");
 
 // ===== App
 const app = express();
@@ -45,7 +46,8 @@ const {
   PsdTaskRoutes,
   ideaTaskRoutes,
   realtimeLogRoutes, // vẫn có thể dùng lại để FE xem /logs (activity)
-  teamRoutes
+  teamRoutes,
+  extRoutes,
 } = require("./src/routes");
 
 app.use("/api/role", roleRoutes);
@@ -73,14 +75,32 @@ app.use("/api/idea-task", ideaTaskRoutes);
 app.use("/api/logs", realtimeLogRoutes);
 app.use("/api/teams", teamRoutes);
 
+// ===== HTTP server
+const httpServer = http.createServer(app);
+
+// ===== Socket.IO (khởi tạo gọn)
+const { Server } = require("socket.io");
+const io = new Server(httpServer, {
+  path: "/ws",
+  transports: ["websocket"],
+  cors: { origin: (origin, cb) => cb(null, true), credentials: true },
+  pingInterval: 20000,
+  pingTimeout: 30000,
+});
+
+// Cho các nơi khác (routes) lấy ra dùng
+app.set("io", io);
+app.set("ackMap", new Map());
+
+registerSocketHandlers({ app, io });
+app.use("/api/ext", extRoutes);
+
+// ===== Error handler
 app.use((err, _req, res, _next) => {
   res
     .status(err.status || 500)
     .json({ error: { message: err.message || "Internal Server Error" } });
 });
-
-// ===== HTTP server (không Socket.IO)
-const httpServer = http.createServer(app);
 
 const PORT = process.env.PORT || 5000;
 connectDB();

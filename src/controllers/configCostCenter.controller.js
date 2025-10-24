@@ -42,8 +42,8 @@ const listConfigs = async (req, res) => {
             code,
             product_for_seller,
             product_for_seller_name,
-            search,                   
-            sort = '-created_at'
+            search,
+            sort = 'config_code:asc'
         } = req.query;
 
         const skip = (parseInt(page) - 1) * parseInt(perPage);
@@ -59,11 +59,10 @@ const listConfigs = async (req, res) => {
             if (status) match.status = status;
             if (typeof is_set !== 'undefined') match.is_set = is_set === 'true';
             if (typeof is_pack !== 'undefined') match.is_pack = is_pack === 'true';
-            if (code) match.config_code = code;
+            if (search) match.config_code = search;
             if (product_for_seller && mongoose.isValidObjectId(product_for_seller)) {
                 match.product_for_seller = new mongoose.Types.ObjectId(product_for_seller);
             }
-            if (search) match.$text = { $search: search };
 
             const pipeline = [
                 { $match: match },
