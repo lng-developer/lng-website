@@ -45,6 +45,7 @@ const {
   PsdTaskRoutes,
   ideaTaskRoutes,
   realtimeLogRoutes, // vẫn có thể dùng lại để FE xem /logs (activity)
+  teamRoutes
 } = require("./src/routes");
 
 app.use("/api/role", roleRoutes);
@@ -70,6 +71,7 @@ app.use("/APO", APORoutes);
 app.use("/api/psd-task", PsdTaskRoutes);
 app.use("/api/idea-task", ideaTaskRoutes);
 app.use("/api/logs", realtimeLogRoutes);
+app.use("/api/teams", teamRoutes);
 
 app.use((err, _req, res, _next) => {
   res

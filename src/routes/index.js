@@ -21,6 +21,7 @@ const APORoutes = require("./APO.routes");
 const PsdTaskRoutes = require("./psdTask.routes");
 const ideaTaskRoutes = require("./ideaTask.routes");
 const realtimeLogRoutes = require("./realtimeLog.routes");
+const teamRoutes = require("./team.routes");
 module.exports = {
   roleRoutes,
   userRoutes,
@@ -45,4 +46,5 @@ module.exports = {
   PsdTaskRoutes,
   ideaTaskRoutes,
   realtimeLogRoutes,
+  teamRoutes
 };
