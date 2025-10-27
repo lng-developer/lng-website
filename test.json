@@ -1,0 +1,17 @@
+{
+  "_id": {
+    "$oid": "68f88ec6da4017d2d2b69199"
+  },
+  "userid": [
+    "abc"
+  ]
+  "active": true,
+  "updatedAt": {
+    "$date": "2025-10-23T03:39:31.229Z"
+  },
+  "totalMembers": 4
+}
+
+
+Team List
+.populate

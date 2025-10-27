@@ -28,6 +28,28 @@ const createConfig = async (req, res) => {
     }
 };
 
+function buildSort(input) {
+  if (!input) return { code_sort: 1, created_at: 1 };
+  if (typeof input === 'object') return input;
+
+  const obj = {};
+  String(input).split(',').forEach(t => {
+    const token = t.trim();
+    if (!token) return;
+    if (token.includes(':')) {
+      const [k, dir] = token.split(':').map(s => s.trim());
+      obj[k === 'config_code' ? 'code_sort' : k] =
+        (String(dir).toLowerCase() === 'desc' || dir === '-1') ? -1 : 1;
+    } else {
+      const k = token.startsWith('-') ? token.slice(1) : token;
+      obj[k === 'config_code' ? 'code_sort' : k] = token.startsWith('-') ? -1 : 1;
+    }
+  });
+  return Object.keys(obj).length ? obj : { code_sort: 1, created_at: 1 };
+}
+
+
+
 // LIST + FILTER + PAGINATION (+ search theo tên ProductType)
 const listConfigs = async (req, res) => {
     try {
@@ -43,13 +65,13 @@ const listConfigs = async (req, res) => {
             product_for_seller,
             product_for_seller_name,
             search,
+            // mặc định A→Z + phụ theo created_at để ổn định
             sort = 'config_code:asc'
         } = req.query;
 
         const skip = (parseInt(page) - 1) * parseInt(perPage);
         const limit = parseInt(perPage);
 
-        // Khi cần lọc theo tên ProductType, dùng aggregate + $lookup
         const useAggForName = product_for_seller_name && product_for_seller_name.trim() !== '';
 
         if (useAggForName) {
@@ -75,11 +97,7 @@ const listConfigs = async (req, res) => {
                     }
                 },
                 { $unwind: { path: '$product_for_seller', preserveNullAndEmptyArrays: true } },
-                {
-                    $match: {
-                        'product_for_seller.name': { $regex: product_for_seller_name, $options: 'i' }
-                    }
-                },
+                { $match: { 'product_for_seller.name': { $regex: product_for_seller_name, $options: 'i' } } },
                 { $sort: buildSort(sort) },
                 {
                     $facet: {
@@ -89,12 +107,15 @@ const listConfigs = async (req, res) => {
                 }
             ];
 
-            const [agg] = await ConfigCostCenter.aggregate(pipeline);
+            const [agg] = await ConfigCostCenter
+                .aggregate(pipeline)
+                .collation({ locale: 'en', strength: 1, alternate: 'shifted', numericOrdering: true });
+
             const total = agg.total[0]?.count || 0;
             return res.json({ message: 'OK', page: Number(page), perPage: Number(perPage), total, items: agg.items });
         }
 
-        // Trường hợp bình thường dùng find + populate
+        // --- NHÁNH FIND ---
         const filter = { is_deleted: false };
         if (platform) filter.platform = platform;
         if (country) filter.country = country;
@@ -110,7 +131,8 @@ const listConfigs = async (req, res) => {
         const [total, items] = await Promise.all([
             ConfigCostCenter.countDocuments(filter),
             ConfigCostCenter.find(filter)
-                .sort(sort)
+                .sort(buildSort(sort)) // ✅ parse về object
+                .collation({ locale: 'en', strength: 1, alternate: 'shifted', numericOrdering: true }) // ✅ A→Z chuẩn
                 .skip(skip)
                 .limit(limit)
                 .populate('product_for_seller')
@@ -122,6 +144,7 @@ const listConfigs = async (req, res) => {
         res.status(500).json({ message: 'Fetch failed', error: err.message });
     }
 };
+
 
 // GET DETAIL
 const getConfig = async (req, res) => {
