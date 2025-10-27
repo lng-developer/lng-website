@@ -21,59 +21,30 @@ exports.getGroups = async (req, res) => {
 
         const skip = (parseInt(page) - 1) * parseInt(perPage);
         const limit = parseInt(perPage);
+
         const pipeline = [
             { $match: match },
-            { $sort: { order: 1, created_at: -1 } },
-            { $skip: skip },
-            { $limit: limit },
 
-            // bung items để join
+            // (giữ nguyên unwind + lookups như cũ)
             { $unwind: { path: '$items', preserveNullAndEmptyArrays: true } },
-
-            // join VendorProduct cho từng item
-            {
-                $lookup: {
-                    from: 'vendorproducts',
-                    localField: 'items.vendor_product',
-                    foreignField: '_id',
-                    as: 'vp'
-                }
-            },
+            { $lookup: { from: 'vendorproducts', localField: 'items.vendor_product', foreignField: '_id', as: 'vp' } },
             { $unwind: { path: '$vp', preserveNullAndEmptyArrays: true } },
-
-            // join Vendor để lấy tên vendor
-            {
-                $lookup: {
-                    from: 'vendors',
-                    localField: 'vp.vendor_id',
-                    foreignField: '_id',
-                    as: 'vendor'
-                }
-            },
+            { $lookup: { from: 'vendors', localField: 'vp.vendor_id', foreignField: '_id', as: 'vendor' } },
             { $unwind: { path: '$vendor', preserveNullAndEmptyArrays: true } },
-
-            // join VendorCostCenter theo vendor_product
             {
                 $lookup: {
                     from: 'vendorcostcenters',
                     let: { vpId: '$vp._id' },
                     pipeline: [
                         { $match: { $expr: { $eq: ['$vendor_product', '$$vpId'] } } },
-                        {
-                            $project: {
-                                _id: 0,
-                                sku: 1,
-                                vendor_size: 1, vendor_color: 1,
-                                standard_size: 1, standard_color: 1
-                            }
-                        },
+                        { $project: { _id: 0, sku: 1, vendor_size: 1, vendor_color: 1, standard_size: 1, standard_color: 1 } },
                         { $sort: { sku: 1 } }
                     ],
                     as: 'cost_centers'
                 }
             },
 
-            // gom lại theo group
+            // Group lại theo group
             {
                 $group: {
                     _id: '$_id',
@@ -84,7 +55,7 @@ exports.getGroups = async (req, res) => {
                     items: {
                         $push: {
                             $cond: {
-                                if: { $ne: ['$items', null] },  // Chỉ push nếu items không null
+                                if: { $ne: ['$items', null] },
                                 then: {
                                     _id: '$items._id',
                                     order: '$items.order',
@@ -97,30 +68,43 @@ exports.getGroups = async (req, res) => {
                                     vendor_name: '$vendor.name',
                                     cost_centers: '$cost_centers'
                                 },
-                                else: '$$REMOVE'  // Bỏ qua push nếu null
+                                else: '$$REMOVE'
                             }
                         }
                     }
                 }
             },
 
-            // sort items theo order
+            // Lọc null trong mảng items
             {
                 $addFields: {
-                    items: {
-                        $filter: { input: '$items', as: 'it', cond: { $ne: ['$$it', null] } }
-                    }
+                    items: { $filter: { input: '$items', as: 'it', cond: { $ne: ['$$it', null] } } }
+                }
+            },
+
+            // ✅ Sort A→Z theo name SAU group
+            { $sort: { name: 1 } },
+
+            // ✅ Phân trang ở cuối để giữ đúng thứ tự A→Z
+            {
+                $facet: {
+                    items: [{ $skip: skip }, { $limit: limit }],
+                    total: [{ $count: 'count' }]
                 }
             }
         ];
 
-        const [total, groups] = await Promise.all([
-            ProductTypeGroup.countDocuments(match),
-            ProductTypeGroup.aggregate(pipeline)
-        ]);
+        // Gọi aggregate với collation để sort A→Z chuẩn không phân biệt hoa/thường & bỏ qua ký tự phụ
+        const [agg] = await ProductTypeGroup.aggregate(pipeline).collation({
+            locale: 'en',
+            strength: 1,          // ignore case/diacritics
+            alternate: 'shifted', // xử lý khoảng trắng/ký tự phụ “nhẹ tay”
+            numericOrdering: true // "3" < "12"
+        });
 
-        // sort items phía server (đề phòng Mongo giữ thứ tự push)
-        groups.forEach(g => g.items.sort((a, b) => a.order - b.order));
+        const total = agg.total[0]?.count || 0;
+        const groups = agg.items;
+        groups.forEach(g => g.items.sort((a, b) => a.order - b.order)); // giữ sort item theo order
 
         res.json({ total, items: groups, page: +page, perPage: +perPage });
     } catch (e) {
