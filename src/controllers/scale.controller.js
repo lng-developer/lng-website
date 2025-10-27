@@ -7,6 +7,8 @@ const FulfillmentService = require("../service/fulfillment"); // <<< NEW
 const OrderCustomProduct = db.orderCustomProduct;
 const VendorProduct = db.vendorProduct;
 const Listing = db.listing;
+const User = db.user;
+const Team = db.Team;
 const Shop = db.shop;
 const upload = multer({ storage: multer.memoryStorage() });
 
@@ -581,7 +583,6 @@ const getScaleList = async (req, res) => {
     const isDesignLeader = hasRole(userRole, "Design Leader");
     const isDesigner = hasRole(userRole, "Designer");
 
-
     // Cho phép Admin, Seller, Customer Service, Design Leader
     if (!(isAdmin || isSeller || isCS || isDesignLeader || isDesigner)) {
       return res
@@ -596,16 +597,30 @@ const getScaleList = async (req, res) => {
      */
     const isSellerOnly = isSeller && !(isAdmin || isCS || isDesignLeader);
 
+    if (!mongoose.Types.ObjectId.isValid(userId)) {
+      return res.status(400).json({ message: "Invalid user id in token" });
+    }
+
     // 1) Match theo thời gian + seller filter (CHỈ filter khi là Seller thuần)
     const initialMatch = {};
     if (from && to) {
       initialMatch.createdAt = { $gte: new Date(from), $lte: new Date(to) };
     }
 
-    if (isSellerOnly) {
-      if (!mongoose.Types.ObjectId.isValid(userId)) {
-        return res.status(400).json({ message: "Invalid user id in token" });
+    if (isCS) {
+      const currentUser = await User.findById(userId).select('team_id').lean();
+      if (!currentUser || !currentUser.team_id) {
+        return res.status(400).json({ 
+          message: "a CS must have a team" 
+        });
       }
+      const teamMemberIds = await User.find(
+        { team_id: currentUser.team_id },
+        { _id: 1 }
+      ).lean();
+      const memberIds = teamMemberIds.map(u => u._id);
+      initialMatch.sellerId = { $in: memberIds };
+    } else if (isSellerOnly) {
       initialMatch.sellerId = new mongoose.Types.ObjectId(userId);
     }
 

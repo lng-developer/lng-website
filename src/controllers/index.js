@@ -20,6 +20,7 @@ const APOController = require("./APO.controller");
 const PsdTaskController = require("./psdTask.controller");
 const ideaTaskController = require("./ideaTask.controller");
 const realtimeLogController = require("./realtimeLog.controller");
+const teamController = require("./team.controller");
 const extController = require("./ext.controller");
 
 module.exports = {
@@ -45,5 +46,6 @@ module.exports = {
   PsdTaskController,
   ideaTaskController,
   realtimeLogController,
+  teamController,
   extController,
 };

@@ -21,11 +21,21 @@ const SkuMappingConfig = db.SkuMappingConfig;
 const SkuMappingEntry = db.SkuMappingEntry;
 const Listing = db.listing;
 const PsdTask = db.PsdTask;
-const Vendor = db.vendor;
 const {
   applyRulesToSku,
   buildRulesFromConfig,
 } = require("../utils/skuMigrate");
+
+const  {
+    validateIds,
+    buildInitialMatch,
+    buildFilters,
+    buildVendorFilter,
+    buildPipeline,
+    executePipeline,
+    enrichOrdersData,
+    getVendorProductIdsByVendorName
+} = require("../helper/orderHelper")
 
 const mongoose = require("mongoose");
 
@@ -1124,15 +1134,7 @@ const getOrderById = async (req, res) => {
   }
 };
 
-async function getVendorProductIdsByVendorName(vendorName) {
-  const vdoc = await Vendor.findOne(
-    { name: new RegExp(`^${vendorName}$`, "i") },
-    { _id: 1 }
-  ).lean();
-  if (!vdoc?._id) return [];
-  const vpIds = await VendorProduct.distinct("_id", { vendor_id: vdoc._id });
-  return vpIds || [];
-}
+
 
 const getFrontendOrders = async (req, res) => {
   try {
@@ -1152,391 +1154,88 @@ const getFrontendOrders = async (req, res) => {
       shippingType,
       shopName,
       openCase,
+      teamId,
+      sellerId
     } = req.query;
 
-    // ===== RBAC =====
-    const role = req.user?.role || "";
-    const userId = req.user?.userId || "";
-    const isAdmin = /^admin$/i.test(role);
-    const isSeller = /^seller$/i.test(role);
-    const isProduction = /^production$/i.test(role);
-    const isDesignLeader = /^design[-_\s]?leader$/i.test(role);
+    //RBAC
+    const { role = "", userId = "" } = req.user || {};
+    const roles = {
+      isAdmin: /^admin$/i.test(role),
+      isSeller: /^seller$/i.test(role),
+      isProduction: /^production$/i.test(role),
+      isDesignLeader: /^design[-_\s]?leader$/i.test(role)
+    };
 
-    if (!isAdmin && !isSeller && !isProduction && !isDesignLeader) {
-      return res.status(403).json({ message: "Access denied: insufficient permissions" });
+    if (!Object.values(roles).some(Boolean)) {
+      return res.status(403).json({ message: "Access denied" });
     }
 
-    // We'll collect individual filter clauses into `filters` then compose $and
-    const filters = [];
+    const ids = validateIds({ teamId, sellerId, userId });
+    if (ids.error) {
+      return res.status(400).json({ message: ids.error });
+    }
 
-    // Production: filter by vendor "LNG Groups"
-    if (isProduction) {
-      const vpIds = await getVendorProductIdsByVendorName("LNG Group");
-      // debug log (remove in production)
-      console.log("Production role detected. vpIds length:", vpIds.length);
+    const initialMatch = buildInitialMatch(ids, roles, userId, userNull);
 
-      if (!vpIds || vpIds.length === 0) {
-        // safe: no vendor or no vendorProducts -> return empty
-        return res.json({
-          data: [],
-          totalCount: 0,
-          totalPages: 1,
-          currentPage: 1,
-        });
+    //BUILD FILTERS =====
+    const filters = buildFilters({
+      roles,
+      userId,
+      statuses,
+      search,
+      openCase,
+      from,
+      to,
+      isNoCostCenter,
+      financialStatus,
+      sevenDayAlert,
+      platform,
+      noPsd,
+      shippingType
+    });
+
+    // Production vendor filter LNG Group
+    if (roles.isProduction) {
+      const vendorFilter = await buildVendorFilter();
+      if (vendorFilter === null) {
+        return res.json({ data: [], totalCount: 0, totalPages: 1, currentPage: 1 });
       }
-
-      // build string and ObjectId forms
-      const vpIdsStr = vpIds.map((id) => String(id));
-      const vpIdsObj = vpIdsStr
-        .filter((s) => mongoose.Types.ObjectId.isValid(s))
-        .map((s) => new mongoose.Types.ObjectId(s));
-
-      // vendorCondition matches either string-stored ID or ObjectId-stored ID
-      const vendorCondition = {
-        $or: [
-          { "items.cost_breakdown.vendorProductId": { $in: vpIdsStr } },
-          { "items.cost_breakdown.vendorProductId": { $in: vpIdsObj } },
-        ],
-      };
-
-      filters.push(vendorCondition);
+      filters.push(vendorFilter);
     }
 
-    // Seller: only see own orders (unless production)
-    if (isSeller && !isProduction) {
-      if (!mongoose.Types.ObjectId.isValid(userId)) {
-        return res.status(400).json({ message: "Invalid user id in token" });
-      }
-      filters.push({ sellerId: new mongoose.Types.ObjectId(userId) });
-    }
+    // BUILD PIPELINE =====
+    const pipeline = buildPipeline({
+      initialMatch,
+      filters,
+      teamObjectId: ids.teamObjectId,
+      sellerObjectId: ids.sellerObjectId,
+      shopName
+    });
 
-    // Admin: can filter userNull
-    if (isAdmin && userNull === "true") {
-      filters.push({ sellerId: { $in: [null, undefined] } });
-    }
-
-    // statuses
-    if (statuses && statuses.trim() !== "") {
-      const statusArray = statuses
-        .split(",")
-        .map((s) => s.trim())
-        .filter(Boolean);
-      if (statusArray.length > 0)
-        filters.push({ status: { $in: statusArray } });
-    }
-
-    // search -> build $or clause, but push as separate filter (so it will be ANDed with vendorCondition etc)
-    if (search) {
-      const keyword = new RegExp(search, "i");
-      filters.push({
-        $or: [
-          { orderId: keyword },
-          { "customer_infor.name": keyword },
-          { "items.sku": keyword },
-          { "items.asin": keyword },
-        ],
-      });
-    }
-
-    // openCase
-    if (openCase === "true") {
-      filters.push({ case: { $exists: true, $not: { $size: 0 } } });
-    }
-
-    // date range
-    if (from && to) {
-      if (isNaN(Date.parse(from)) || isNaN(Date.parse(to))) {
-        return res
-          .status(400)
-          .json({ message: "Invalid date format in from or to" });
-      }
-      filters.push({
-        purchase_date: { $gte: new Date(from), $lte: new Date(to) },
-      });
-    }
-
-    if (isNoCostCenter === "true") {
-      filters.push({ base_cost: { $in: [null, 0] } });
-    }
-
-    if (financialStatus) {
-      filters.push({ financialStatus });
-    }
-
-    if (sevenDayAlert === "true") {
-      const today = new Date();
-      const sevenDaysLater = new Date(today);
-      sevenDaysLater.setDate(today.getDate() + 7);
-      filters.push({ deliveryDate: { $lte: sevenDaysLater } });
-    }
-
-    if (platform) filters.push({ platform });
-
-    if (noPsd === "true") {
-      filters.push({ "items.snapshotImage": { $in: [null, ""] } });
-    }
-
-    if (shippingType && shippingType.trim() !== "") {
-      const validShippingTypes = [
-        "Second Day",
-        "Ground",
-        "Overnight",
-        "Economy",
-        "Standard",
-        "Expedited",
-      ];
-      const types = shippingType
-        .split(",")
-        .map((t) => t.trim())
-        .filter((t) => validShippingTypes.includes(t));
-      if (types.length === 1) filters.push({ shipping_type: types[0] });
-      else if (types.length > 1)
-        filters.push({ shipping_type: { $in: types } });
-    }
-
-    // Compose final matchStage
-    const matchStage = filters.length > 0 ? { $and: filters } : {};
-
-    // ===== Pipeline =====
-    const pipeline = [
-      {
-        $lookup: {
-          from: "shops",
-          localField: "shopId",
-          foreignField: "_id",
-          as: "shop",
-        },
-      },
-      { $unwind: "$shop" },
-    ];
-
-    if (shopName && shopName.trim() !== "") {
-      pipeline.push({
-        $match: {
-          "shop.name": { $regex: new RegExp(shopName.trim(), "i") },
-        },
-      });
-    }
-
-    pipeline.push(
-      {
-        $lookup: {
-          from: "cases",
-          localField: "case",
-          foreignField: "_id",
-          as: "case",
-        },
-      },
-      {
-        $lookup: {
-          from: "users",
-          localField: "sellerId",
-          foreignField: "_id",
-          as: "seller",
-        },
-      },
-      {
-        $unwind: {
-          path: "$seller",
-          preserveNullAndEmptyArrays: true,
-        },
-      }
+    // EXECUTE & PAGINATE =====
+    const { orders, totalCount, limitNum  } = await executePipeline(
+      pipeline, 
+      page, 
+      perPage
     );
 
-    // apply matchStage if any
-    if (Object.keys(matchStage).length > 0) {
-      pipeline.push({ $match: matchStage });
-    }
+    // ENRICH DATA =====
+    const enrichedOrders = await enrichOrdersData(orders);
 
-    // count
-    const countPipeline = [...pipeline, { $count: "total" }];
-    const countResult = await OrderCustomProduct.aggregate(countPipeline);
-    const totalCount = countResult[0]?.total || 0;
-
-    const isAll = String(perPage).toLowerCase() === "all";
     const pageNum = parseInt(page, 10) || 1;
-    const limitNum = isAll ? totalCount || 1 : parseInt(perPage, 10) || 10;
-    const skip = isAll ? 0 : (pageNum - 1) * limitNum;
+    const isAll = String(perPage).toLowerCase() === "all";
 
-    pipeline.push({ $sort: { purchase_date: -1 } });
-    if (!isAll) pipeline.push({ $skip: skip }, { $limit: limitNum });
-
-    const orders = await OrderCustomProduct.aggregate(pipeline);
-
-    // collect listingIds once
-    const listingIdSet = new Set();
-    for (const o of orders) {
-      for (const it of o.items || []) {
-        const lid = it?.listingId;
-        if (lid) listingIdSet.add(String(lid));
-      }
-    }
-
-    // query listings
-    let listingMap = new Map();
-    if (listingIdSet.size > 0) {
-      const ids = [];
-      for (const id of listingIdSet) {
-        if (mongoose.Types.ObjectId.isValid(id))
-          ids.push(new mongoose.Types.ObjectId(id));
-      }
-      if (ids.length > 0) {
-        const listings = await Listing.find({ _id: { $in: ids } })
-          .select("asin_type product_image psd")
-          .lean();
-        listingMap = new Map(listings.map((l) => [String(l._id), l]));
-      }
-    }
-
-    // map vendor product names
-    const vendorIdSet = new Set();
-    for (const o of orders) {
-      for (const it of o.items || []) {
-        const vId = it?.cost_breakdown?.vendorProductId;
-        if (vId) vendorIdSet.add(String(vId));
-      }
-    }
-
-    let vendorFullNameMap = new Map();
-    if (vendorIdSet.size > 0) {
-      const idObjs = [];
-      for (const id of vendorIdSet) {
-        if (mongoose.Types.ObjectId.isValid(id))
-          idObjs.push(new mongoose.Types.ObjectId(id));
-      }
-      if (idObjs.length > 0) {
-        const vps = await VendorProduct.find({ _id: { $in: idObjs } })
-          .select("product_name vendor_id")
-          .populate({ path: "vendor_id", select: "name" })
-          .lean();
-        vendorFullNameMap = new Map(
-          (vps || []).map((vp) => {
-            const vendorName = vp?.vendor_id?.name || "";
-            const productName = vp?.product_name || "";
-            const full = `${vendorName} - ${productName}`.trim();
-            return [String(vp._id), full];
-          })
-        );
-      }
-    }
-
-    // build result (include download_url/download_links)
-    const result = orders.map((order) => {
-      const items = (order.items || []).map((item) => {
-        const ffRaw = item.fulfillment_file || item.fulfilment_file || {};
-        const fileUrls = [];
-        if (ffRaw && typeof ffRaw === "object") {
-          for (const v of Object.values(ffRaw)) {
-            if (typeof v === "string" && /^https?:\/\//i.test(v)) {
-              fileUrls.push(v);
-            } else if (v && typeof v === "object") {
-              if (typeof v.url === "string" && /^https?:\/\//i.test(v.url))
-                fileUrls.push(v.url);
-            }
-          }
-        }
-        const download_url = fileUrls[0] || null;
-
-        const surfaces = item.version3Data?.customizationInfo?.surfaces || [];
-        const version3Data = surfaces.flatMap((surface) =>
-          (surface.areas || []).map((area) => ({
-            label: area.label || area.name || "",
-            value: area.optionValue || area.text || area.numberValue || "",
-          }))
-        );
-
-        const vendorProductId = item?.cost_breakdown?.vendorProductId || null;
-        const vendorProductDisplayName = vendorProductId
-          ? vendorFullNameMap.get(String(vendorProductId)) || null
-          : null;
-
-        const ldoc = item?.listingId
-          ? listingMap.get(String(item.listingId))
-          : null;
-
-        return {
-          orderItemId: item.orderItemId || null,
-          sku: item.sku,
-          mapped_sku: item.mapped_sku,
-          title: item.title || "",
-          quantity: item.quantity || 1,
-          version3Data,
-          baseImageUrl: item.baseImage?.imageUrl || null,
-          snapshotImage: item.snapshotImage,
-          totalCustomizationPrice: item.totalCustomizationPrice || 0,
-          asin: item.asin,
-          customized_url: item.customized_url,
-
-          download_url,
-          download_links: fileUrls,
-
-          listingId: item.listingId || null,
-          listing: ldoc
-            ? {
-              asin_type: ldoc.asin_type || null,
-              product_image: ldoc.product_image || null,
-              psd: ldoc.psd || null,
-            }
-            : null,
-
-          cost_center: {
-            vendorProductId,
-            vendorProductDisplayName,
-            sizeValue: item?.cost_breakdown?.sizeValue || null,
-            colorValue: item?.cost_breakdown?.colorValue || null,
-          },
-          tracking_info: {
-            fulfillment: item?.tracking_info?.fulfillment,
-            status: item?.tracking_info?.status,
-            tracking: item?.tracking_info?.tracking,
-            note: item?.tracking_info?.note,
-          },
-          fulfillment_file: item.fulfillment_file,
-          scale_status: item.scale_status,
-          qc_note: item.qc_note,
-        };
-      });
-
-      return {
-        orderId: order.orderId,
-        merchantId: order.merchantId || null,
-        marketplaceId: order.marketplaceId || null,
-        customer_infor: order.customer_infor,
-        status: order.status || "",
-        customized_url: order.customized_url,
-        purchase_date: order.purchase_date,
-        createdAt: order.createdAt,
-        shopName: order.shop?.name || null,
-        shipping_type: order.shipping_type || null,
-        items,
-        base_cost: order.base_cost,
-        case: order.case,
-        address_validation: order.address_validation?.isValid,
-        scale_overall_status: order.scale_overall_status,
-        seller: order.seller
-          ? {
-            _id: order.seller._id,
-            full_name: order.seller.full_name,
-            email: order.seller.email,
-          }
-          : null,
-        amazon_finance_total: order.amazon_finance_total,
-        amazon_total_quantity: order.amazon_total_quantity,
-      };
-    });
-
-    res.json({
-      data: result,
+    return res.json({
+      data: enrichedOrders,
       totalCount,
       totalPages: isAll ? 1 : Math.ceil(totalCount / limitNum),
-      currentPage: pageNum,
+      currentPage: pageNum
     });
+
   } catch (error) {
-    console.error("❌ getFrontendOrders error:", error);
-    res.status(500).json({
-      message: "Failed to retrieve frontend orders",
-      error: error.message,
-    });
+    console.error('Get orders error:', error);
+    return res.status(500).json({ message: "Internal Server Error" });
   }
 };
 

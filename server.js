@@ -46,7 +46,8 @@ const {
   APORoutes,
   PsdTaskRoutes,
   ideaTaskRoutes,
-  realtimeLogRoutes,
+  realtimeLogRoutes, // vẫn có thể dùng lại để FE xem /logs (activity)
+  teamRoutes,
   extRoutes,
 } = require("./src/routes");
 
@@ -73,6 +74,7 @@ app.use("/APO", APORoutes);
 app.use("/api/psd-task", PsdTaskRoutes);
 app.use("/api/idea-task", ideaTaskRoutes);
 app.use("/api/logs", realtimeLogRoutes);
+app.use("/api/teams", teamRoutes);
 
 // ===== HTTP server
 const httpServer = http.createServer(app);
