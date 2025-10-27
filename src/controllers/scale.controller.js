@@ -1493,6 +1493,7 @@ async function getScaleStatistics(req, res) {
       const keyword = new RegExp(search.trim(), "i");
       searchOr = [
         { orderId: keyword },
+        { "items.asin": keyword },
         { "items.sku": keyword },
         { "items.orderItemId": keyword },
         { "customer_infor.email": keyword },
