@@ -51,6 +51,9 @@ const psdTaskSchema = new mongoose.Schema(
     },
     revisionCount: { type: Number, default: 0 },
     history: [historySchema],
+    note: {
+      type: String
+    }
   },
   { timestamps: true }
 );
