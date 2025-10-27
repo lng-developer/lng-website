@@ -237,7 +237,7 @@ function escapeRegex(str) {
 
 async function requestPSD(req, res) {
   try {
-    const { taskId } = req.body;
+    const { taskId, note } = req.body;
     const task = await PsdTask.findById(taskId);
     if (!task) return res.status(404).json({ message: "Task not found" });
 
@@ -250,9 +250,12 @@ async function requestPSD(req, res) {
       action: "Seller Request",
       from: "New",
       to: "Requested",
-      note: req.body?.note || "",
+      note: note || "",
     });
+
     task.status = "Requested";
+    task.note = note || "";
+
     await task.save();
 
     res.json(task);
@@ -260,6 +263,7 @@ async function requestPSD(req, res) {
     res.status(500).json({ message: e.message });
   }
 }
+
 
 // POST assign (leader)
 const assignDesigner = async (req, res) => {
