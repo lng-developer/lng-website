@@ -98,6 +98,20 @@ const io = new Server(httpServer, {
   pingTimeout: 20000,
 });
 
+function shutdown() {
+  try {
+    io.close();
+  } catch {}
+  try {
+    httpServer.close(() => process.exit(0));
+  } catch {
+    process.exit(0);
+  }
+  setTimeout(() => process.exit(0), 10000).unref();
+}
+process.on("SIGINT", shutdown);
+process.on("SIGTERM", shutdown);
+
 // Cho các nơi khác (routes) lấy ra dùng
 app.set("io", io);
 app.set("ackMap", new Map());
