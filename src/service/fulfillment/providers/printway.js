@@ -86,7 +86,7 @@ function buildPayload(orderObj) {
         store_code: orderObj.store_code || "",
         shipping_email: customer.email || "",
         firstName,
-        lastName,
+        lastName:  `${lastName}...`,
         shipping_address1: customer.address || "",
         shipping_address2: customer.address_2 || "",
         shipping_city: customer.city || "",

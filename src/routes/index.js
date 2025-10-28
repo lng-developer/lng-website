@@ -23,6 +23,8 @@ const ideaTaskRoutes = require("./ideaTask.routes");
 const realtimeLogRoutes = require("./realtimeLog.routes");
 const teamRoutes = require("./team.routes");
 const extRoutes = require("./ext.routes");
+const adminSessionRoutes = require("./admin.session.routes")
+
 module.exports = {
   roleRoutes,
   userRoutes,
@@ -49,4 +51,5 @@ module.exports = {
   realtimeLogRoutes,
   teamRoutes,
   extRoutes,
+  adminSessionRoutes
 };

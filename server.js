@@ -49,6 +49,7 @@ const {
   realtimeLogRoutes, // vẫn có thể dùng lại để FE xem /logs (activity)
   teamRoutes,
   extRoutes,
+  adminSessionRoutes
 } = require("./src/routes");
 
 app.use("/api/role", roleRoutes);
@@ -75,6 +76,7 @@ app.use("/api/psd-task", PsdTaskRoutes);
 app.use("/api/idea-task", ideaTaskRoutes);
 app.use("/api/logs", realtimeLogRoutes);
 app.use("/api/teams", teamRoutes);
+app.use("/api/admin", adminSessionRoutes)
 
 // ===== HTTP server
 const httpServer = http.createServer(app);
