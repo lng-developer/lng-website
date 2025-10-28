@@ -10,34 +10,45 @@ const { success, fail, buildPagination } = require("../helper/response");
 
 const getTeams = async (req, res) => {
     try {
-        const teams = await Team.find({ active: true })
-            .select('name leaderId userIds active')
-            .populate([
-              {
-                path: 'userIds',
-                select: 'full_name email role_id employee_id',
-                populate: {
-                  path: 'role_id',
-                  model: 'Role',
-                  select: 'name',
-                },
-              },
-              {
-                path: 'leaderId',
-                model: 'User',
-                select: 'full_name email employee_id',
-              },
-            ]).lean();
-        
-        const result = teams.map(team => ({
-            id: team._id,
-            name: team.name,
-            leader: team.leaderId,
-            members: team.userIds,
-            active: team.active
-        }));
-        
-        return success(res, "Get Team List successful", result);
+        const escapeRegex = s => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        const q = String(req.query.search || '').trim();
+        const rx = q ? new RegExp(escapeRegex(q), 'i') : null;
+
+        const pipeline = [
+          { $match: { active: true } },
+          { $lookup: { from: 'users', localField: 'userIds', foreignField: '_id', as: 'members' } },
+        ];
+
+        if (rx) {
+          pipeline.push({
+            $match: {
+              $or: [
+                { name: rx },
+                { 'members.full_name': rx },
+              ]
+            }
+          });
+        }
+
+        pipeline.push({
+          $project: {
+            id: '$_id',
+            name: 1,
+            active: 1,
+            leaderId: 1,
+            members: {
+              $map: {
+                input: '$members',
+                as: 'm',
+                in: { _id: '$$m._id', full_name: '$$m.full_name' }
+              }
+            }
+          }
+        });
+
+        const result = await Team.aggregate(pipeline);
+        return success(res, 'Get Team List successful', result);
+
     } catch (e) {
         logger.error(`Get teams error: ${e.message}`);
         return fail(res, 500, "Internal Server Error", e);
