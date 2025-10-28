@@ -14,10 +14,44 @@ const getTeams = async (req, res) => {
 
         const pipeline = [];
 
-        // 1. Chỉ match active, KHÔNG match name ở đây
+        // 1. Match active teams
         pipeline.push({ $match: { active: true } });
 
-        // 2. Lookup users - nếu có search thì filter luôn trong lookup
+        // 2. Lookup leader
+        pipeline.push({
+            $lookup: {
+                from: 'users',
+                localField: 'leaderId',
+                foreignField: '_id',
+                as: 'leader'
+            }
+        });
+
+        pipeline.push({
+            $unwind: {
+                path: '$leader',
+                preserveNullAndEmptyArrays: true
+            }
+        });
+
+        // 3. Lookup leader role
+        pipeline.push({
+            $lookup: {
+                from: 'roles',
+                localField: 'leader.role_id',
+                foreignField: '_id',
+                as: 'leaderRole'
+            }
+        });
+
+        pipeline.push({
+            $unwind: {
+                path: '$leaderRole',
+                preserveNullAndEmptyArrays: true
+            }
+        });
+
+        // 4. Lookup members - nếu có search thì filter luôn
         pipeline.push({
             $lookup: {
                 from: 'users',
@@ -32,7 +66,7 @@ const getTeams = async (req, res) => {
             }
         });
 
-        // 3. Match theo name HOẶC members (sau khi đã lookup)
+        // 5. Match theo name hoặc members
         if (rx) {
             pipeline.push({
                 $match: {
@@ -44,12 +78,7 @@ const getTeams = async (req, res) => {
             });
         }
 
-        pipeline.push({
-            $addFields: {
-                hasMembers: { $gt: [{ $size: { $ifNull: ['$members', []] } }, 0] }
-            }
-        });
-
+        // 6. Unwind members
         pipeline.push({ 
             $unwind: { 
                 path: '$members', 
@@ -57,6 +86,7 @@ const getTeams = async (req, res) => {
             } 
         });
 
+        // 7. Lookup member roles
         pipeline.push({
             $lookup: {
                 from: 'roles',
@@ -73,13 +103,28 @@ const getTeams = async (req, res) => {
             } 
         });
 
+        // 8. Group lại
         pipeline.push({
             $group: {
                 _id: '$_id',
                 name: { $first: '$name' },
                 active: { $first: '$active' },
-                leaderId: { $first: '$leaderId' },
-                hasMembers: { $first: '$hasMembers' },
+                leader: {
+                    $first: {
+                        $cond: {
+                            if: '$leader._id',
+                            then: {
+                                _id: '$leader._id',
+                                full_name: '$leader.full_name',
+                                role: {
+                                    _id: '$leaderRole._id',
+                                    name: '$leaderRole.name'
+                                }
+                            },
+                            else: null
+                        }
+                    }
+                },
                 members: {
                     $push: {
                         $cond: {
@@ -99,17 +144,15 @@ const getTeams = async (req, res) => {
             }
         });
 
+        // 9. Project
         pipeline.push({
             $project: {
-                id: '$_id',
-                _id: 0,
                 name: 1,
                 active: 1,
-                leaderId: 1,
+                leader: 1,
                 members: 1
             }
         });
-
         const result = await Team.aggregate(pipeline);
         return success(res, 'Get Team List successful', result);
 
