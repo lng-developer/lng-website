@@ -11,15 +11,28 @@ const { success, fail, buildPagination } = require("../helper/response");
 const getTeams = async (req, res) => {
     try {
         const teams = await Team.find({ active: true })
-            .select('name userIds active')
-            .populate('userIds')
-            .lean();
+            .select('name leaderId userIds active')
+            .populate([
+              {
+                path: 'userIds',
+                select: 'full_name email role_id employee_id',
+                populate: {
+                  path: 'role_id',
+                  model: 'Role',
+                  select: 'name',
+                },
+              },
+              {
+                path: 'leaderId',
+                model: 'User',
+                select: 'full_name email employee_id',
+              },
+            ]).lean();
         
-        // Calculate totalMembers
         const result = teams.map(team => ({
             id: team._id,
             name: team.name,
-            totalMembers: team.userIds ? team.userIds.length : 0,
+            leader: team.leaderId,
             members: team.userIds,
             active: team.active
         }));
@@ -60,7 +73,7 @@ const getTeamMembers = async (req, res) => {
 
 const createTeam = async (req, res) => {
   try {
-    const { name, userIds } = req.body;
+    const { name, userIds, leaderId } = req.body;
 
     if (!name?.trim()) return fail(res, 400, "Team name is required");
     const trimmedName = name.trim();
@@ -90,6 +103,7 @@ const createTeam = async (req, res) => {
 
     const team = await Team.create({
       name: trimmedName,
+      leaderId: leaderId,
       active: true,
     });
 
@@ -297,7 +311,7 @@ const removeMembers = async (req, res) => {
 const updateTeam = async (req, res) => {
     try {
         const { teamId } = req.params;
-        const { name, active } = req.body;
+        const { name, leaderId, active } = req.body;
         
         if (!mongoose.isValidObjectId(teamId)) {
             return fail(res, 400, "Invalid team id");
@@ -306,7 +320,8 @@ const updateTeam = async (req, res) => {
         const updates = {};
         if (name?.trim()) updates.name = name.trim();
         if (active !== undefined) updates.active = Boolean(active);
-        
+        if (leaderId !== undefined) updates.leaderId = leaderId;
+
         if (Object.keys(updates).length === 0) {
             return success(res);
         }
@@ -321,13 +336,12 @@ const updateTeam = async (req, res) => {
                 return fail(res, 400, "Team name already exists");
             }
         }
-        
-        const team = await Team.findByIdAndUpdate(
-            teamId,
-            { $set: updates },
-            { new: true, runValidators: true }
-        ).select('name active userIds');
-        
+        const results = await Promise.allSettled([
+            Team.findByIdAndUpdate(teamId, { $unset: { leaderId: '' } }, { new: true, runValidators: true }),
+            Team.findByIdAndUpdate(teamId, { $set: updates }, { new: true, runValidators: true }).select('name active userIds')
+        ]);
+
+        const team = results[1].value;
         if (!team) {
             return fail(res, 404, "Team not found");
         }

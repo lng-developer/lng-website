@@ -4,6 +4,7 @@ const OrderCustomProduct = db.orderCustomProduct;
 const VendorProduct = db.vendorProduct;
 const Vendor = db.vendor;
 const Listing = db.listing;
+const Team = db.Team;
 
 
 function validateIds({ teamId, sellerId, userId }) {
@@ -170,7 +171,7 @@ async function getVendorProductIdsByVendorName(vendorName) {
   return vpIds || [];
 }
 
-function buildPipeline({ initialMatch, filters, teamObjectId, shopName }) {
+async function buildPipeline({ initialMatch, filters, userId, teamObjectId, shopName }) {
   const pipeline = [];
 
   if (Object.keys(initialMatch).length > 0) {
@@ -196,29 +197,37 @@ function buildPipeline({ initialMatch, filters, teamObjectId, shopName }) {
       }
     });
   }
+  const team = await Team.findOne({ leaderId: userId }).select('_id').lean();
 
-  if (teamObjectId) {
-    pipeline.push({
-      $lookup: {
-        from: "users",
-        let: { seller_id: "$sellerId" },
-        pipeline: [
-          {
-            $match: {
-              $expr: {
-                $and: [
-                  { $eq: ["$_id", "$$seller_id"] },
-                  { $eq: ["$team_id", teamObjectId] }
-                ]
-              }
+if (teamObjectId || team) {
+  const teamId = teamObjectId || team._id;
+  pipeline.push({
+    $lookup: {
+      from: "users",
+      let: { seller_id: "$sellerId" },
+      pipeline: [
+        {
+          $match: {
+            $expr: {
+              $and: [
+                { $eq: ["$_id", "$$seller_id"] },
+                { $eq: ["$team_id", teamId] }
+              ]
             }
-          },
-          { $project: { full_name: 1, email: 1, team_id: 1 } }
-        ],
-        as: "seller"
-      }
-    });
-  } else {
+          }
+        },
+        { $project: { full_name: 1, email: 1, team_id: 1 } }
+      ],
+      as: "seller"
+    }
+  });
+  
+  pipeline.push({
+    $match: { 
+      seller: { $ne: [] }
+    }
+  });
+} else {
     pipeline.push({
       $lookup: {
         from: "users",
