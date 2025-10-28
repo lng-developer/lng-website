@@ -49,7 +49,7 @@ const {
   realtimeLogRoutes, // vẫn có thể dùng lại để FE xem /logs (activity)
   teamRoutes,
   extRoutes,
-  adminSessionRoutes
+  adminSessionRoutes,
 } = require("./src/routes");
 
 app.use("/api/role", roleRoutes);
@@ -76,19 +76,25 @@ app.use("/api/psd-task", PsdTaskRoutes);
 app.use("/api/idea-task", ideaTaskRoutes);
 app.use("/api/logs", realtimeLogRoutes);
 app.use("/api/teams", teamRoutes);
-app.use("/api/admin", adminSessionRoutes)
+app.use("/api/admin", adminSessionRoutes);
 
 // ===== HTTP server
 const httpServer = http.createServer(app);
 
+httpServer.requestTimeout = 300000; // 300s
+httpServer.headersTimeout = 320000;
+
 // ===== Socket.IO (khởi tạo gọn)
-const { Server } = require("socket.io");
 const io = new Server(httpServer, {
   path: "/ws",
-  transports: ["websocket"],
-  cors: { origin: (origin, cb) => cb(null, true), credentials: true },
-  pingInterval: 20000,
-  pingTimeout: 30000,
+  transports: ["websocket", "polling"],
+  cors: {
+    origin: "*",
+    methods: ["GET", "POST"],
+    credentials: false,
+  },
+  pingInterval: 25000,
+  pingTimeout: 20000,
 });
 
 // Cho các nơi khác (routes) lấy ra dùng
