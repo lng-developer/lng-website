@@ -1180,8 +1180,6 @@ const getFrontendOrders = async (req, res) => {
 
     //BUILD FILTERS =====
     const filters = buildFilters({
-      roles,
-      userId,
       statuses,
       search,
       openCase,
@@ -1205,9 +1203,10 @@ const getFrontendOrders = async (req, res) => {
     }
 
     // BUILD PIPELINE =====
-    const pipeline = buildPipeline({
+    const pipeline = await buildPipeline({
       initialMatch,
       filters,
+      userId: '68b93ed3f02eed8dec002ee5',
       teamObjectId: ids.teamObjectId,
       sellerObjectId: ids.sellerObjectId,
       shopName
