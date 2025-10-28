@@ -6,44 +6,108 @@ const Team = db.Team;
 const User = db.user;
 const { success, fail, buildPagination } = require("../helper/response");
 
-// ==================== PUBLIC ROUTES ====================
-
 const getTeams = async (req, res) => {
     try {
         const escapeRegex = s => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
         const q = String(req.query.search || '').trim();
         const rx = q ? new RegExp(escapeRegex(q), 'i') : null;
 
-        const pipeline = [
-          { $match: { active: true } },
-          { $lookup: { from: 'users', localField: 'userIds', foreignField: '_id', as: 'members' } },
-        ];
+        const pipeline = [];
 
-        if (rx) {
-          pipeline.push({
-            $match: {
-              $or: [
-                { name: rx },
-                { 'members.full_name': rx },
-              ]
+        // 1. Chỉ match active, KHÔNG match name ở đây
+        pipeline.push({ $match: { active: true } });
+
+        // 2. Lookup users - nếu có search thì filter luôn trong lookup
+        pipeline.push({
+            $lookup: {
+                from: 'users',
+                localField: 'userIds',
+                foreignField: '_id',
+                as: 'members',
+                ...(rx && {
+                    pipeline: [
+                        { $match: { full_name: rx } }
+                    ]
+                })
             }
-          });
+        });
+
+        // 3. Match theo name HOẶC members (sau khi đã lookup)
+        if (rx) {
+            pipeline.push({
+                $match: {
+                    $or: [
+                        { name: rx },
+                        { 'members.0': { $exists: true } }
+                    ]
+                }
+            });
         }
 
         pipeline.push({
-          $project: {
-            id: '$_id',
-            name: 1,
-            active: 1,
-            leaderId: 1,
-            members: {
-              $map: {
-                input: '$members',
-                as: 'm',
-                in: { _id: '$$m._id', full_name: '$$m.full_name' }
-              }
+            $addFields: {
+                hasMembers: { $gt: [{ $size: { $ifNull: ['$members', []] } }, 0] }
             }
-          }
+        });
+
+        pipeline.push({ 
+            $unwind: { 
+                path: '$members', 
+                preserveNullAndEmptyArrays: true 
+            } 
+        });
+
+        pipeline.push({
+            $lookup: {
+                from: 'roles',
+                localField: 'members.role_id',
+                foreignField: '_id',
+                as: 'memberRole'
+            }
+        });
+
+        pipeline.push({ 
+            $unwind: { 
+                path: '$memberRole', 
+                preserveNullAndEmptyArrays: true 
+            } 
+        });
+
+        pipeline.push({
+            $group: {
+                _id: '$_id',
+                name: { $first: '$name' },
+                active: { $first: '$active' },
+                leaderId: { $first: '$leaderId' },
+                hasMembers: { $first: '$hasMembers' },
+                members: {
+                    $push: {
+                        $cond: {
+                            if: '$members._id',
+                            then: {
+                                _id: '$members._id',
+                                full_name: '$members.full_name',
+                                role: {
+                                    _id: '$memberRole._id',
+                                    name: '$memberRole.name'
+                                }
+                            },
+                            else: '$$REMOVE'
+                        }
+                    }
+                }
+            }
+        });
+
+        pipeline.push({
+            $project: {
+                id: '$_id',
+                _id: 0,
+                name: 1,
+                active: 1,
+                leaderId: 1,
+                members: 1
+            }
         });
 
         const result = await Team.aggregate(pipeline);
