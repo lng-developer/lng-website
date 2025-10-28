@@ -85,9 +85,10 @@ httpServer.requestTimeout = 300000; // 300s
 httpServer.headersTimeout = 320000;
 
 // ===== Socket.IO (khởi tạo gọn)
+const { Server } = require("socket.io");
 const io = new Server(httpServer, {
   path: "/ws",
-  transports: ["websocket", "polling"],
+  transports: ["websocket", "polling"], // cho fallback an toàn
   cors: {
     origin: "*",
     methods: ["GET", "POST"],
