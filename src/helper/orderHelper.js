@@ -199,35 +199,36 @@ async function buildPipeline({ initialMatch, filters, userId, teamObjectId, shop
   }
   const team = await Team.findOne({ leaderId: userId }).select('_id').lean();
 
-if (teamObjectId || team) {
-  const teamId = teamObjectId || team._id;
-  pipeline.push({
-    $lookup: {
-      from: "users",
-      let: { seller_id: "$sellerId" },
-      pipeline: [
-        {
-          $match: {
-            $expr: {
-              $and: [
-                { $eq: ["$_id", "$$seller_id"] },
-                { $eq: ["$team_id", teamId] }
-              ]
+  if (teamObjectId || team) {
+    const teamId = teamObjectId || team._id;
+    pipeline.push({
+      $lookup: {
+        from: "users",
+        let: { seller_id: "$sellerId" },
+        pipeline: [
+          {
+            $match: {
+              $expr: {
+                $and: [
+                  { $eq: ["$_id", "$$seller_id"] },
+                  { $eq: ["$team_id", teamId] }
+                ]
+              }
             }
-          }
-        },
-        { $project: { full_name: 1, email: 1, team_id: 1 } }
-      ],
-      as: "seller"
-    }
-  });
-  
-  pipeline.push({
-    $match: { 
-      seller: { $ne: [] }
-    }
-  });
-} else {
+          },
+          { $project: { full_name: 1, email: 1, team_id: 1 } }
+        ],
+        as: "seller"
+      }
+    });
+
+    pipeline.push({
+      $match: { 
+        seller: { $ne: [] }
+      }
+    });
+  } 
+  else {
     pipeline.push({
       $lookup: {
         from: "users",
