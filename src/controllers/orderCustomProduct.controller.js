@@ -26,15 +26,15 @@ const {
   buildRulesFromConfig,
 } = require("../utils/skuMigrate");
 
-const  {
-    validateIds,
-    buildInitialMatch,
-    buildFilters,
-    buildVendorFilter,
-    buildPipeline,
-    executePipeline,
-    enrichOrdersData,
-    getVendorProductIdsByVendorName
+const {
+  validateIds,
+  buildInitialMatch,
+  buildFilters,
+  buildVendorFilter,
+  buildPipeline,
+  executePipeline,
+  enrichOrdersData,
+  getVendorProductIdsByVendorName
 } = require("../helper/orderHelper")
 
 const mongoose = require("mongoose");
@@ -1155,7 +1155,8 @@ const getFrontendOrders = async (req, res) => {
       shopName,
       openCase,
       teamId,
-      sellerId
+      sellerId,
+      invalidAddress
     } = req.query;
 
     //RBAC
@@ -1202,6 +1203,10 @@ const getFrontendOrders = async (req, res) => {
       filters.push(vendorFilter);
     }
 
+    if (String(invalidAddress).toLowerCase() === "true") {
+      filters.push({ "address_validation.isValid": false });
+    }
+
     // BUILD PIPELINE =====
     const pipeline = await buildPipeline({
       initialMatch,
@@ -1213,9 +1218,9 @@ const getFrontendOrders = async (req, res) => {
     });
 
     // EXECUTE & PAGINATE =====
-    const { orders, totalCount, limitNum  } = await executePipeline(
-      pipeline, 
-      page, 
+    const { orders, totalCount, limitNum } = await executePipeline(
+      pipeline,
+      page,
       perPage
     );
 
@@ -1250,6 +1255,7 @@ const getOrderStatistics = async (req, res) => {
       shippingType,
       shopName,
       openCase,
+      invalidAddress
     } = req.query;
 
     // ===== RBAC =====
@@ -1298,6 +1304,7 @@ const getOrderStatistics = async (req, res) => {
         ],
       });
     }
+
 
     // Seller only their orders (unless production)
     if (isSeller && !isProduction) {
@@ -1369,6 +1376,10 @@ const getOrderStatistics = async (req, res) => {
       if (resFilter?._id) filters.push({ shopId: resFilter._id });
     }
 
+    if (String(invalidAddress).toLowerCase() === "true") {
+      filters.push({ "address_validation.isValid": false });
+    }
+
     const baseFilter = filters.length > 0 ? { $and: filters } : {};
 
     const [
@@ -1381,6 +1392,7 @@ const getOrderStatistics = async (req, res) => {
       cancelled,
       refund,
       openCaseCount,
+      invalidAddressCount
     ] = await Promise.all([
       OrderCustomProduct.countDocuments(baseFilter),
       OrderCustomProduct.countDocuments({ ...baseFilter, status: "New" }),
@@ -1400,6 +1412,10 @@ const getOrderStatistics = async (req, res) => {
         ...baseFilter,
         case: { $exists: true, $not: { $size: 0 } },
       }),
+      OrderCustomProduct.countDocuments({
+        ...baseFilter,
+        "address_validation.isValid": false // count invalid addresses
+      }),
     ]);
 
     res.json({
@@ -1412,6 +1428,7 @@ const getOrderStatistics = async (req, res) => {
       cancelled,
       refund,
       openCase: openCaseCount,
+      invalidAddress: invalidAddressCount
     });
   } catch (error) {
     console.error("❌ getOrderStatistics error:", error);
