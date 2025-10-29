@@ -249,7 +249,12 @@ const getQCList = async (req, res) => {
             colorValue: item?.cost_breakdown?.colorValue || null,
             vendorProductSKU: item?.cost_breakdown?.matchedSku,
           },
-          tracking_info: item.tracking_info || {},
+          tracking_info: {
+            fulfillment: item?.tracking_info?.fulfillment,
+            status: item?.tracking_info?.status,
+            tracking: item?.tracking_info?.tracking,
+            note: item?.tracking_info?.note,
+          },
           fulfillment_file: item.fulfillment_file,
           scale_status: item.scale_status,
           qc_note: item.qc_note,
@@ -266,17 +271,25 @@ const getQCList = async (req, res) => {
 
       return {
         orderId: order.orderId,
+        merchantId: order.merchantId || null,
+        marketplaceId: order.marketplaceId || null,
         customer_infor: order.customer_infor,
+        status: order.status || "",
+        customized_url: order.customized_url,
+        purchase_date: order.purchase_date,
+        createdAt: order.createdAt,
         shopName: order.shop?.name || null,
+        shipping_type: order.shipping_type || null,
+        items,
+        base_cost: order.base_cost,
+        case: order.case,
+        address_validation: order.address_validation?.isValid,
         scale_overall_status: order.scale_overall_status,
         seller: order.seller
           ? {
-            _id: order.seller._id,
-            full_name: order.seller.full_name,
             email: order.seller.email,
           }
           : null,
-        items,
       };
     });
 
