@@ -15,7 +15,7 @@ const getQCList = async (req, res) => {
       scale_status, // filter theo scale_overall_status (order-level)
       search, // regex theo orderId (+ mở rộng sku/orderItemId/email/name/seller)
       shopName,
-      sellerId, // 👈 NEW: chỉ thêm dòng này
+      sellerId,
     } = req.query;
 
     const KNOWN = [
@@ -25,6 +25,8 @@ const getQCList = async (req, res) => {
       "Sent",
       "Failed",
       "QC Rejected",
+      "Cancelled",
+      "Address Invalid",
     ];
 
     const canon = (s) => {
@@ -32,23 +34,22 @@ const getQCList = async (req, res) => {
       if (!t) return "";
       if (/^complete$/i.test(t)) return "Ready";
       if (/^qc\s*reject(?:ed)?$/i.test(t)) return "QC Rejected";
+      if (/^addr(?:ess)?\s*invalid$/i.test(t)) return "Address Invalid";
       return t;
     };
 
-    // ==== matchStage (Order-level) ====
     const matchStage = {};
 
-    // date range
     if (from && to) {
       matchStage.createdAt = { $gte: new Date(from), $lte: new Date(to) };
     }
 
-    // scale_overall_status filter
-    let needFilterPendingItems = false; // chỉ lọc items Pending khi đang xem Pending
+    let needFilterPendingItems = false;
+
     if (scale_status && String(scale_status).trim() !== "") {
       if (/^all$/i.test(scale_status.trim())) {
         matchStage.scale_overall_status = {
-          $in: ["Pending", "Sent", "QC Rejected", "Ready"],
+          $in: ["Pending", "Sent", "QC Rejected", "Ready", "Address Invalid"],
         };
       } else {
         const wanted = scale_status.split(",").map(canon).filter(Boolean);
@@ -62,12 +63,19 @@ const getQCList = async (req, res) => {
       }
     } else {
       matchStage.scale_overall_status = {
-        $in: ["Pending", "Sent", "QC Rejected", "Ready", "Failed"],
+        $in: [
+          "Pending",
+          "Sent",
+          "QC Rejected",
+          "Ready",
+          "Failed",
+          "Cancelled",
+          "Address Invalid",
+        ],
       };
       needFilterPendingItems = false;
     }
 
-    // --- search mở rộng ---
     let searchOr = null;
     if (search && search.trim() !== "") {
       const keyword = new RegExp(search.trim(), "i");
@@ -84,8 +92,6 @@ const getQCList = async (req, res) => {
 
     const basePipeline = [
       { $match: matchStage },
-
-      // 2) Join Shop
       {
         $lookup: {
           from: "shops",
@@ -95,8 +101,6 @@ const getQCList = async (req, res) => {
         },
       },
       { $unwind: { path: "$shop", preserveNullAndEmptyArrays: true } },
-
-      // ✅ Join Seller
       {
         $lookup: {
           from: "users",
@@ -106,8 +110,6 @@ const getQCList = async (req, res) => {
         },
       },
       { $unwind: { path: "$seller", preserveNullAndEmptyArrays: true } },
-
-      // 3) Filter theo shopName nếu có
       ...(shopName && shopName.trim() !== ""
         ? [
           {
@@ -117,8 +119,6 @@ const getQCList = async (req, res) => {
           },
         ]
         : []),
-
-      // 4) Join Case (nhiều)
       {
         $lookup: {
           from: "cases",
@@ -127,22 +127,17 @@ const getQCList = async (req, res) => {
           as: "case",
         },
       },
-
-      // 5) Áp dụng search nếu có
       ...(searchOr ? [{ $match: { $or: searchOr } }] : []),
     ];
 
-    // 👇👇👇 ONLY ADD: filter sellerId (giữ nguyên mọi thứ khác)
     if (sellerId && mongoose.Types.ObjectId.isValid(sellerId)) {
       basePipeline.push({
         $match: { "seller._id": new mongoose.Types.ObjectId(sellerId) },
       });
     }
-    // 👆👆👆
 
     const pipeline = [...basePipeline];
 
-    // 6) (tùy chọn) Chỉ giữ lại items Pending khi đang xem Pending
     if (needFilterPendingItems) {
       pipeline.push({
         $addFields: {
@@ -158,12 +153,10 @@ const getQCList = async (req, res) => {
       pipeline.push({ $match: { $expr: { $gt: [{ $size: "$items" }, 0] } } });
     }
 
-    // --- Count ---
     const countPipeline = [...pipeline, { $count: "total" }];
     const countResult = await OrderCustomProduct.aggregate(countPipeline);
     const totalCount = countResult[0]?.total || 0;
 
-    // --- Paginate ---
     const isAll = String(perPage).toLowerCase() === "all";
     const skip = (parseInt(page, 10) - 1) * parseInt(perPage, 10);
     const limit = parseInt(perPage, 10);
@@ -171,10 +164,8 @@ const getQCList = async (req, res) => {
     pipeline.push({ $sort: { createdAt: -1 } });
     if (!isAll) pipeline.push({ $skip: skip }, { $limit: limit });
 
-    // --- Query ---
     const orders = await OrderCustomProduct.aggregate(pipeline);
 
-    // === Thu thập tất cả vendorProductId từ cost_breakdown của items ===
     const vendorIdSet = new Set();
     for (const o of orders) {
       for (const it of o.items || []) {
@@ -183,30 +174,24 @@ const getQCList = async (req, res) => {
       }
     }
 
-    // === Lấy map: vendorProductId -> "Vendor Name - Product Name" ===
     let vendorFullNameMap = new Map();
     if (vendorIdSet.size > 0) {
-      const idObjs = [];
-      for (const id of vendorIdSet) {
-        if (mongoose.Types.ObjectId.isValid(id)) {
-          idObjs.push(new mongoose.Types.ObjectId(id));
-        }
-      }
+      const idObjs = Array.from(vendorIdSet)
+        .filter((id) => mongoose.Types.ObjectId.isValid(id))
+        .map((id) => new mongoose.Types.ObjectId(id));
 
-      if (idObjs.length > 0) {
-        const vps = await VendorProduct.find({ _id: { $in: idObjs } })
-          .select("product_name vendor_id")
-          .populate({ path: "vendor_id", select: "name" })
-          .lean();
+      const vps = await VendorProduct.find({ _id: { $in: idObjs } })
+        .select("product_name vendor_id")
+        .populate({ path: "vendor_id", select: "name" })
+        .lean();
 
-        vendorFullNameMap = new Map(
-          (vps || []).map((vp) => {
-            const vendorName = vp?.vendor_id?.name || "";
-            const productName = vp?.product_name || "";
-            return [String(vp._id), `${vendorName} - ${productName}`.trim()];
-          })
-        );
-      }
+      vendorFullNameMap = new Map(
+        (vps || []).map((vp) => {
+          const vendorName = vp?.vendor_id?.name || "";
+          const productName = vp?.product_name || "";
+          return [String(vp._id), `${vendorName} - ${productName}`.trim()];
+        })
+      );
     }
 
     const listingIdSet = new Set();
@@ -219,21 +204,15 @@ const getQCList = async (req, res) => {
 
     let listingMap = new Map();
     if (listingIdSet.size > 0) {
-      const ids = [];
-      for (const id of listingIdSet) {
-        if (mongoose.Types.ObjectId.isValid(id)) {
-          ids.push(new mongoose.Types.ObjectId(id));
-        }
-      }
-      if (ids.length > 0) {
-        const listings = await Listing.find({ _id: { $in: ids } })
-          .select("asin_type product_image psd") // chỉ lấy các trường cần
-          .lean();
-        listingMap = new Map(listings.map((l) => [String(l._id), l]));
-      }
+      const ids = Array.from(listingIdSet)
+        .filter((id) => mongoose.Types.ObjectId.isValid(id))
+        .map((id) => new mongoose.Types.ObjectId(id));
+      const listings = await Listing.find({ _id: { $in: ids } })
+        .select("asin_type product_image psd")
+        .lean();
+      listingMap = new Map(listings.map((l) => [String(l._id), l]));
     }
 
-    // --- Shape output ---
     const result = orders.map((order) => {
       const items = (order.items || []).map((item) => {
         const surfaces = item.version3Data?.customizationInfo?.surfaces || [];
@@ -270,12 +249,7 @@ const getQCList = async (req, res) => {
             colorValue: item?.cost_breakdown?.colorValue || null,
             vendorProductSKU: item?.cost_breakdown?.matchedSku,
           },
-          tracking_info: {
-            fulfillment: item?.tracking_info?.fulfillment,
-            status: item?.tracking_info?.status,
-            tracking: item?.tracking_info?.tracking,
-            note: item?.tracking_info?.note,
-          },
+          tracking_info: item.tracking_info || {},
           fulfillment_file: item.fulfillment_file,
           scale_status: item.scale_status,
           qc_note: item.qc_note,
@@ -292,19 +266,8 @@ const getQCList = async (req, res) => {
 
       return {
         orderId: order.orderId,
-        merchantId: order.merchantId || null,
-        marketplaceId: order.marketplaceId || null,
         customer_infor: order.customer_infor,
-        status: order.status || "",
-        customized_url: order.customized_url,
-        purchase_date: order.purchase_date,
-        createdAt: order.createdAt,
         shopName: order.shop?.name || null,
-        shipping_type: order.shipping_type || null,
-        items,
-        base_cost: order.base_cost,
-        case: order.case,
-        address_validation: order.address_validation?.isValid,
         scale_overall_status: order.scale_overall_status,
         seller: order.seller
           ? {
@@ -313,15 +276,14 @@ const getQCList = async (req, res) => {
             email: order.seller.email,
           }
           : null,
+        items,
       };
     });
 
     res.json({
       data: result,
       totalCount,
-      totalPages: isAll
-        ? 1
-        : Math.ceil(totalCount / (isAll ? totalCount || 1 : limit)),
+      totalPages: isAll ? 1 : Math.ceil(totalCount / limit),
       currentPage: parseInt(page, 10),
     });
   } catch (error) {
@@ -333,28 +295,17 @@ const getQCList = async (req, res) => {
   }
 };
 
+// ---------------- STATISTICS ----------------
 const getQCStatistics = async (req, res) => {
   try {
-    const {
-      from,
-      to,
-      search,
-      shopName,
-      breakdown,
-      timeseries = "false",
-      sellerId, // 👈 NEW: nhận sellerId từ query
-    } = req.query;
+    const { from, to, search, shopName, breakdown, timeseries = "false", sellerId } =
+      req.query;
 
-    // --- Match theo Order ---
     const matchStage = {};
     if (from && to) {
-      matchStage.createdAt = {
-        $gte: new Date(from),
-        $lte: new Date(to),
-      };
+      matchStage.createdAt = { $gte: new Date(from), $lte: new Date(to) };
     }
 
-    // --- Search mở rộng (giữ nguyên) ---
     let searchOr = null;
     if (search && search.trim() !== "") {
       const keyword = new RegExp(search.trim(), "i");
@@ -374,13 +325,12 @@ const getQCStatistics = async (req, res) => {
       "Sent",
       "Failed",
       "QC Rejected",
+      "Cancelled",
+      "Address Invalid",
     ];
 
-    // === Base pipeline (cấp Order) ===
     const basePipeline = [
       { $match: matchStage },
-
-      // Join Shop để filter/breakdown
       {
         $lookup: {
           from: "shops",
@@ -390,7 +340,6 @@ const getQCStatistics = async (req, res) => {
         },
       },
       { $unwind: { path: "$shop", preserveNullAndEmptyArrays: true } },
-
       ...(shopName && shopName.trim()
         ? [
           {
@@ -400,10 +349,7 @@ const getQCStatistics = async (req, res) => {
           },
         ]
         : []),
-
       ...(searchOr ? [{ $match: { $or: searchOr } }] : []),
-
-      // ✅ NEW: Join Seller để có thể filter theo sellerId
       {
         $lookup: {
           from: "users",
@@ -413,20 +359,14 @@ const getQCStatistics = async (req, res) => {
         },
       },
       { $unwind: { path: "$seller", preserveNullAndEmptyArrays: true } },
-
-      // ✅ NEW: nếu có sellerId hợp lệ thì match theo seller._id
       ...(sellerId && mongoose.Types.ObjectId.isValid(sellerId)
         ? [{ $match: { "seller._id": new mongoose.Types.ObjectId(sellerId) } }]
         : []),
-
-      // Chuẩn hóa bucket trạng thái ở cấp Order
       {
         $addFields: {
           overall_status_bucket: {
             $let: {
-              vars: {
-                s: { $ifNull: ["$scale_overall_status", "Need Scale"] },
-              },
+              vars: { s: { $ifNull: ["$scale_overall_status", "Need Scale"] } },
               in: {
                 $cond: [{ $in: ["$$s", KNOWN] }, "$$s", "Other"],
               },
@@ -436,15 +376,9 @@ const getQCStatistics = async (req, res) => {
       },
     ];
 
-    // === OVERALL: đếm số ORDER theo trạng thái ===
     const overallPipeline = [
       ...basePipeline,
-      {
-        $group: {
-          _id: "$overall_status_bucket",
-          orders: { $sum: 1 },
-        },
-      },
+      { $group: { _id: "$overall_status_bucket", orders: { $sum: 1 } } },
       {
         $group: {
           _id: null,
@@ -461,68 +395,6 @@ const getQCStatistics = async (req, res) => {
       },
     ];
 
-    // === BREAKDOWN THEO SHOP (nếu cần) ===
-    const breakdownPipeline = [
-      ...basePipeline,
-      {
-        $group: {
-          _id: { shopName: "$shop.name", status: "$overall_status_bucket" },
-          orders: { $sum: 1 },
-        },
-      },
-      {
-        $group: {
-          _id: "$_id.shopName",
-          byStatus: { $push: { k: "$_id.status", v: "$orders" } },
-          totalOrders: { $sum: "$orders" },
-        },
-      },
-      {
-        $project: {
-          _id: 0,
-          shopName: "$_id",
-          totalOrders: 1,
-          counts: { $arrayToObject: "$byStatus" },
-        },
-      },
-      { $sort: { shopName: 1 } },
-    ];
-
-    // === TIME SERIES THEO NGÀY (nếu cần) ===
-    const timeseriesPipeline = [
-      ...basePipeline,
-      {
-        $addFields: {
-          day: { $dateToString: { format: "%Y-%m-%d", date: "$createdAt" } },
-        },
-      },
-      {
-        $group: {
-          _id: { day: "$day", status: "$overall_status_bucket" },
-          orders: { $sum: 1 },
-        },
-      },
-      {
-        $group: {
-          _id: "$_id.day",
-          byStatus: { $push: { k: "$_id.status", v: "$orders" } },
-          totalOrders: { $sum: "$orders" },
-        },
-      },
-      {
-        $project: {
-          _id: 0,
-          day: "$_id",
-          totalOrders: 1,
-          counts: { $arrayToObject: "$byStatus" },
-        },
-      },
-      { $sort: { day: 1 } },
-    ];
-
-    const [overallRaw] = await OrderCustomProduct.aggregate(overallPipeline);
-
-    // Chuẩn hóa đủ key trạng thái
     const normalizeCounts = (c = {}) => {
       const counts = {
         "Need Scale": c["Need Scale"] || 0,
@@ -531,51 +403,31 @@ const getQCStatistics = async (req, res) => {
         Sent: c["Sent"] || 0,
         Failed: c["Failed"] || 0,
         "QC Rejected": c["QC Rejected"] || 0,
+        Cancelled: c["Cancelled"] || 0,
+        "Address Invalid": c["Address Invalid"] || 0,
         Other: c["Other"] || 0,
       };
-      // Thêm All = tổng Pending + Sent + QC Rejected + Ready
       counts["All"] =
         counts["Pending"] +
         counts["Sent"] +
         counts["QC Rejected"] +
-        counts["Ready"];
+        counts["Ready"] +
+        counts["Address Invalid"];
       return counts;
     };
+
+    const [overallRaw] = await OrderCustomProduct.aggregate(overallPipeline);
 
     const overall = {
       totalOrders: overallRaw?.totalOrders || 0,
       counts: normalizeCounts(overallRaw?.counts),
     };
 
-    let breakdownResult = [];
-    if (breakdown === "shop") {
-      breakdownResult = await OrderCustomProduct.aggregate(breakdownPipeline);
-      breakdownResult = breakdownResult.map((r) => ({
-        shopName: r.shopName || "(No shop)",
-        totalOrders: r.totalOrders || 0,
-        counts: normalizeCounts(r.counts),
-      }));
-    }
-
-    let timeseriesResult = [];
-    if (String(timeseries).toLowerCase() === "true") {
-      timeseriesResult = await OrderCustomProduct.aggregate(timeseriesPipeline);
-      timeseriesResult = timeseriesResult.map((d) => ({
-        day: d.day,
-        totalOrders: d.totalOrders || 0,
-        counts: normalizeCounts(d.counts),
-      }));
-    }
-
-    return res.json({
-      overall,
-      breakdown: breakdownResult,
-      timeseries: timeseriesResult,
-    });
+    res.json({ overall });
   } catch (error) {
-    console.error("❌ getQCStatisticsOverall error:", error);
-    return res.status(500).json({
-      message: "Failed to retrieve QC statistics by scale_overall_status",
+    console.error("❌ getQCStatistics error:", error);
+    res.status(500).json({
+      message: "Failed to retrieve QC statistics",
       error: error.message,
     });
   }
