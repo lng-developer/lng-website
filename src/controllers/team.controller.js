@@ -79,11 +79,11 @@ const getTeams = async (req, res) => {
         }
 
         // 6. Unwind members
-        pipeline.push({ 
-            $unwind: { 
-                path: '$members', 
-                preserveNullAndEmptyArrays: true 
-            } 
+        pipeline.push({
+            $unwind: {
+                path: '$members',
+                preserveNullAndEmptyArrays: true
+            }
         });
 
         // 7. Lookup member roles
@@ -96,11 +96,11 @@ const getTeams = async (req, res) => {
             }
         });
 
-        pipeline.push({ 
-            $unwind: { 
-                path: '$memberRole', 
-                preserveNullAndEmptyArrays: true 
-            } 
+        pipeline.push({
+            $unwind: {
+                path: '$memberRole',
+                preserveNullAndEmptyArrays: true
+            }
         });
 
         // 8. Group lại
@@ -189,6 +189,7 @@ const getTeamMembers = async (req, res) => {
     }
 };
 
+
 const createTeam = async (req, res) => {
     try {
         const { name, userIds, leaderId } = req.body;
@@ -199,56 +200,76 @@ const createTeam = async (req, res) => {
         const existingTeam = await Team.findOne({ name: trimmedName }).lean();
         if (existingTeam) return fail(res, 400, "Team name already exists");
 
-        let validProvidedIds = Array.isArray(userIds)
+        // lọc id hợp lệ
+        const validProvidedIds = Array.isArray(userIds)
             ? userIds.filter((id) => mongoose.isValidObjectId(id))
             : [];
 
+        // lấy user hiện có trong db
         let existingUsers = [];
-        if (validProvidedIds.length > 0) {
+        if (validProvidedIds.length) {
             existingUsers = await User.find({ _id: { $in: validProvidedIds } })
                 .select("_id full_name email team_id")
                 .lean();
         }
 
-        // <-- FIX: use correct accumulator keys and push into addMembs
+        // phân loại: đã có team hay chưa
         const { addMembs, alreadyInTeam } = existingUsers.reduce(
             (acc, u) => {
                 if (u.team_id) acc.alreadyInTeam.push(u);
-                else acc.addMembs.push(u._id);   // <-- was acc.willBeAddedIds before (typo)
+                else acc.addMembs.push(u._id); // <-- đảm bảo push vào key tồn tại
                 return acc;
             },
             { addMembs: [], alreadyInTeam: [] }
         );
 
+        // tạo team (có thể gán userIds luôn nếu muốn)
         const team = await Team.create({
             name: trimmedName,
             leaderId: leaderId,
             active: true,
+            // nếu muốn lưu ngay danh sách userIds trên team:
+            // userIds: addMembs
         });
 
+        // nếu có members cần add: cập nhật User.team_id và Team.userIds
         let updateResult = { matchedCount: 0, modifiedCount: 0 };
         if (addMembs.length > 0) {
-            const result = await User.updateMany(
+            // 1) cập nhật users (chỉ những user chưa có team)
+            const userUpdate = await User.updateMany(
                 { _id: { $in: addMembs }, team_id: { $exists: false } },
                 { $set: { team_id: team._id } }
             );
-            updateResult = { matchedCount: result.matchedCount, modifiedCount: result.modifiedCount };
+            updateResult = {
+                matchedCount: userUpdate.matchedCount ?? userUpdate.n ?? 0,
+                modifiedCount: userUpdate.modifiedCount ?? userUpdate.nModified ?? 0,
+            };
+
+            // 2) cập nhật team.userIds bằng $addToSet / $each để tránh duplicate
+            // dùng addToSet với $each sẽ đảm bảo ko thêm id trùng
+            await Team.updateOne(
+                { _id: team._id },
+                { $addToSet: { userIds: { $each: addMembs } } }
+            );
         }
+
+        // chuẩn hóa id trả về (string) để client dễ đọc
+        const addedUserIdsStr = addMembs.map((id) => id.toString());
 
         return success(res, "Team created successfully", {
             team: {
-                id: team._id,
+                id: team._id.toString(),
                 name: team.name,
                 active: team.active,
             },
             members: {
                 addedCount: updateResult.modifiedCount,
-                addedUserIds: addMembs,
+                addedUserIds: addedUserIdsStr,
                 skippedAlreadyInTeam: alreadyInTeam.map((u) => ({
-                    _id: u._id,
+                    _id: u._id.toString(),
                     full_name: u.full_name,
                     email: u.email,
-                    team_id: u.team_id,
+                    team_id: u.team_id ? u.team_id.toString() : null,
                 })),
             },
         });
