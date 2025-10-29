@@ -5,7 +5,7 @@ const VendorProduct = db.vendorProduct;
 const Vendor = db.vendor;
 const Listing = db.listing;
 const Team = db.Team;
-
+const User = db.user;
 
 function validateIds({ teamId, sellerId, userId }) {
   const result = {
@@ -34,7 +34,6 @@ function validateIds({ teamId, sellerId, userId }) {
     result.error = "Invalid user id in token";
     return result;
   }
-
   return result;
 }
 
@@ -174,8 +173,14 @@ async function getVendorProductIdsByVendorName(vendorName) {
 async function buildPipeline({ initialMatch, filters, userId, teamObjectId, shopName }) {
   const pipeline = [];
 
-  if (Object.keys(initialMatch).length > 0) {
-    pipeline.push({ $match: initialMatch });
+  const team = await Team.findOne({ leaderId: userId }).select("_id").lean();
+  const adjustedInitialMatch = { ...initialMatch };
+  if (team && adjustedInitialMatch.sellerId) {
+    delete adjustedInitialMatch.sellerId;
+  }
+
+  if (Object.keys(adjustedInitialMatch).length > 0) {
+    pipeline.push({ $match: adjustedInitialMatch });
   }
 
   pipeline.push(
@@ -197,45 +202,33 @@ async function buildPipeline({ initialMatch, filters, userId, teamObjectId, shop
       }
     });
   }
-  const team = await Team.findOne({ leaderId: userId }).select('_id').lean();
-
   if (teamObjectId || team) {
     const teamId = teamObjectId || team._id;
+    const teamUserIds = await User.find({ team_id: teamId })
+      .select("_id")
+      .lean();
+    const userIds = teamUserIds.map((u) => u._id);
     pipeline.push({
-      $lookup: {
-        from: "users",
-        let: { seller_id: "$sellerId" },
-        pipeline: [
-          {
-            $match: {
-              $expr: {
-                $and: [
-                  { $eq: ["$_id", "$$seller_id"] },
-                  { $eq: ["$team_id", teamId] }
-                ]
-              }
-            }
-          },
-          { $project: { full_name: 1, email: 1, team_id: 1 } }
-        ],
-        as: "seller"
-      }
+      $match: {
+        sellerId: { $in: userIds },
+      },
     });
-
-    pipeline.push({
-      $match: { 
-        seller: { $ne: [] }
-      }
-    });
-  } 
-  else {
     pipeline.push({
       $lookup: {
         from: "users",
         localField: "sellerId",
         foreignField: "_id",
-        as: "seller"
-      }
+        as: "seller",
+      },
+    });
+  } else {
+    pipeline.push({
+      $lookup: {
+        from: "users",
+        localField: "sellerId",
+        foreignField: "_id",
+        as: "seller",
+      },
     });
   }
 
