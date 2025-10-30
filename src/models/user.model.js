@@ -7,7 +7,10 @@ const userSchema = new mongoose.Schema({
     role_id: { type: mongoose.Schema.Types.ObjectId, ref: 'Role', required: true },
     revokeAllBefore: { type: Date, default: new Date(0), index: true },
     employee_id: { type: String, required: true, unique: true },
-    team_id: { type: mongoose.Schema.Types.ObjectId, ref: 'Team' }
+    team_id: { type: mongoose.Schema.Types.ObjectId, ref: 'Team' },
+    wallet: {
+        balance: { type: Number, default: 0 } // tổng điểm tích lũy
+    }
 }, { timestamps: { createdAt: 'created_at', updatedAt: 'updated_at' } });
 
 module.exports = mongoose.model('User', userSchema);

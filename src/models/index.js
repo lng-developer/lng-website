@@ -21,6 +21,7 @@ const PsdTask = require("./psdTask.model");
 const IdeaTask = require("./ideaTask.model");
 const RealtimeLog = require("./realtimeLog.model");
 const Team = require("./team.model");
+const PointLog = require("./pointLogs.model")
 // Cau hinh mongoose dang global
 mongoose.Promise = global.Promise;
 // Dinh nghia doi tuong DB
@@ -49,6 +50,7 @@ db.PsdTask = PsdTask;
 db.IdeaTask = IdeaTask;
 db.RealtimeLog = RealtimeLog;
 db.Team = Team;
+db.PointLog = PointLog
 db.connectDB = async () => {
   await mongoose
     .connect(process.env.MONGO_URI, {

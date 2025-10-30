@@ -22,6 +22,7 @@ const ideaTaskController = require("./ideaTask.controller");
 const realtimeLogController = require("./realtimeLog.controller");
 const teamController = require("./team.controller");
 const extController = require("./ext.controller");
+const pointController = require("./points.controller");
 
 module.exports = {
   roleController,
@@ -48,4 +49,5 @@ module.exports = {
   realtimeLogController,
   teamController,
   extController,
+  pointController
 };

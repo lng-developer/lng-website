@@ -24,6 +24,7 @@ const realtimeLogRoutes = require("./realtimeLog.routes");
 const teamRoutes = require("./team.routes");
 const extRoutes = require("./ext.routes");
 const adminSessionRoutes = require("./admin.session.routes")
+const PointsRoutes = require("./points.routes");
 
 module.exports = {
   roleRoutes,
@@ -51,5 +52,6 @@ module.exports = {
   realtimeLogRoutes,
   teamRoutes,
   extRoutes,
-  adminSessionRoutes
+  adminSessionRoutes,
+  PointsRoutes
 };
