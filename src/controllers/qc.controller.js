@@ -153,6 +153,19 @@ const getQCList = async (req, res) => {
       pipeline.push({ $match: { $expr: { $gt: [{ $size: "$items" }, 0] } } });
     }
 
+    pipeline.push(
+        {
+        $lookup: {
+          from: "users",
+          localField: "scaleId",
+          foreignField: "_id",
+          as: "scaledBy",
+        },
+      },
+      { $unwind: { path: "$scaledBy", preserveNullAndEmptyArrays: true } },
+      
+    )
+
     const countPipeline = [...pipeline, { $count: "total" }];
     const countResult = await OrderCustomProduct.aggregate(countPipeline);
     const totalCount = countResult[0]?.total || 0;
@@ -285,6 +298,11 @@ const getQCList = async (req, res) => {
         case: order.case,
         address_validation: order.address_validation?.isValid,
         scale_overall_status: order.scale_overall_status,
+        scaledBy: order.scaledBy ? {
+          _id: order.scaledBy._id,
+          full_name: order.scaledBy.full_name,
+          email: order.scaledBy.email
+        } : null,
         seller: order.seller
           ? {
             email: order.seller.email,

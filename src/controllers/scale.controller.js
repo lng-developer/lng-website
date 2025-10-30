@@ -76,6 +76,7 @@ const uploadFulfillmentFileForItem = [
     try {
       const { orderId, orderItemId } = req.params;
       const { meta } = req.body;
+      const user = req.user;
 
       if (!req.files?.length)
         return res.status(400).json({ message: "Missing files" });
@@ -124,6 +125,8 @@ const uploadFulfillmentFileForItem = [
       item.scale_status = "Pending";
       order.scale_overall_status = computeOverallScaleStatus(order);
       item.markModified("fulfillment_file");
+
+      order.scaleId = user.id;
       await order.save();
 
       return res.json({
