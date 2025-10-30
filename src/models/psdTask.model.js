@@ -37,10 +37,10 @@ const psdTaskSchema = new mongoose.Schema(
     seller: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
     leader: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
     designer: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
-    priority: {
+    difficulty: {
       type: String,
-      enum: ["Low", "Normal", "High", "Urgent"],
-      default: "Normal",
+      enum: ["Easy", "Normal", "Hard", "Extremely"],
+      default: "Easy",
     },
     dueAt: Date,
     qc: {

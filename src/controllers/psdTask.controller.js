@@ -5,6 +5,14 @@ const Listing = db.listing;
 const psdTaskService = require("../service/psdTask/psdTask.js");
 const { uploadBufferToWasabi } = require("../utils/wasabi.js");
 const mongoose = require("mongoose");
+const addPointsFromTask = require('../service/pointsService.js');
+const PointMap = Object.freeze({
+  EASY: 1,
+  NORMAL: 2,
+  HARD: 3,
+  EXTREMELY: 4,
+});
+
 
 // helper: chấp nhận role là string hoặc array
 function hasRole(userRole, target) {
@@ -385,17 +393,28 @@ const qcPSD = async (req, res) => {
   try {
     const { taskId } = req.params;
     const { result, note } = req.body;
+    const userId = req.user.userId;
     const status = result === "pass" ? "QC Passed" : "QC Rejected";
     const task = await psdTaskService.changeStatus(
       taskId,
       status,
-      req.user.userId,
+      userId,
       "qc",
       note
     );
     if (status === "QC Rejected") {
       // xoá toàn bộ field `psd` khỏi listing
       await Listing.updateOne({ _id: task.listing }, { $unset: { psd: "" } });
+    } else {
+      const designerId = task.designer;
+      const difficulty = task.difficulty || "Easy";
+      const point = PointMap[difficulty] || 1;      
+      await addPointsFromTask({
+        userId: designerId,
+        taskId: taskId,
+        point: point,
+        note: note
+      });
     }
     res.json(task);
   } catch (err) {
