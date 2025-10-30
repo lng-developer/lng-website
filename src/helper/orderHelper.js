@@ -238,6 +238,19 @@ async function buildPipeline({ initialMatch, filters, userId, teamObjectId, shop
 
   pipeline.push({
     $lookup: {
+      from: "users",
+        localField: "scaleId",
+        foreignField: "_id",
+        as: "scaledBy",
+    }
+  });
+
+  pipeline.push({
+    $unwind: { path: "$scaledBy", preserveNullAndEmptyArrays: true }
+  });
+
+  pipeline.push({
+    $lookup: {
       from: "cases",
       localField: "case",
       foreignField: "_id",
@@ -404,6 +417,11 @@ function enrichOrder(order, listingMap, vendorMap) {
       _id: order.seller._id,
       full_name: order.seller.full_name,
       email: order.seller.email
+    } : null,
+    scaledBy: order.scaledBy ? {
+      _id: order.scaledBy._id,
+      full_name: order.scaledBy.full_name,
+      email: order.scaledBy.email
     } : null,
     amazon_finance_total: order.amazon_finance_total,
     amazon_total_quantity: order.amazon_total_quantity
