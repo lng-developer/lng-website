@@ -4,6 +4,12 @@ const OrderCustomProduct = db.orderCustomProduct;
 const AdsDailySummary = db.Ads;
 const { parse } = require("csv-parse/sync");
 const mongoose = require("mongoose");
+const InprocQueue = require("../lib/inprocQueue");
+const importQueue = new InprocQueue({
+  concurrency: Number(process.env.REPORT_IMPORT_CONCURRENCY || 1),
+});
+const logbus = require("../lib/logbus");
+const fs = require("fs");
 
 // ép số an toàn
 const num = (v) => {
@@ -38,7 +44,7 @@ const importReportFromFile = async (req, res) => {
         bom: true,
         trim: true,
         relax_column_count: true,
-        quote: false,              // <<-- QUAN TRỌNG: tắt quote parsing
+        quote: false, // <<-- QUAN TRỌNG: tắt quote parsing
         record_delimiter: ["\r\n", "\n"], // ổn định xuống dòng hỗn hợp
       }).map(norm);
     } catch (e1) {
@@ -50,9 +56,9 @@ const importReportFromFile = async (req, res) => {
         bom: true,
         trim: true,
         relax_column_count: true,
-        relax_quotes: true,        // chấp nhận quote “lệch chuẩn”
-        quote: false,              // vẫn tắt quote để không coi " là đặc biệt
-        on_record: (rec) => rec,   // giữ nguyên bản ghi
+        relax_quotes: true, // chấp nhận quote “lệch chuẩn”
+        quote: false, // vẫn tắt quote để không coi " là đặc biệt
+        on_record: (rec) => rec, // giữ nguyên bản ghi
       }).map(norm);
     }
 
@@ -122,14 +128,17 @@ const importReportFromFile = async (req, res) => {
         updateOne: {
           filter: { orderId: acc.orderId },
           update: [
-            { $set: {
+            {
+              $set: {
                 amazon_total_quantity: acc.quantity,
                 amazon_finance_total: aft,
                 ...(hasValidPurchaseDate
                   ? { purchase_date: { $ifNull: ["$purchase_date", d] } }
                   : {}),
-            }},
-            { $set: {
+              },
+            },
+            {
+              $set: {
                 "amazon_finance_total.profit1": {
                   $round: [
                     {
@@ -149,8 +158,10 @@ const importReportFromFile = async (req, res) => {
                     2,
                   ],
                 },
-            }},
-            { $set: {
+              },
+            },
+            {
+              $set: {
                 "amazon_finance_total.profit2": {
                   $round: [
                     {
@@ -167,7 +178,8 @@ const importReportFromFile = async (req, res) => {
                     2,
                   ],
                 },
-            }},
+              },
+            },
           ],
           upsert: false,
         },
@@ -200,6 +212,267 @@ const importReportFromFile = async (req, res) => {
   }
 };
 
+async function importReportFromFileProcessor({
+  buffer,
+  filePath,
+  query = {},
+  onLog = () => {},
+}) {
+  try {
+    if (!buffer && !filePath) {
+      throw new Error("Missing report data. Provide buffer or filePath");
+    }
+
+    const raw = buffer?.toString("utf8") || fs.readFileSync(filePath, "utf8");
+
+    let rows;
+    try {
+      rows = parse(raw, {
+        columns: true,
+        delimiter: "\t",
+        skip_empty_lines: true,
+        bom: true,
+        trim: true,
+        relax_column_count: true,
+        quote: false,
+        record_delimiter: ["\r\n", "\n"],
+      }).map(norm);
+    } catch (e1) {
+      rows = parse(raw, {
+        columns: true,
+        delimiter: "\t",
+        skip_empty_lines: true,
+        bom: true,
+        trim: true,
+        relax_column_count: true,
+        relax_quotes: true,
+        quote: false,
+        on_record: (rec) => rec,
+      }).map(norm);
+    }
+
+    onLog({ type: "step", message: `parsed ${rows.length} rows` });
+
+    // ==== giữ nguyên phần tính toán gộp theo orderId ====
+    const bucket = new Map();
+    for (const r of rows) {
+      const orderId = r["amazon-order-id"]?.trim();
+      if (!orderId) continue;
+
+      const qty = num(r["quantity"]);
+      const itemPrice = num(r["item-price"]);
+      const itemTax = num(r["item-tax"]);
+      const shippingPrice = num(r["shipping-price"]);
+      const shippingTax = num(r["shipping-tax"]);
+      const discount = num(r["item-promotion-discount"]);
+
+      const revenue = itemPrice + shippingPrice;
+      const fee = 0.17 * (itemPrice + shippingPrice);
+
+      const acc = bucket.get(orderId) || {
+        orderId,
+        quantity: 0,
+        item_price: 0,
+        item_tax: 0,
+        shipping_price: 0,
+        shipping_tax: 0,
+        item_promotion_discount: 0,
+        fee: 0,
+        revenue: 0,
+        purchase_date_raw: r["purchase-date"],
+      };
+
+      acc.quantity += qty;
+      acc.item_price += itemPrice;
+      acc.item_tax += itemTax;
+      acc.shipping_price += shippingPrice;
+      acc.shipping_tax += shippingTax;
+      acc.item_promotion_discount += discount;
+      acc.fee += fee;
+      acc.revenue += revenue;
+
+      bucket.set(orderId, acc);
+    }
+
+    const col = mongoose.connection.collection("ordercustomproducts");
+    const ops = [];
+
+    for (const acc of bucket.values()) {
+      const aft = {
+        item_price: +acc.item_price.toFixed(2),
+        item_tax: +acc.item_tax.toFixed(2),
+        shipping_price: +acc.shipping_price.toFixed(2),
+        shipping_tax: +acc.shipping_tax.toFixed(2),
+        item_promotion_discount: +acc.item_promotion_discount.toFixed(2),
+        fee: +acc.fee.toFixed(2),
+        revenue: +acc.revenue.toFixed(2),
+        opCost: 0,
+        refund: 0,
+        computed_at: new Date(),
+      };
+
+      const d = acc.purchase_date_raw ? new Date(acc.purchase_date_raw) : null;
+      const hasValidPurchaseDate = d && !isNaN(d);
+
+      ops.push({
+        updateOne: {
+          filter: { orderId: acc.orderId },
+          update: [
+            {
+              $set: {
+                amazon_total_quantity: acc.quantity,
+                amazon_finance_total: aft,
+                ...(hasValidPurchaseDate
+                  ? { purchase_date: { $ifNull: ["$purchase_date", d] } }
+                  : {}),
+              },
+            },
+            {
+              $set: {
+                "amazon_finance_total.profit1": {
+                  $round: [
+                    {
+                      $subtract: [
+                        aft.revenue,
+                        {
+                          $add: [
+                            { $ifNull: ["$base_cost", 0] },
+                            aft.fee,
+                            aft.item_tax,
+                            aft.shipping_tax,
+                            aft.item_promotion_discount,
+                          ],
+                        },
+                      ],
+                    },
+                    2,
+                  ],
+                },
+              },
+            },
+            {
+              $set: {
+                "amazon_finance_total.profit2": {
+                  $round: [
+                    {
+                      $subtract: [
+                        "$amazon_finance_total.profit1",
+                        {
+                          $add: [
+                            { $ifNull: ["$amazon_finance_total.refund", 0] },
+                            { $ifNull: ["$amazon_finance_total.opCost", 0] },
+                          ],
+                        },
+                      ],
+                    },
+                    2,
+                  ],
+                },
+              },
+            },
+          ],
+          upsert: false,
+        },
+      });
+    }
+
+    if (String(query.dryRun) === "true") {
+      onLog({ type: "info", message: "DRY-RUN: no writes" });
+      return {
+        message: "DRY-RUN: no writes executed",
+        ordersParsed: bucket.size,
+        opsCount: ops.length,
+        bulkResult: null,
+      };
+    }
+
+    let bulkResult = null;
+    if (ops.length) {
+      onLog({ type: "step", message: `bulkWrite ${ops.length} ops` });
+      bulkResult = await col.bulkWrite(ops, { ordered: false });
+    }
+
+    onLog({ type: "done", message: "report imported" });
+    return {
+      message:
+        "Imported: HARD-OVERWRITE amazon_finance_total; profit fields computed with new formula; purchase_date set-if-missing",
+      ordersParsed: bucket.size,
+      opsCount: ops.length,
+      bulkResult,
+    };
+  } catch (err) {
+    onLog({ type: "error", message: `report import failed: ${err.message}` });
+    throw err;
+  }
+}
+
+// -----------------------------------------------------------
+// 2) ENQUEUE HANDLER — dùng cho POST /report/import-file
+//    Trả 202 ngay; job chạy nền + bắn realtime log
+// -----------------------------------------------------------
+async function importReportFromFileEnqueue(req, res) {
+  try {
+    if (!req.file?.buffer && !req.file?.path) {
+      return res
+        .status(400)
+        .json({ ok: false, message: "Send form-data 'file' (txt)" });
+    }
+
+    const io = req.app.get("io");
+    const shopId = req.body?.shopId || null;
+    const machineId = req.body?.machineId || null;
+
+    const buffer = req.file.buffer || null;
+    const filePath = req.file.path || null;
+    const query = req.query || {};
+
+    const jobId = importQueue.enqueue(
+      "import-report",
+      { hasFile: !!(buffer || filePath) },
+      async (job) => {
+        const onLog = (ev) => {
+          const event = {
+            at: Date.now(),
+            jobId: job.id,
+            shopId,
+            machineId,
+            type: ev.type || "info",
+            message: ev.message || "",
+          };
+          if (io) {
+            io.emit("realtime:log", event);
+            if (shopId) io.to(`shop:${shopId}`).emit("realtime:log", event);
+          }
+          logbus.append(event);
+        };
+
+        try {
+          onLog({ type: "step", message: "report processor:start" });
+          const result = await importReportFromFileProcessor({
+            buffer,
+            filePath,
+            query,
+            onLog,
+          });
+          onLog({
+            type: "done",
+            message: "report processor:finished",
+            meta: { result },
+          });
+        } catch (e) {
+          onLog({
+            type: "error",
+            message: `report processor:failed - ${e.message}`,
+          });
+        }
+      }
+    );
+
+    return res.status(202).json({ ok: true, jobId, queued: true });
+  } catch (err) {
+    return res.status(500).json({ ok: false, message: err.message });
+  }
+}
 
 // helpers
 function makeDayList(fromISO, toISO) {
@@ -786,4 +1059,6 @@ module.exports = {
   importReportFromFile,
   getReportMatrix,
   getOrderCostStatistics,
+  importReportFromFileProcessor,
+  importReportFromFileEnqueue,
 };

@@ -25,6 +25,11 @@ const {
   applyRulesToSku,
   buildRulesFromConfig,
 } = require("../utils/skuMigrate");
+const InprocQueue = require("../lib/inprocQueue");
+const logbus = require("../lib/logbus");
+const importQueue = new InprocQueue({
+  concurrency: Number(process.env.IMPORT_CONCURRENCY || 1),
+});
 
 const {
   validateIds,
@@ -34,8 +39,8 @@ const {
   buildPipeline,
   executePipeline,
   enrichOrdersData,
-  getVendorProductIdsByVendorName
-} = require("../helper/orderHelper")
+  getVendorProductIdsByVendorName,
+} = require("../helper/orderHelper");
 
 const mongoose = require("mongoose");
 
@@ -400,6 +405,763 @@ function mapSkuIfAny(sku, activeConfigs = []) {
   return null;
 }
 
+async function updateOrdersFromXlsxProcessor({
+  filePath,
+  originalname,
+  body,
+  onLog = () => {},
+}) {
+  try {
+    const ext = path.extname(originalname).toLowerCase();
+    const bodyShopId = body.shopId;
+    const type = body.type;
+
+    // ✅ Auto compute base-cost
+    const autoCompute = String(body?.autoComputeBaseCost ?? "true") !== "false";
+
+    // ✅ Cho phép override seller hiện tại
+    const overrideSeller = String(body?.overrideSeller ?? "false") === "true";
+
+    // ✅ Dry-run SKU Mapping
+    const skuMappingDryRun =
+      String(body?.skuMappingDryRun ?? "false") === "true";
+    const skuMappingPreviewLimit = Number(body?.skuMappingPreviewLimit || 20);
+
+    const ordersToCompute = new Set();
+    const results = [];
+
+    // ✅ Gom SKU xử lý majority
+    const orderIdToPreferredSkus = new Map();
+    const ordersTouched = new Set();
+    // activeConfigs cần trước pushSku
+    const activeConfigs = await loadActiveSkuMappingConfigs();
+    function pushSkuForMajority(orderId, sku) {
+      if (!orderId || !sku) return;
+      const preferred = mapSkuIfAny(sku, activeConfigs) || sku;
+      const arr = orderIdToPreferredSkus.get(orderId) || [];
+      arr.push(preferred);
+      orderIdToPreferredSkus.set(orderId, arr);
+    }
+
+    // ✅ Cache ASIN→Listing image
+    const asinToListingMap = new Map();
+
+    // 🔶 SKU-MAPPING
+    const pendingSkuMapLogs = [];
+    const pendingMappedSkuOps = [];
+    const skuMappingSamples = [];
+
+    function considerLogMapping(orderId, orderItemId, sku) {
+      if (!sku || !activeConfigs || activeConfigs.length === 0) return;
+
+      for (const cfg of activeConfigs) {
+        const rules = buildRulesFromConfig(cfg);
+        const r = applyRulesToSku(sku, rules);
+        if (r.ok && r.changed) {
+          if (skuMappingSamples.length < skuMappingPreviewLimit) {
+            skuMappingSamples.push({
+              orderId,
+              orderItemId,
+              old: sku,
+              next: r.next,
+              config: {
+                id: String(cfg._id),
+                name: cfg.name,
+                priority: cfg.priority,
+              },
+            });
+          }
+          pendingSkuMapLogs.push({
+            updateOne: {
+              filter: { orderId, orderItemId, oldSku: sku, newSku: r.next },
+              update: {
+                $setOnInsert: {
+                  config_id: cfg._id,
+                  rulesSnapshot: rules,
+                  source: "import",
+                  operator: null,
+                  migratedAt: new Date(),
+                },
+              },
+              upsert: true,
+            },
+          });
+          pendingMappedSkuOps.push({
+            updateOne: {
+              filter: { orderId, "items.orderItemId": orderItemId },
+              update: { $set: { "items.$.mapped_sku": r.next } },
+            },
+          });
+          break;
+        }
+      }
+    }
+
+    // ====== Đọc file TXT ======
+    let rows = [];
+    if (ext === ".txt") {
+      onLog({ type: "step", message: "parse TXT" });
+      const raw = fs.readFileSync(filePath, "utf8");
+      const delimiter = raw.includes("\t") ? "\t" : ",";
+      const lines = raw.split("\n").filter((line) => line.trim() !== "");
+      const headers = lines[0]
+        .trim()
+        .split(delimiter)
+        .map((h) => h.trim().replace(/-/g, "_"));
+      rows = lines.slice(1).map((line) => {
+        const values = line.trim().split(delimiter);
+        const obj = {};
+        headers.forEach((key, index) => {
+          obj[key] = values[index]?.trim() || "";
+        });
+        return obj;
+      });
+    } else {
+      throw new Error("Only .txt files are supported");
+    }
+
+    // ✅ Prefetch Listing images theo ASIN
+    const uniqueAsins = new Set();
+    for (const row of rows) {
+      const asin = row.asin?.trim();
+      if (asin) uniqueAsins.add(asin);
+    }
+    if (uniqueAsins.size > 0) {
+      onLog({
+        type: "info",
+        message: `prefetch listings for ${uniqueAsins.size} ASINs`,
+      });
+      const listings = await Listing.find({
+        asin: { $in: Array.from(uniqueAsins) },
+      })
+        .select("asin product_image")
+        .lean();
+      for (const listing of listings) {
+        if (listing.asin && listing.product_image) {
+          asinToListingMap.set(listing.asin, listing.product_image);
+        }
+      }
+    }
+
+    // ====== Flow cập nhật theo Latest ship date ======
+    if (type === "Latest ship date") {
+      onLog({ type: "step", message: "update by latest ship date" });
+      for (const row of rows) {
+        const orderId = row.amazon_order_id;
+        const newStatus = row.order_status?.trim();
+        if (!orderId || !newStatus) continue;
+
+        const existingOrder = await OrderCustomProduct.findOne({ orderId });
+        if (existingOrder) {
+          if (newStatus === "Pending") {
+            results.push({ orderId, status: "skipped - pending" });
+            continue;
+          }
+          if (existingOrder.status !== newStatus) {
+            const oldStatus = existingOrder.status;
+            existingOrder.status = newStatus;
+            await existingOrder.save();
+            results.push({
+              orderId,
+              status: "status updated",
+              from: oldStatus,
+              to: newStatus,
+            });
+          } else {
+            results.push({ orderId, status: "skipped - same status" });
+          }
+
+          if (
+            existingOrder.address_validation?.isValid === null &&
+            existingOrder.address_validation?.smartyResponse === null
+          ) {
+            const validationResult = await validateAddressWithSmarty(
+              existingOrder.customer_infor
+            );
+            existingOrder.address_validation = validationResult;
+            await existingOrder.save();
+            results.push({
+              orderId,
+              addressChecked: true,
+              addressValid: validationResult.isValid,
+            });
+          }
+        }
+      }
+
+      try {
+        if (filePath) fs.unlinkSync(filePath);
+      } catch (_) {}
+      onLog({ type: "done", message: "latest ship date completed" });
+      return {
+        message: "Update by latest ship date completed",
+        results,
+      };
+    }
+
+    // ====== Flow import mặc định ======
+    onLog({ type: "step", message: `import default, rows=${rows.length}` });
+
+    for (const row of rows) {
+      const orderId = row.order_id;
+      if (!orderId) continue;
+
+      ordersTouched.add(orderId);
+      if (row.sku) pushSkuForMajority(orderId, row.sku);
+
+      const asin = row.asin?.trim();
+      const baseImageFromListing =
+        asin && asinToListingMap.has(asin) ? asinToListingMap.get(asin) : null;
+
+      const itemData = {
+        orderItemId: row.order_item_id,
+        sku: row.sku,
+        title: row.product_name,
+        customized_url: row.customized_url,
+        quantity: Number(row.quantity_purchased || 1),
+        asin: asin || null,
+      };
+
+      const basicData = {
+        orderId,
+        shopId: bodyShopId,
+        purchase_date: row.purchase_date,
+        customer_infor: {
+          email: row.buyer_email,
+          name: row.recipient_name,
+          phone_number: row.ship_phone_number,
+          address: row.ship_address_1,
+          address_2: row.ship_address_2,
+          province: row.province,
+          city: row.ship_city,
+          state: row.ship_state,
+          zip_code: row.ship_postal_code,
+          country: row.ship_country,
+        },
+        shipping_type: row.ship_service_level,
+        base_cost: 0,
+      };
+
+      let currentSellerIdForThisOrder = null;
+      let currentShopIdForThisOrder = null;
+
+      const existing = await OrderCustomProduct.findOne({ orderId });
+      let skipProcessingZip = false;
+
+      if (existing) {
+        const exists = existing.items.some(
+          (i) => i.orderItemId === itemData.orderItemId
+        );
+
+        if (!exists) {
+          if (baseImageFromListing) {
+            itemData.baseImage = {
+              imageUrl: baseImageFromListing,
+              width: null,
+              height: null,
+            };
+          }
+
+          existing.items.push(itemData);
+
+          // seller theo SKU
+          if (itemData.sku) {
+            const preferredSku = mapSkuIfAny(itemData.sku) || itemData.sku;
+            const msnv = extractMSNVFromSKU(preferredSku);
+            if (msnv) {
+              const parsedSellerId = await findSellerIdByEmployeeId(msnv);
+              if (parsedSellerId) {
+                if (overrideSeller || !existing.sellerId) {
+                  existing.sellerId = parsedSellerId;
+                }
+              }
+            }
+          }
+
+          if (!existing.shopId && bodyShopId) {
+            existing.shopId = bodyShopId;
+          }
+
+          await existing.save();
+
+          currentSellerIdForThisOrder = existing?.sellerId
+            ? String(existing.sellerId)
+            : null;
+          currentShopIdForThisOrder = existing?.shopId
+            ? String(existing.shopId)
+            : bodyShopId
+            ? String(bodyShopId)
+            : null;
+
+          results.push({
+            orderId,
+            status: "item added",
+            baseImageFromListing: !!baseImageFromListing,
+            asin: asin || null,
+          });
+
+          considerLogMapping(orderId, itemData.orderItemId, itemData.sku);
+          if (autoCompute) ordersToCompute.add(orderId);
+        } else {
+          const existingItem = existing.items.find(
+            (i) => i.orderItemId === itemData.orderItemId
+          );
+
+          if (baseImageFromListing) {
+            if (
+              existingItem &&
+              (!existingItem.baseImage?.imageUrl ||
+                existingItem.baseImage.imageUrl === "")
+            ) {
+              existingItem.baseImage = {
+                imageUrl: baseImageFromListing,
+                width: existingItem.baseImage?.width || null,
+                height: existingItem.baseImage?.height || null,
+              };
+              existingItem.asin = asin;
+              await existing.save();
+
+              results.push({
+                orderId,
+                status: "item exists - base image updated from listing",
+                baseImageFromListing: true,
+                asin,
+              });
+
+              considerLogMapping(
+                orderId,
+                existingItem.orderItemId,
+                existingItem.sku
+              );
+            } else {
+              results.push({
+                orderId,
+                status: "item exists",
+                baseImageFromListing: false,
+                asin: asin || null,
+              });
+              if (existingItem?.sku) {
+                considerLogMapping(
+                  orderId,
+                  existingItem.orderItemId,
+                  existingItem.sku
+                );
+              }
+            }
+          } else {
+            results.push({
+              orderId,
+              status: "item exists",
+              baseImageFromListing: false,
+              asin: asin || null,
+            });
+            if (existingItem?.sku) {
+              considerLogMapping(
+                orderId,
+                existingItem.orderItemId,
+                existingItem.sku
+              );
+            }
+          }
+
+          currentSellerIdForThisOrder = existing?.sellerId
+            ? String(existing.sellerId)
+            : null;
+          currentShopIdForThisOrder = existing?.shopId
+            ? String(existing.shopId)
+            : bodyShopId
+            ? String(bodyShopId)
+            : null;
+
+          skipProcessingZip = true;
+
+          if (
+            autoCompute &&
+            (!existing.base_cost || existing.base_cost === 0)
+          ) {
+            ordersToCompute.add(orderId);
+          }
+        }
+      } else {
+        if (baseImageFromListing) {
+          itemData.baseImage = {
+            imageUrl: baseImageFromListing,
+            width: null,
+            height: null,
+          };
+        }
+
+        const newOrder = new OrderCustomProduct({
+          ...basicData,
+          items: [itemData],
+        });
+
+        if (itemData.sku) {
+          const preferredSku = mapSkuIfAny(itemData.sku) || itemData.sku;
+          const msnv = extractMSNVFromSKU(preferredSku);
+          if (msnv) {
+            const parsedSellerId = await findSellerIdByEmployeeId(msnv);
+            if (parsedSellerId) newOrder.sellerId = parsedSellerId;
+          }
+        }
+
+        await newOrder.save();
+
+        currentSellerIdForThisOrder = newOrder?.sellerId
+          ? String(newOrder.sellerId)
+          : null;
+        currentShopIdForThisOrder = newOrder?.shopId
+          ? String(newOrder.shopId)
+          : bodyShopId
+          ? String(bodyShopId)
+          : null;
+
+        const validationResult = await validateAddressWithSmarty(
+          basicData.customer_infor
+        );
+        newOrder.address_validation = validationResult;
+        await newOrder.save();
+
+        results.push({
+          orderId,
+          status: "New order created with address check",
+          addressValid: validationResult.isValid,
+          baseImageFromListing: !!baseImageFromListing,
+          asin: asin || null,
+        });
+
+        considerLogMapping(orderId, itemData.orderItemId, itemData.sku);
+        if (autoCompute) ordersToCompute.add(orderId);
+      }
+
+      if (skipProcessingZip) continue;
+
+      // ====== xử lý ZIP customized_url ======
+      try {
+        const url = row.customized_url;
+        if (!url) {
+          results.push({ orderId, status: "no URL" });
+          continue;
+        }
+
+        const zipResponse = await axios.get(url, {
+          responseType: "arraybuffer",
+        });
+        const zip = new AdmZip(Buffer.from(zipResponse.data));
+
+        const allEntries = zip.getEntries();
+        const imageEntries = allEntries.filter((entry) =>
+          /\.(jpe?g|png)$/i.test(entry.entryName)
+        );
+        const jsonEntry = allEntries.find((entry) =>
+          entry.entryName.endsWith(".json")
+        );
+
+        const cloudinaryUrls = [];
+        const skippedSnapshots = [];
+
+        for (const imageEntry of imageEntries) {
+          try {
+            const imageBuffer = imageEntry.getData();
+            const imageName = path.basename(imageEntry.entryName);
+            let bufferForUpload = imageBuffer;
+
+            if (bufferForUpload.length > MAX_CLOUDINARY_BYTES) {
+              const compressed = await compressToUnderLimit(
+                bufferForUpload,
+                MAX_CLOUDINARY_BYTES
+              );
+              if (!compressed) {
+                skippedSnapshots.push({
+                  image: imageName,
+                  reason: `oversize after compress (${bufferForUpload.length} bytes)`,
+                });
+                continue;
+              }
+              bufferForUpload = compressed;
+            }
+
+            try {
+              const finalName =
+                bufferForUpload === imageBuffer
+                  ? imageName
+                  : imageName.replace(/\.(png|jpg|jpeg)$/i, "") +
+                    "_compressed.jpg";
+
+              const cloudinaryUrl = await uploadToCloudinary(
+                bufferForUpload,
+                finalName
+              );
+              cloudinaryUrls.push(cloudinaryUrl);
+            } catch (e) {
+              const msg = String(e?.message || "");
+              if (/File size too large/i.test(msg)) {
+                try {
+                  const lastTry = await sharp(bufferForUpload)
+                    .resize({ width: 1400, withoutEnlargement: true })
+                    .jpeg({ quality: 50, mozjpeg: true })
+                    .toBuffer();
+
+                  if (lastTry.length <= MAX_CLOUDINARY_BYTES) {
+                    const finalName =
+                      imageName.replace(/\.(png|jpg|jpeg)$/i, "") +
+                      "_compressed_last.jpg";
+                    const url = await uploadToCloudinary(lastTry, finalName);
+                    cloudinaryUrls.push(url);
+                    continue;
+                  }
+                } catch (_) {}
+                skippedSnapshots.push({
+                  image: imageName,
+                  reason: "cloudinary: file size too large",
+                });
+                continue;
+              }
+              skippedSnapshots.push({
+                image: imageName,
+                reason: `upload error: ${msg}`,
+              });
+              continue;
+            }
+          } catch (innerErr) {
+            skippedSnapshots.push({
+              image: imageEntry?.entryName || "<unknown>",
+              reason: `unexpected: ${innerErr?.message || innerErr}`,
+            });
+            continue;
+          }
+        }
+
+        if (!jsonEntry) {
+          results.push({
+            orderId,
+            status: "no JSON in ZIP",
+            snapshots: cloudinaryUrls,
+            skippedSnapshots,
+          });
+          continue;
+        }
+
+        const jsonData = JSON.parse(zip.readAsText(jsonEntry));
+        jsonData.cloudinarySnapshots = cloudinaryUrls;
+        jsonData.skippedSnapshots = skippedSnapshots;
+
+        const fakeReq = {
+          body: {
+            ...jsonData,
+            sellerId: currentSellerIdForThisOrder || null,
+            shopId: currentShopIdForThisOrder || null,
+          },
+        };
+        const fakeRes = {
+          status: (code) => ({
+            json: (msg) =>
+              results.push({
+                orderId,
+                status: code,
+                message: msg?.message || msg,
+                snapshots: cloudinaryUrls,
+                skippedSnapshots,
+              }),
+          }),
+        };
+
+        await importOrderJson(fakeReq, fakeRes);
+      } catch (err) {
+        results.push({ orderId, status: "failed", error: err.message });
+      }
+    }
+
+    // ====== Chốt seller theo majority SKU ======
+    const sellerAssignResults = [];
+    for (const oid of ordersTouched) {
+      const skus = orderIdToPreferredSkus.get(oid) || [];
+      const msnv = pickMajorityMSNVFromSkus(skus);
+      if (!msnv) {
+        sellerAssignResults.push({
+          orderId: oid,
+          seller: null,
+          reason: "no msnv parsed from skus",
+        });
+        continue;
+      }
+
+      const sellerId = await findSellerIdByEmployeeId(msnv);
+      if (!sellerId) {
+        sellerAssignResults.push({
+          orderId: oid,
+          seller: null,
+          msnv,
+          reason: "no user match by employee_id",
+        });
+        continue;
+      }
+
+      const orderDoc = await OrderCustomProduct.findOne({
+        orderId: oid,
+      }).select("_id sellerId");
+      if (!orderDoc) {
+        sellerAssignResults.push({
+          orderId: oid,
+          seller: null,
+          msnv,
+          reason: "order not found when assigning",
+        });
+        continue;
+      }
+
+      if (orderDoc.sellerId && !overrideSeller) {
+        sellerAssignResults.push({
+          orderId: oid,
+          seller: String(orderDoc.sellerId),
+          msnv,
+          action: "kept-existing",
+        });
+        continue;
+      }
+
+      orderDoc.sellerId = sellerId;
+      await orderDoc.save();
+      sellerAssignResults.push({
+        orderId: oid,
+        seller: String(sellerId),
+        msnv,
+        action: orderDoc.sellerId ? "overridden" : "assigned",
+      });
+    }
+
+    // ====== Tính base cost ======
+    let baseCostResults = [];
+    if (autoCompute && ordersToCompute.size > 0) {
+      for (const oid of ordersToCompute) {
+        const one = await new Promise((resolve) => {
+          const fakeReq = { body: { orderId: oid } };
+          const fakeRes = {
+            json: (obj) => resolve({ orderId: oid, ...obj }),
+            status: (code) => ({
+              json: (obj) => resolve({ orderId: oid, code, ...obj }),
+            }),
+          };
+          computeBaseCostForOrder(fakeReq, fakeRes);
+        });
+        baseCostResults.push(one);
+      }
+    }
+
+    // ====== Ghi logs & mapped_sku (trừ khi dry-run) ======
+    if (pendingSkuMapLogs.length > 0 && !skuMappingDryRun) {
+      try {
+        await SkuMappingEntry.bulkWrite(pendingSkuMapLogs, { ordered: false });
+      } catch (_) {}
+    }
+    if (pendingMappedSkuOps.length > 0 && !skuMappingDryRun) {
+      try {
+        await OrderCustomProduct.bulkWrite(pendingMappedSkuOps, {
+          ordered: false,
+        });
+      } catch (_) {}
+    }
+
+    // dọn file tạm
+    try {
+      if (filePath) fs.unlinkSync(filePath);
+    } catch (_) {}
+
+    onLog({ type: "done", message: "import completed" });
+
+    return {
+      message: "Batch import completed with ASIN-Listing base image matching",
+      results,
+      seller_assignment: sellerAssignResults,
+      base_cost_auto_computed: autoCompute,
+      base_cost_results: baseCostResults,
+      asin_listing_matches: asinToListingMap.size,
+      sku_mapping_configs_loaded: activeConfigs.length,
+      sku_mapping_logs_queued: pendingSkuMapLogs.length,
+      sku_mapping_item_updates: pendingMappedSkuOps.length,
+      sku_mapping_dry_run: skuMappingDryRun,
+      sku_mapping_samples: skuMappingSamples,
+    };
+  } catch (error) {
+    try {
+      if (filePath) fs.unlinkSync(filePath);
+    } catch (_) {}
+    // Ném lỗi để runner bắt và log
+    throw error;
+  }
+}
+
+// -----------------------------------------------------------
+// 2) ENQUEUE HANDLER — dùng trong route POST /order/update-from-xlsx
+//    Nhận file upload, xếp hàng, TRẢ 202 ngay (tránh 502)
+// -----------------------------------------------------------
+async function updateOrdersFromXlsxEnqueue(req, res) {
+  try {
+    if (!req.file?.path) {
+      return res
+        .status(400)
+        .json({ ok: false, message: "file required (.txt)" });
+    }
+
+    const io = req.app.get("io");
+    const body = { ...(req.body || {}) };
+    const shopId = body.shopId || null;
+    const machineId = body.machineId || null;
+    const filePath = req.file.path;
+    const originalname = req.file.originalname;
+
+    // tạo job & runner
+    const jobId = importQueue.enqueue(
+      "import-orders",
+      { filePath, originalname, body },
+      async (job) => {
+        const onLog = (ev) => {
+          const event = {
+            at: Date.now(),
+            shopId,
+            machineId,
+            type: ev.type || "info",
+            message: ev.message || "",
+            jobId: job.id,
+            step: ev.step,
+            meta: ev.meta || null,
+          };
+          if (io) {
+            io.emit("realtime:log", event);
+            if (shopId) io.to(`shop:${shopId}`).emit("realtime:log", event);
+          }
+          logbus.append(event);
+        };
+
+        try {
+          onLog({ type: "step", message: "processor:start" });
+          const result = await updateOrdersFromXlsxProcessor({
+            filePath,
+            originalname,
+            body,
+            onLog,
+          });
+          onLog({
+            type: "done",
+            message: "processor:finished",
+            meta: { result },
+          });
+        } catch (e) {
+          onLog({ type: "error", message: `processor:failed - ${e.message}` });
+        }
+      }
+    );
+
+    // Trả nhanh để không timeouts
+    return res.status(202).json({ ok: true, jobId, queued: true });
+  } catch (e) {
+    try {
+      if (req?.file?.path) fs.unlinkSync(req.file.path);
+    } catch (_) {}
+    return res.status(500).json({ ok: false, message: e.message });
+  }
+}
+
 const updateOrdersFromXlsx = async (req, res) => {
   try {
     const filePath = req.file.path;
@@ -583,7 +1345,7 @@ const updateOrdersFromXlsx = async (req, res) => {
 
       try {
         fs.unlinkSync(filePath);
-      } catch (_) { }
+      } catch (_) {}
       return res.json({
         message: "Update by latest ship date completed",
         results,
@@ -684,8 +1446,8 @@ const updateOrdersFromXlsx = async (req, res) => {
           currentShopIdForThisOrder = existing?.shopId
             ? String(existing.shopId)
             : bodyShopId
-              ? String(bodyShopId)
-              : null;
+            ? String(bodyShopId)
+            : null;
 
           results.push({
             orderId,
@@ -768,8 +1530,8 @@ const updateOrdersFromXlsx = async (req, res) => {
           currentShopIdForThisOrder = existing?.shopId
             ? String(existing.shopId)
             : bodyShopId
-              ? String(bodyShopId)
-              : null;
+            ? String(bodyShopId)
+            : null;
 
           skipProcessingZip = true;
 
@@ -813,8 +1575,8 @@ const updateOrdersFromXlsx = async (req, res) => {
         currentShopIdForThisOrder = newOrder?.shopId
           ? String(newOrder.shopId)
           : bodyShopId
-            ? String(bodyShopId)
-            : null;
+          ? String(bodyShopId)
+          : null;
 
         const validationResult = await validateAddressWithSmarty(
           basicData.customer_infor
@@ -886,7 +1648,7 @@ const updateOrdersFromXlsx = async (req, res) => {
                 bufferForUpload === imageBuffer
                   ? imageName
                   : imageName.replace(/\.(png|jpg|jpeg)$/i, "") +
-                  "_compressed.jpg";
+                    "_compressed.jpg";
 
               const cloudinaryUrl = await uploadToCloudinary(
                 bufferForUpload,
@@ -910,7 +1672,7 @@ const updateOrdersFromXlsx = async (req, res) => {
                     cloudinaryUrls.push(url);
                     continue;
                   }
-                } catch (_) { }
+                } catch (_) {}
                 skippedSnapshots.push({
                   image: imageName,
                   reason: "cloudinary: file size too large",
@@ -1053,20 +1815,20 @@ const updateOrdersFromXlsx = async (req, res) => {
     if (pendingSkuMapLogs.length > 0 && !skuMappingDryRun) {
       try {
         await SkuMappingEntry.bulkWrite(pendingSkuMapLogs, { ordered: false });
-      } catch (_) { }
+      } catch (_) {}
     }
     if (pendingMappedSkuOps.length > 0 && !skuMappingDryRun) {
       try {
         await OrderCustomProduct.bulkWrite(pendingMappedSkuOps, {
           ordered: false,
         });
-      } catch (_) { }
+      } catch (_) {}
     }
 
     // dọn file tạm
     try {
       fs.unlinkSync(filePath);
-    } catch (_) { }
+    } catch (_) {}
 
     return res.json({
       message: "Batch import completed with ASIN-Listing base image matching",
@@ -1085,7 +1847,7 @@ const updateOrdersFromXlsx = async (req, res) => {
   } catch (error) {
     try {
       if (req?.file?.path) fs.unlinkSync(req.file.path);
-    } catch (_) { }
+    } catch (_) {}
     return res
       .status(500)
       .json({ message: "Batch import failed", error: error.message });
@@ -1134,8 +1896,6 @@ const getOrderById = async (req, res) => {
   }
 };
 
-
-
 const getFrontendOrders = async (req, res) => {
   try {
     const {
@@ -1156,7 +1916,7 @@ const getFrontendOrders = async (req, res) => {
       openCase,
       teamId,
       sellerId,
-      invalidAddress
+      invalidAddress,
     } = req.query;
 
     //RBAC
@@ -1165,7 +1925,7 @@ const getFrontendOrders = async (req, res) => {
       isAdmin: /^admin$/i.test(role),
       isSeller: /^seller$/i.test(role),
       isProduction: /^production$/i.test(role),
-      isDesignLeader: /^design[-_\s]?leader$/i.test(role)
+      isDesignLeader: /^design[-_\s]?leader$/i.test(role),
     };
 
     if (!Object.values(roles).some(Boolean)) {
@@ -1191,14 +1951,19 @@ const getFrontendOrders = async (req, res) => {
       sevenDayAlert,
       platform,
       noPsd,
-      shippingType
+      shippingType,
     });
 
     // Production vendor filter LNG Group
     if (roles.isProduction) {
       const vendorFilter = await buildVendorFilter();
       if (vendorFilter === null) {
-        return res.json({ data: [], totalCount: 0, totalPages: 1, currentPage: 1 });
+        return res.json({
+          data: [],
+          totalCount: 0,
+          totalPages: 1,
+          currentPage: 1,
+        });
       }
       filters.push(vendorFilter);
     }
@@ -1214,7 +1979,7 @@ const getFrontendOrders = async (req, res) => {
       userId: userId,
       teamObjectId: ids.teamObjectId,
       sellerObjectId: ids.sellerObjectId,
-      shopName
+      shopName,
     });
 
     // EXECUTE & PAGINATE =====
@@ -1234,11 +1999,10 @@ const getFrontendOrders = async (req, res) => {
       data: enrichedOrders,
       totalCount,
       totalPages: isAll ? 1 : Math.ceil(totalCount / limitNum),
-      currentPage: pageNum
+      currentPage: pageNum,
     });
-
   } catch (error) {
-    console.error('Get orders error:', error);
+    console.error("Get orders error:", error);
     return res.status(500).json({ message: "Internal Server Error" });
   }
 };
@@ -1255,7 +2019,7 @@ const getOrderStatistics = async (req, res) => {
       shippingType,
       shopName,
       openCase,
-      invalidAddress
+      invalidAddress,
     } = req.query;
 
     // ===== RBAC =====
@@ -1304,7 +2068,6 @@ const getOrderStatistics = async (req, res) => {
         ],
       });
     }
-
 
     // Seller only their orders (unless production)
     if (isSeller && !isProduction) {
@@ -1392,7 +2155,7 @@ const getOrderStatistics = async (req, res) => {
       cancelled,
       refund,
       openCaseCount,
-      invalidAddressCount
+      invalidAddressCount,
     ] = await Promise.all([
       OrderCustomProduct.countDocuments(baseFilter),
       OrderCustomProduct.countDocuments({ ...baseFilter, status: "New" }),
@@ -1414,7 +2177,7 @@ const getOrderStatistics = async (req, res) => {
       }),
       OrderCustomProduct.countDocuments({
         ...baseFilter,
-        "address_validation.isValid": false // count invalid addresses
+        "address_validation.isValid": false, // count invalid addresses
       }),
     ]);
 
@@ -1428,7 +2191,7 @@ const getOrderStatistics = async (req, res) => {
       cancelled,
       refund,
       openCase: openCaseCount,
-      invalidAddress: invalidAddressCount
+      invalidAddress: invalidAddressCount,
     });
   } catch (error) {
     console.error("❌ getOrderStatistics error:", error);
@@ -1925,9 +2688,9 @@ async function listCandidateVendors(pfItems = [], sizeValue, colorValue) {
 
     const vendorId = String(
       it?.vendor_id ||
-      it?.vendor?._id ||
-      (await getVendorIdByVendorProductId(vendorProductId)) ||
-      ""
+        it?.vendor?._id ||
+        (await getVendorIdByVendorProductId(vendorProductId)) ||
+        ""
     );
     if (vendorId) out.add(vendorId);
   }
@@ -1978,9 +2741,9 @@ async function selectBestVendorProduct(
     if (!vpId) continue;
     const vId = String(
       it?.vendor_id ||
-      it?.vendor?._id ||
-      (await getVendorIdByVendorProductId(vpId)) ||
-      ""
+        it?.vendor?._id ||
+        (await getVendorIdByVendorProductId(vpId)) ||
+        ""
     );
     resolved.push({ ...it, __vendorId: vId, __vendorProductId: vpId });
   }
@@ -2068,9 +2831,9 @@ async function buildVendorRank(preItems) {
       if (!vpId) continue;
       const vId = String(
         it?.vendor_id ||
-        it?.vendor?._id ||
-        (await getVendorIdByVendorProductId(vpId)) ||
-        ""
+          it?.vendor?._id ||
+          (await getVendorIdByVendorProductId(vpId)) ||
+          ""
       );
       if (!vId) continue;
       resolved.push({ ...it, __vendorId: vId, __vendorProductId: vpId });
@@ -2364,22 +3127,28 @@ const computeBaseCostForOrder = async (req, res) => {
         // Chỉ lấy item Active
         const activeItems = toArray(cfg?.product_for_seller?.items)
           .filter(Boolean)
-          .filter(x => (x?.status || "").toLowerCase() === "active");
+          .filter((x) => (x?.status || "").toLowerCase() === "active");
 
         // Ưu tiên đúng item order === 5
-        const fifthByOrder = activeItems.find(x => Number(x.order) === 5);
+        const fifthByOrder = activeItems.find((x) => Number(x.order) === 5);
 
         if (fifthByOrder) {
           pfItems = [fifthByOrder];
         } else {
           // Fallback an toàn: sort theo order rồi lấy phần tử thứ 5 nếu có,
           // hoặc ném lỗi để bạn biết cấu hình chưa chuẩn.
-          const sorted = [...activeItems].sort((a, b) => Number(a.order) - Number(b.order));
+          const sorted = [...activeItems].sort(
+            (a, b) => Number(a.order) - Number(b.order)
+          );
           if (sorted.length >= 5) {
             pfItems = [sorted[4]]; // 1-based: phần tử thứ 5
-            console.warn("[EBM/EBMA] order===5 không tồn tại, fallback dùng phần tử thứ 5 sau sort theo 'order'.");
+            console.warn(
+              "[EBM/EBMA] order===5 không tồn tại, fallback dùng phần tử thứ 5 sau sort theo 'order'."
+            );
           } else {
-            throw new Error("[EBM/EBMA] Không tìm thấy item có order===5 và cũng không đủ 5 items để fallback.");
+            throw new Error(
+              "[EBM/EBMA] Không tìm thấy item có order===5 và cũng không đủ 5 items để fallback."
+            );
           }
         }
       }
@@ -2611,7 +3380,7 @@ const computeBaseCostForOrder = async (req, res) => {
           const minus =
             (out.shipping_international_economy || 0) +
             (out.shipping_international_additional_units || 0) *
-            (out.shipping_international_additional_rate || 0);
+              (out.shipping_international_additional_rate || 0);
           out.base_cost_total_for_item_including_shipping = Number(
             (out.base_cost_total_for_item_including_shipping - minus).toFixed(2)
           );
@@ -2639,8 +3408,9 @@ const computeBaseCostForOrder = async (req, res) => {
                 out.base_cost_total_for_item_including_shipping + expensive.eco
               ).toFixed(2)
             );
-            out.formula = `${out.formula || ""} | SPECIAL[${expensive.shipProfile
-              }]: eco(${expensive.eco}) for expensive product`;
+            out.formula = `${out.formula || ""} | SPECIAL[${
+              expensive.shipProfile
+            }]: eco(${expensive.eco}) for expensive product`;
           }
         }
         // additional (1) cho sp "rẻ hơn"
@@ -2656,8 +3426,9 @@ const computeBaseCostForOrder = async (req, res) => {
                 out.base_cost_total_for_item_including_shipping + cheap.add
               ).toFixed(2)
             );
-            out.formula = `${out.formula || ""} | SPECIAL[${cheap.shipProfile
-              }]: add(${cheap.add}) for cheaper product`;
+            out.formula = `${out.formula || ""} | SPECIAL[${
+              cheap.shipProfile
+            }]: add(${cheap.add}) for cheaper product`;
           }
         }
 
@@ -2741,7 +3512,7 @@ const computeBaseCostForOrder = async (req, res) => {
               return (
                 sum +
                 (out.shipping_international_additional_units || 0) *
-                (out.shipping_international_additional_rate || 0)
+                  (out.shipping_international_additional_rate || 0)
               );
             }, 0)
           ).toFixed(2)
@@ -2799,7 +3570,7 @@ const computeBaseCostForOrder = async (req, res) => {
       if (
         it.cost_breakdown &&
         typeof it.cost_breakdown.base_cost_total_for_item_including_shipping ===
-        "number"
+          "number"
       ) {
         orderTotalBaseCost +=
           it.cost_breakdown.base_cost_total_for_item_including_shipping;
@@ -2941,8 +3712,7 @@ const updateItemTracking = async (req, res) => {
       $set["items.$[].tracking_info.fulfillment"] = tFulfillment;
     if (tTracking !== undefined)
       $set["items.$[].tracking_info.tracking"] = tTracking;
-    if (tNote !== undefined)
-      $set["items.$[].tracking_info.note"] = tNote;
+    if (tNote !== undefined) $set["items.$[].tracking_info.note"] = tNote;
 
     // cập nhật updated_at cho tất cả items
     $set["items.$[].tracking_info.updated_at"] = new Date();
@@ -2975,9 +3745,7 @@ const updateItemTracking = async (req, res) => {
     }
 
     // Đồng bộ lại order.status từ items
-    const newOrderStatus = computeOrderStatusFromItems(
-      docAfterAllUpdate.items
-    );
+    const newOrderStatus = computeOrderStatusFromItems(docAfterAllUpdate.items);
     if (newOrderStatus !== docAfterAllUpdate.status) {
       await OrderCustomProduct.updateOne(
         { _id: docAfterAllUpdate._id },
@@ -2990,8 +3758,8 @@ const updateItemTracking = async (req, res) => {
       nextStatus === "Fulfilled" || nextStatus === "Shipped"
         ? "Sent"
         : nextStatus === "Cancelled"
-          ? "Cancelled"
-          : docAfterAllUpdate.scale_overall_status;
+        ? "Cancelled"
+        : docAfterAllUpdate.scale_overall_status;
 
     return res.json({
       message:
@@ -3159,12 +3927,15 @@ async function createReplacementOrder(req, res) {
     const created = await OrderCustomProduct.create(dstPayload);
 
     try {
-      const validationResult = await validateAddressWithSmarty(created.customer_infor);
+      const validationResult = await validateAddressWithSmarty(
+        created.customer_infor
+      );
 
       // cập nhật trường theo đúng model
       created.address_validation = {
         isValid: !!validationResult?.isValid,
-        smartyResponse: validationResult?.smartyResponse || validationResult || null,
+        smartyResponse:
+          validationResult?.smartyResponse || validationResult || null,
       };
 
       // Nếu địa chỉ không hợp lệ => đánh dấu trạng thái tổng để chặn tuyến fulfill/gửi Grabink
@@ -3186,17 +3957,19 @@ async function createReplacementOrder(req, res) {
       replacement_order_id: created.orderId,
       items_copied: newItems.length,
       selected_order_item_ids: newItems.map((i) => i.orderItemId),
-      address_validation: created.address_validation,             // <-- khớp model
-      scale_overall_status: created.scale_overall_status          // <-- khớp model
+      address_validation: created.address_validation, // <-- khớp model
+      scale_overall_status: created.scale_overall_status, // <-- khớp model
     });
   } catch (err) {
     console.error("createReplacementOrder error:", err);
     return res
       .status(500)
-      .json({ message: "Failed to create replacement order", error: err.message });
+      .json({
+        message: "Failed to create replacement order",
+        error: err.message,
+      });
   }
 }
-
 
 const updateScaleOrder = async (req, res) => {
   const user = await OrderCustomProduct.findByIdAndUpdate(
@@ -3228,4 +4001,6 @@ module.exports = {
   updateItemTracking,
   createReplacementOrder,
   updateScaleOrder,
+  updateOrdersFromXlsxProcessor,
+  updateOrdersFromXlsxEnqueue,
 };

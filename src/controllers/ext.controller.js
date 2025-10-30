@@ -3,19 +3,6 @@ const Shop = db.shop;
 const RealtimeLog = db.RealtimeLog;
 const logbus = require("../lib/logbus");
 
-// Helpers
-function newJobId() {
-  return `job_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-}
-function ensureAckMap(app) {
-  let ackMap = app.get("ackMap");
-  if (!ackMap) {
-    ackMap = new Map();
-    app.set("ackMap", ackMap);
-  }
-  return ackMap;
-}
-
 const getClients = async (_req, res) => {
   try {
     const shops = await Shop.find(
@@ -209,10 +196,7 @@ const connectExtension = async (req, res) => {
   }
 };
 
-function makeJobId() {
-  return "job_" + Date.now() + "_" + Math.random().toString(36).slice(2, 7);
-}
-
+// Hàm xử lý request chính (fire-and-forget)
 const requestExtension = async (req, res) => {
   try {
     const {
@@ -221,6 +205,7 @@ const requestExtension = async (req, res) => {
       type,
       payload,
       requireAck = false,
+      ackTimeoutMs = 5000,
     } = req.body || {};
     if (!shopId || !machineId || !type) {
       return res
@@ -233,44 +218,31 @@ const requestExtension = async (req, res) => {
     const ackMap = req.app.get("ackMap") || new Map();
     req.app.set("ackMap", ackMap);
 
-    // tìm client trong presence để lấy socketId (nếu có)
     const client =
       presence.getByMachine?.(machineId) ||
       presence.findBy?.({ shopId, machineId });
     const socketId = client?.socketId;
 
-    const jobId = makeJobId();
+    const jobId = `job_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
     const task = { jobId, type, payload: payload || {} };
 
     let delivered = false;
-
-    // 1) emit trực tiếp theo socketId (chắc chắn nhất)
     if (socketId && io.sockets.sockets.get(socketId)) {
       io.to(socketId).emit("server:task", task);
       delivered = true;
-      console.log("[CMD] emit by socketId:", socketId, task);
     } else {
-      console.warn("[CMD] no socketId/live socket for machine:", machineId);
-    }
-
-    // 2) fallback: emit theo ROOM (chỉ được nếu extension đã join room)
-    if (!delivered) {
       io.to(`machine:${machineId}`).emit("server:task", task);
-      delivered = true; // coi như đã phát (không kiểm chứng được có ai nghe)
-      console.log("[CMD] emit by room:", `machine:${machineId}`, task);
+      delivered = true; // best-effort
     }
 
-    // nếu không yêu cầu ACK → trả OK ngay
     if (!requireAck) {
       return res.json({ ok: true, jobId, delivered });
     }
 
-    // nếu requireAck → chờ client:ack jobId
-    const timeoutMs = 5000; // 5s
     const waitAck = new Promise((resolve) => {
       const to = setTimeout(
         () => resolve({ ok: false, timeout: true }),
-        timeoutMs
+        Number(ackTimeoutMs) || 5000
       );
       ackMap.set(jobId, (ackResult) => {
         clearTimeout(to);
@@ -281,8 +253,7 @@ const requestExtension = async (req, res) => {
     const ack = await waitAck;
     return res.json({ ok: true, jobId, ack });
   } catch (e) {
-    console.error("POST /api/ext/command error:", e);
-    res.status(500).json({ ok: false, message: e.message });
+    return res.status(500).json({ ok: false, message: e.message });
   }
 };
 
@@ -356,23 +327,14 @@ const getClientOnline = async (req, res) => {
 };
 
 const getLogs = (req, res) => {
-  const {
-    shopId = "",
-    machineId = "",
-    since = 0,
-    limit = 200,
-  } = req.query || {};
-  try {
-    const logs = logbus.query({
-      shopId: shopId || undefined,
-      machineId: machineId || undefined,
-      since: Number(since) || 0,
-      limit: Math.min(Math.max(Number(limit) || 200, 1), 1000),
-    });
-    res.json({ ok: true, logs });
-  } catch (e) {
-    res.status(500).json({ ok: false, message: e.message });
-  }
+  const { shopId, machineId, since, limit } = req.query || {};
+  const out = logbus.query({
+    shopId,
+    machineId,
+    since,
+    limit: Number(limit || 200),
+  });
+  res.json({ ok: true, logs: out });
 };
 
 const getLogsSummary = (req, res) => {

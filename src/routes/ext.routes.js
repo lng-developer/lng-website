@@ -2,24 +2,34 @@
 const express = require("express");
 const router = express.Router();
 const { extController } = require("../controllers");
+const { orderCustomProductController } = require("../controllers");
+const { reportController } = require("../controllers");
+const { adsController } = require("../controllers");
+const multer = require("multer");
+const upload = multer({ storage: multer.memoryStorage() });
 
-// GET /api/ext/clients — trả danh sách clients (FE dùng để click chọn client)
-router.get("/clients", extController.getClients);
-
-// POST /api/ext/connect — extension ấn Connect → upsert ONLINE
-router.post("/connect", extController.connectExtension);
-
-// POST /api/ext/command — bắn lệnh tới 1 client
-//  - IMPORT_ORDERS     -> payload: { status }
-//  - IMPORT_ADS_SPEND  -> payload: { status, date }
 router.post("/command", extController.requestExtension);
 
 router.get("/online", extController.getClientOnline);
 
 router.get("/logs", extController.getLogs);
 
-router.get("/logs/summary", extController.getLogsSummary);
+router.post(
+  "/import-order",
+  orderCustomProductController.upload.single("file"),
+  orderCustomProductController.updateOrdersFromXlsxEnqueue
+);
 
-router.get("/logs/export", extController.exportLogs);
+router.post(
+  "/import-report",
+  upload.single("file"),
+  reportController.importReportFromFileEnqueue
+);
+
+router.post(
+  "/import-ads",
+  upload.single("file"),
+  adsController.importAdsForDayEnqueue
+);
 
 module.exports = router;

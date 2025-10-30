@@ -1,20 +1,9 @@
-// src/socket/index.js
-// Đăng ký toàn bộ “socket routes” ở đây.
-// Gọi từ server.js: registerSocketHandlers({ app, io })
-
-// ✅ Realtime only (no DB writes)
+// socket/index.js
 const presence = require("../lib/presence");
-
-// (tuỳ chọn) dùng logbus RAM để lưu log gần nhất nếu bạn có file lib/logbus.js
-let logbus;
-try {
-  logbus = require("../lib/logbus");
-} catch {
-  logbus = { append: () => {}, query: () => [] };
-}
+const logbus = require("../lib/logbus");
 
 module.exports = function registerSocketHandlers({ app, io }) {
-  // Auth đơn giản (có thể thay bằng verify JWT)
+  // Simple auth
   io.use((socket, next) => {
     const { shopId, machineId, label, version, ua } =
       socket.handshake.auth || {};
@@ -38,22 +27,20 @@ module.exports = function registerSocketHandlers({ app, io }) {
       socket.handshake.address ||
       "";
 
-    // --- JOIN ROOMS (QUAN TRỌNG) ---
+    // Join rooms
     socket.join(`shop:${shopId}`);
     socket.join(`machine:${machineId}`);
 
-    // Mark presence ONLINE in RAM
     presence.online({
       shopId,
       machineId,
       label,
       version,
       socketId: socket.id,
-      ua: ua || socket.handshake.headers["user-agent"] || "",
+      ua,
       ip,
     });
 
-    // Notify FE (realtime)
     io.emit("presence:update", {
       kind: "online",
       at: Date.now(),
@@ -61,42 +48,31 @@ module.exports = function registerSocketHandlers({ app, io }) {
         shopId,
         machineId,
         label: label || `Client ${machineId}`,
-        version: version || "",
+        version,
         socketId: socket.id,
-        ua: ua || "",
+        ua,
         ip,
         lastSeen: Date.now(),
         status: "online",
       },
     });
 
-    /* ===========================================================
-       💬 EXTENSION → SERVER: gửi log realtime
-       FE sẽ xem log qua event "realtime:log"
-    ============================================================ */
+    // EXT → SERVER log realtime
     socket.on("ext:log", (payload = {}) => {
       const event = {
         at: payload.at || Date.now(),
         shopId,
         machineId,
-        type: payload.type || "info", // info | step | done | error | warn
+        type: payload.type || "info", // info|step|done|warn|error
         message: payload.message || "",
         ...payload,
       };
-
-      // 1️⃣ Phát realtime tới toàn bộ FE
       io.emit("realtime:log", event);
-
-      // 2️⃣ (Tuỳ chọn) chỉ phát theo shop nếu FE join room
       io.to(`shop:${shopId}`).emit("realtime:log", event);
-
-      // 3️⃣ (Tuỳ chọn) lưu RAM log để FE load lại qua REST
       logbus.append(event);
     });
 
-    /* ===========================================================
-       🔁 HEARTBEAT từ extension
-    ============================================================ */
+    // Heartbeat
     socket.on("ext:heartbeat", (payload = {}) => {
       presence.heartbeat(machineId, {
         label: payload.label,
@@ -104,49 +80,40 @@ module.exports = function registerSocketHandlers({ app, io }) {
         ua: payload.ua,
         ip: payload.ip,
       });
-
-      // Bắn realtime để FE cập nhật lastSeen/status
       io.emit("presence:update", {
         kind: "heartbeat",
         at: Date.now(),
         client: {
           shopId,
           machineId,
-          label: payload.label || label || `Client ${machineId}`,
-          version: payload.version || version || "",
+          label: payload.label || label,
+          version: payload.version || version,
           socketId: socket.id,
-          ua: payload.ua || ua || "",
-          ip: payload.ip || ip || "",
+          ua: payload.ua || ua,
+          ip: payload.ip || ip,
           lastSeen: Date.now(),
           status: "online",
         },
       });
     });
 
-    /* ===========================================================
-       ✅ CLIENT ACK (khi extension hoàn thành job)
-    ============================================================ */
+    // Client ACK
     socket.on("client:ack", (ack) => {
-      const payload = {
+      const event = {
         at: Date.now(),
+        type: "ack",
         shopId,
         machineId,
         jobId: ack?.jobId || null,
         ok: !!ack?.ok,
         result: ack?.result || null,
         error: ack?.error || null,
-        type: "ack",
-        message: `ACK job ${ack?.jobId || "?"} → ${
-          ack?.ok ? "✅ success" : "❌ fail"
-        }`,
+        message: `ACK ${ack?.jobId || "?"} → ${ack?.ok ? "✅" : "❌"}`,
       };
+      io.emit("realtime:log", event);
+      io.to(`shop:${shopId}`).emit("realtime:log", event);
+      logbus.append(event);
 
-      // Gửi realtime log để FE thấy luôn
-      io.emit("realtime:log", payload);
-      io.to(`shop:${shopId}`).emit("realtime:log", payload);
-      logbus.append(payload);
-
-      // Nếu HTTP /command đang chờ ACK, resolve promise
       const ackMap = socket.request.app.get("ackMap");
       const resolver = ackMap && ackMap.get(ack?.jobId);
       if (resolver) {
@@ -159,12 +126,8 @@ module.exports = function registerSocketHandlers({ app, io }) {
       }
     });
 
-    /* ===========================================================
-       🔌 DISCONNECT
-    ============================================================ */
     socket.on("disconnect", (reason) => {
       presence.offline(machineId);
-
       io.emit("presence:update", {
         kind: "offline",
         at: Date.now(),
@@ -172,9 +135,9 @@ module.exports = function registerSocketHandlers({ app, io }) {
           shopId,
           machineId,
           label: label || `Client ${machineId}`,
-          version: version || "",
+          version,
           socketId: null,
-          ua: ua || "",
+          ua,
           ip,
           lastSeen: Date.now(),
           status: "offline",
