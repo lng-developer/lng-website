@@ -123,10 +123,127 @@ async function getLogs(req, res) {
     res.json({ success: true, logs });
 }
 
+async function getAllWithLogs(req, res) {
+    try {
+        const {
+            from,                 // YYYY-MM-DD (optional)
+            to,                   // YYYY-MM-DD (optional)
+            tz = 'Asia/Bangkok',
+            logsLimit = 20,       // số log tối đa mỗi user
+            skip = 0,             // phân trang user
+            limit = 50,           // phân trang user
+            sort = '-range'       // sắp xếp: balance|-balance|range|-range|name
+        } = req.query;
+
+        // bộ lọc ngày cho lookup pipeline (dựa trên so sánh chuỗi yyyy-mm-dd)
+        const dayMatch = {};
+        if (from) dayMatch.$gte = from;
+        if (to) dayMatch.$lte = to;
+
+        // map sort
+        const sortStage = (() => {
+            switch (sort) {
+                case 'balance': return { 'wallet.balance': 1, full_name: 1 };
+                case '-balance': return { 'wallet.balance': -1, full_name: 1 };
+                case 'range': return { totalPointsInRange: 1, full_name: 1 };
+                case '-range': return { totalPointsInRange: -1, full_name: 1 };
+                case 'name': return { full_name: 1 };
+                default: return { totalPointsInRange: -1, full_name: 1 };
+            }
+        })();
+
+        const pipeline = [
+            // 1) Lấy user
+            {
+                $project: {
+                    full_name: 1,
+                    email: 1,
+                    employee_id: 1,
+                    team_id: 1,
+                    role_id: 1,
+                    wallet: { $ifNull: ['$wallet', { balance: 0 }] },
+                    created_at: 1
+                }
+            },
+            // 2) Join logs theo từng user, có lọc ngày + sort + limit per-user
+            {
+                $lookup: {
+                    from: 'pointlogs', // tên collection do Mongoose suy ra
+                    let: { uid: '$_id' },
+                    pipeline: [
+                        { $match: { $expr: { $eq: ['$user_id', '$$uid'] } } },
+                        { $addFields: { dayStr: { $dateToString: { date: '$created_at', format: '%Y-%m-%d', timezone: tz } } } },
+                        ...(Object.keys(dayMatch).length ? [{ $match: { dayStr: dayMatch } }] : []),
+                        { $sort: { created_at: -1, _id: -1 } },
+                        { $limit: Number(logsLimit) }
+                    ],
+                    as: 'logs'
+                }
+            },
+            // 3) Tổng điểm trong khoảng ngày cho từng user
+            {
+                $addFields: {
+                    totalPointsInRange: {
+                        $ifNull: [{ $sum: '$logs.points' }, 0]
+                    }
+                }
+            },
+            // 4) Sắp xếp & phân trang user
+            { $sort: sortStage },
+            { $skip: Number(skip) },
+            { $limit: Number(limit) }
+        ];
+
+        // Đếm tổng user để phục vụ phân trang
+        const wrap = await User.aggregate([
+            {
+                $facet: {
+                    data: pipeline,
+                    totalUsers: [{ $count: 'count' }] // tổng số user toàn hệ thống (không filter theo ngày)
+                }
+            }
+        ]);
+
+        const data = wrap?.[0]?.data || [];
+        const totalUsers = wrap?.[0]?.totalUsers?.[0]?.count || 0;
+
+        // Chuẩn hoá output, đảm bảo luôn có balance number
+        const rows = data.map(u => ({
+            _id: u._id,
+            full_name: u.full_name,
+            email: u.email,
+            employee_id: u.employee_id,
+            team_id: u.team_id,
+            role_id: u.role_id,
+            balance: (u.wallet && typeof u.wallet.balance === 'number') ? u.wallet.balance : 0,
+            totalPointsInRange: u.totalPointsInRange || 0,
+            logs: u.logs || []
+        }));
+
+        return res.json({
+            success: true,
+            range: { from: from || null, to: to || null, tz },
+            meta: {
+                totalUsers,
+                returned: rows.length,
+                skip: Number(skip),
+                limit: Number(limit),
+                logsLimit: Number(logsLimit),
+                sort
+            },
+            users: rows
+        });
+    } catch (e) {
+        return res.status(400).json({ success: false, message: e.message });
+    }
+}
+
+
 module.exports = {
     award,
     getBalance,
     getByDay,
     getRange,
-    getLogs
+    getLogs,
+    getAllWithLogs
 };

@@ -18,4 +18,5 @@ router.get('/:userId/range', authenticateToken, ctrl.getRange);
 // Lịch sử log gần đây
 router.get('/:userId/logs', authenticateToken, ctrl.getLogs);
 
+router.get('/all/with-logs', authenticateToken, ctrl.getAllWithLogs);
 module.exports = router;
