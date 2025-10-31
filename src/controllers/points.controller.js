@@ -123,37 +123,41 @@ async function getLogs(req, res) {
     res.json({ success: true, logs });
 }
 
+// controllers/points.controller.js
 async function getAllWithLogs(req, res) {
     try {
         const {
-            from,                 // YYYY-MM-DD (optional)
-            to,                   // YYYY-MM-DD (optional)
-            tz = 'Asia/Bangkok',
-            logsLimit = 20,       // số log tối đa mỗi user
-            skip = 0,             // phân trang user
-            limit = 50,           // phân trang user
-            sort = '-range'       // sắp xếp: balance|-balance|range|-range|name
+            from, to, tz = 'Asia/Bangkok',
+            logsLimit = 20,
+            skip = 0,
+            limit = 50,
+            sort = '-range'
         } = req.query;
 
-        // bộ lọc ngày cho lookup pipeline (dựa trên so sánh chuỗi yyyy-mm-dd)
+        // ✅ CÁC ROLE MUỐN LẤY
+        const targetRoleIds = [
+            new mongoose.Types.ObjectId('688087528659a0e8cf260d46'),
+            new mongoose.Types.ObjectId('6886ced93157601ba73ce832'),
+            new mongoose.Types.ObjectId('68d4f11f3c366c734ea24284')
+        ];
+
         const dayMatch = {};
         if (from) dayMatch.$gte = from;
         if (to) dayMatch.$lte = to;
 
-        // map sort
         const sortStage = (() => {
             switch (sort) {
                 case 'balance': return { 'wallet.balance': 1, full_name: 1 };
                 case '-balance': return { 'wallet.balance': -1, full_name: 1 };
                 case 'range': return { totalPointsInRange: 1, full_name: 1 };
-                case '-range': return { totalPointsInRange: -1, full_name: 1 };
-                case 'name': return { full_name: 1 };
                 default: return { totalPointsInRange: -1, full_name: 1 };
             }
         })();
 
         const pipeline = [
-            // 1) Lấy user
+            // ✅ chỉ lấy 3 role
+            { $match: { role_id: { $in: targetRoleIds } } },
+
             {
                 $project: {
                     full_name: 1,
@@ -165,10 +169,9 @@ async function getAllWithLogs(req, res) {
                     created_at: 1
                 }
             },
-            // 2) Join logs theo từng user, có lọc ngày + sort + limit per-user
             {
                 $lookup: {
-                    from: 'pointlogs', // tên collection do Mongoose suy ra
+                    from: 'pointlogs',
                     let: { uid: '$_id' },
                     pipeline: [
                         { $match: { $expr: { $eq: ['$user_id', '$$uid'] } } },
@@ -180,63 +183,41 @@ async function getAllWithLogs(req, res) {
                     as: 'logs'
                 }
             },
-            // 3) Tổng điểm trong khoảng ngày cho từng user
             {
-                $addFields: {
-                    totalPointsInRange: {
-                        $ifNull: [{ $sum: '$logs.points' }, 0]
-                    }
-                }
+                $addFields: { totalPointsInRange: { $ifNull: [{ $sum: '$logs.points' }, 0] } }
             },
-            // 4) Sắp xếp & phân trang user
             { $sort: sortStage },
             { $skip: Number(skip) },
             { $limit: Number(limit) }
         ];
 
-        // Đếm tổng user để phục vụ phân trang
         const wrap = await User.aggregate([
-            {
-                $facet: {
-                    data: pipeline,
-                    totalUsers: [{ $count: 'count' }] // tổng số user toàn hệ thống (không filter theo ngày)
-                }
-            }
+            { $facet: { data: pipeline, totalUsers: [{ $count: 'count' }] } }
         ]);
 
-        const data = wrap?.[0]?.data || [];
-        const totalUsers = wrap?.[0]?.totalUsers?.[0]?.count || 0;
-
-        // Chuẩn hoá output, đảm bảo luôn có balance number
-        const rows = data.map(u => ({
+        const rows = (wrap?.[0]?.data || []).map(u => ({
             _id: u._id,
             full_name: u.full_name,
             email: u.email,
             employee_id: u.employee_id,
             team_id: u.team_id,
             role_id: u.role_id,
-            balance: (u.wallet && typeof u.wallet.balance === 'number') ? u.wallet.balance : 0,
-            totalPointsInRange: u.totalPointsInRange || 0,
-            logs: u.logs || []
+            balance: u.wallet?.balance ?? 0,
+            totalPointsInRange: u.totalPointsInRange ?? 0,
+            logs: u.logs ?? []
         }));
 
-        return res.json({
+        res.json({
             success: true,
             range: { from: from || null, to: to || null, tz },
-            meta: {
-                totalUsers,
-                returned: rows.length,
-                skip: Number(skip),
-                limit: Number(limit),
-                logsLimit: Number(logsLimit),
-                sort
-            },
+            meta: { returned: rows.length, skip: Number(skip), limit: Number(limit), logsLimit: Number(logsLimit) },
             users: rows
         });
     } catch (e) {
-        return res.status(400).json({ success: false, message: e.message });
+        res.status(400).json({ success: false, message: e.message });
     }
 }
+
 
 
 module.exports = {
