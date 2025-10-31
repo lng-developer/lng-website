@@ -5,7 +5,7 @@ const Listing = db.listing;
 const psdTaskService = require("../service/psdTask/psdTask.js");
 const { uploadBufferToWasabi } = require("../utils/wasabi.js");
 const mongoose = require("mongoose");
-const addPointsFromTask = require('../service/pointsService.js');
+const { addPointsFromTask } = require('../service/pointsService.js');
 
 
 // helper: chấp nhận role là string hoặc array
@@ -271,7 +271,7 @@ async function requestPSD(req, res) {
 const assignDesigner = async (req, res) => {
   try {
     const { taskId } = req.params;
-    const { designer, priority, dueAt } = req.body;
+    const { designer, priority, difficulty, dueAt } = req.body;
 
     const task = await psdTaskService.changeStatus(
       taskId,
@@ -279,7 +279,7 @@ const assignDesigner = async (req, res) => {
       req.user.userId,
       "Assign designer",
       null,
-      { designer, priority, dueAt }
+      { designer, priority, difficulty, dueAt }
     );
     res.json(task);
   } catch (err) {

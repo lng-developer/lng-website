@@ -16,6 +16,7 @@ async function addPointsFromTask({ userId, taskId, difficulty, note = '' }) {
   
   const points = PointMap[difficulty?.toUpperCase()] || PointMap.EASY;
 
+  console.log(points);
   const user = await User.findByIdAndUpdate(
     userId,
     { $inc: { 'wallet.balance': points } },

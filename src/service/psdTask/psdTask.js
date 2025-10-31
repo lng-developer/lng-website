@@ -13,6 +13,7 @@ async function changeStatus(taskId, toStatus, by, action, note, extra = {}) {
   }
   if (extra.designer) task.designer = extra.designer;
   if (extra.priority) task.priority = extra.priority;
+  if (extra.difficulty) task.difficulty = extra.difficulty;
   if (extra.dueAt) task.dueAt = extra.dueAt;
 
   task.history.push({

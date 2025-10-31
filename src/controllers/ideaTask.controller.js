@@ -3,7 +3,7 @@ const IdeaTask = db.IdeaTask; // export trong models/index.js
 const { uploadBufferToWasabi, getSignedUrlForKey } = require('../utils/wasabi');
 const multer = require('multer');
 const path = require('path');
-const addPointsFromTask = require('../service/pointsService.js');
+const { addPointsFromTask } = require('../service/pointsService.js');
 
 const ALLOWED_EXTS = ['.psd', '.psb', '.zip'];
 const MIME_BY_EXT = {
@@ -310,7 +310,7 @@ const assignIdeaTask = async (req, res) => {
         const task = await IdeaTask.findById(req.params.id);
         if (!task) return res.status(404).json({ message: "Not found" });
 
-        if (difficulty !== undefined) task.difficulty = Number(difficulty);
+        if (difficulty !== undefined) task.difficulty = task.difficulty;
         if (assigneeUserId) task.assignedTo = assigneeUserId; // chỉ lưu ObjectId
 
         task.status = "Assigned";
