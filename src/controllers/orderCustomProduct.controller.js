@@ -2018,8 +2018,7 @@ const getOrderStatistics = async (req, res) => {
       noPsd,
       shippingType,
       shopName,
-      openCase,
-      invalidAddress,
+      openCase
     } = req.query;
 
     // ===== RBAC =====
@@ -2137,10 +2136,6 @@ const getOrderStatistics = async (req, res) => {
         { _id: 1 }
       ).lean();
       if (resFilter?._id) filters.push({ shopId: resFilter._id });
-    }
-
-    if (String(invalidAddress).toLowerCase() === "true") {
-      filters.push({ "address_validation.isValid": false });
     }
 
     const baseFilter = filters.length > 0 ? { $and: filters } : {};

@@ -5,6 +5,31 @@ const OrderCustomProduct = db.orderCustomProduct;
 const VendorProduct = db.vendorProduct;
 const Listing = db.listing;
 
+// ====== CONSTANTS & HELPERS ======
+const KNOWN = [
+  "Need Scale",
+  "Pending",
+  "Ready",
+  "Sent",
+  "Failed",
+  "QC Rejected",
+  "Cancelled",
+  "Address Invalid",
+];
+
+// All = chỉ các trạng thái đang hoạt động trong quy trình QC
+const ACTIVE = ["Pending", "Sent", "QC Rejected", "Ready", "Address Invalid"];
+
+const canon = (s) => {
+  const t = String(s || "").trim();
+  if (!t) return "";
+  if (/^complete$/i.test(t)) return "Ready";
+  if (/^qc\s*reject(?:ed)?$/i.test(t)) return "QC Rejected";
+  if (/^addr(?:ess)?\s*invalid$/i.test(t)) return "Address Invalid";
+  return t;
+};
+
+// ====== GET QC LIST ======
 const getQCList = async (req, res) => {
   try {
     const {
@@ -13,69 +38,41 @@ const getQCList = async (req, res) => {
       from,
       to,
       scale_status, // filter theo scale_overall_status (order-level)
-      search, // regex theo orderId (+ mở rộng sku/orderItemId/email/name/seller)
+      search,       // regex theo orderId (+ mở rộng sku/orderItemId/email/name/seller)
       shopName,
       sellerId,
     } = req.query;
 
-    const KNOWN = [
-      "Need Scale",
-      "Pending",
-      "Ready",
-      "Sent",
-      "Failed",
-      "QC Rejected",
-      "Cancelled",
-      "Address Invalid",
-    ];
-
-    const canon = (s) => {
-      const t = String(s || "").trim();
-      if (!t) return "";
-      if (/^complete$/i.test(t)) return "Ready";
-      if (/^qc\s*reject(?:ed)?$/i.test(t)) return "QC Rejected";
-      if (/^addr(?:ess)?\s*invalid$/i.test(t)) return "Address Invalid";
-      return t;
-    };
-
     const matchStage = {};
-
     if (from && to) {
       matchStage.createdAt = { $gte: new Date(from), $lte: new Date(to) };
     }
 
+    // ---- Scale status filter (đã đồng bộ khái niệm "All" = ACTIVE) ----
     let needFilterPendingItems = false;
 
     if (scale_status && String(scale_status).trim() !== "") {
-      if (/^all$/i.test(scale_status.trim())) {
-        matchStage.scale_overall_status = {
-          $in: ["Pending", "Sent", "QC Rejected", "Ready", "Address Invalid"],
-        };
+      const raw = scale_status.trim();
+      if (/^all$/i.test(raw)) {
+        matchStage.scale_overall_status = { $in: ACTIVE };
       } else {
-        const wanted = scale_status.split(",").map(canon).filter(Boolean);
+        const wanted = raw.split(",").map(canon).filter(Boolean);
         const valid = wanted.filter((v) => KNOWN.includes(v));
         if (valid.length > 0) {
           matchStage.scale_overall_status = { $in: valid };
           needFilterPendingItems = valid.length === 1 && valid[0] === "Pending";
         } else {
+          // không khớp gì cả
           matchStage.scale_overall_status = { $in: ["__NO_MATCH__"] };
         }
       }
     } else {
-      matchStage.scale_overall_status = {
-        $in: [
-          "Pending",
-          "Sent",
-          "QC Rejected",
-          "Ready",
-          "Failed",
-          "Cancelled",
-          "Address Invalid",
-        ],
-      };
+      // không truyền => coi như All
+      matchStage.scale_overall_status = { $in: ACTIVE };
       needFilterPendingItems = false;
     }
 
+    // ---- Search OR ----
     let searchOr = null;
     if (search && search.trim() !== "") {
       const keyword = new RegExp(search.trim(), "i");
@@ -90,6 +87,7 @@ const getQCList = async (req, res) => {
       ];
     }
 
+    // ---- Base pipeline (shop/seller lookup, case, search) ----
     const basePipeline = [
       { $match: matchStage },
       {
@@ -111,13 +109,7 @@ const getQCList = async (req, res) => {
       },
       { $unwind: { path: "$seller", preserveNullAndEmptyArrays: true } },
       ...(shopName && shopName.trim() !== ""
-        ? [
-          {
-            $match: {
-              "shop.name": { $regex: new RegExp(shopName.trim(), "i") },
-            },
-          },
-        ]
+        ? [{ $match: { "shop.name": { $regex: new RegExp(shopName.trim(), "i") } } }]
         : []),
       {
         $lookup: {
@@ -138,6 +130,7 @@ const getQCList = async (req, res) => {
 
     const pipeline = [...basePipeline];
 
+    // Nếu tab Pending thì chỉ hiển thị item-level Pending thực sự
     if (needFilterPendingItems) {
       pipeline.push({
         $addFields: {
@@ -153,8 +146,9 @@ const getQCList = async (req, res) => {
       pipeline.push({ $match: { $expr: { $gt: [{ $size: "$items" }, 0] } } });
     }
 
+    // Thêm thông tin người scale
     pipeline.push(
-        {
+      {
         $lookup: {
           from: "users",
           localField: "scaleId",
@@ -163,22 +157,25 @@ const getQCList = async (req, res) => {
         },
       },
       { $unwind: { path: "$scaledBy", preserveNullAndEmptyArrays: true } },
-      
-    )
+    );
 
+    // ---- Count ----
     const countPipeline = [...pipeline, { $count: "total" }];
     const countResult = await OrderCustomProduct.aggregate(countPipeline);
     const totalCount = countResult[0]?.total || 0;
 
+    // ---- Pagination ----
     const isAll = String(perPage).toLowerCase() === "all";
-    const skip = (parseInt(page, 10) - 1) * parseInt(perPage, 10);
-    const limit = parseInt(perPage, 10);
+    const pageNum = parseInt(page, 10);
+    const limitNum = parseInt(perPage, 10);
+    const skip = (pageNum - 1) * limitNum;
 
     pipeline.push({ $sort: { createdAt: -1 } });
-    if (!isAll) pipeline.push({ $skip: skip }, { $limit: limit });
+    if (!isAll) pipeline.push({ $skip: skip }, { $limit: limitNum });
 
     const orders = await OrderCustomProduct.aggregate(pipeline);
 
+    // ---- Build vendor product display map ----
     const vendorIdSet = new Set();
     for (const o of orders) {
       for (const it of o.items || []) {
@@ -207,6 +204,7 @@ const getQCList = async (req, res) => {
       );
     }
 
+    // ---- Listing map (asin_type/product_image/psd) ----
     const listingIdSet = new Set();
     for (const o of orders) {
       for (const it of o.items || []) {
@@ -226,6 +224,7 @@ const getQCList = async (req, res) => {
       listingMap = new Map(listings.map((l) => [String(l._id), l]));
     }
 
+    // ---- Shape response ----
     const result = orders.map((order) => {
       const items = (order.items || []).map((item) => {
         const surfaces = item.version3Data?.customizationInfo?.surfaces || [];
@@ -298,15 +297,15 @@ const getQCList = async (req, res) => {
         case: order.case,
         address_validation: order.address_validation?.isValid,
         scale_overall_status: order.scale_overall_status,
-        scaledBy: order.scaledBy ? {
-          _id: order.scaledBy._id,
-          full_name: order.scaledBy.full_name,
-          email: order.scaledBy.email
-        } : null,
-        seller: order.seller
+        scaledBy: order.scaledBy
           ? {
-            email: order.seller.email,
+            _id: order.scaledBy._id,
+            full_name: order.scaledBy.full_name,
+            email: order.scaledBy.email,
           }
+          : null,
+        seller: order.seller
+          ? { email: order.seller.email }
           : null,
       };
     });
@@ -314,8 +313,8 @@ const getQCList = async (req, res) => {
     res.json({
       data: result,
       totalCount,
-      totalPages: isAll ? 1 : Math.ceil(totalCount / limit),
-      currentPage: parseInt(page, 10),
+      totalPages: isAll ? 1 : Math.ceil(totalCount / limitNum),
+      currentPage: pageNum,
     });
   } catch (error) {
     console.error("❌ getQCList error:", error);
@@ -326,7 +325,7 @@ const getQCList = async (req, res) => {
   }
 };
 
-// ---------------- STATISTICS ----------------
+// ====== GET QC STATISTICS ======
 const getQCStatistics = async (req, res) => {
   try {
     const { from, to, search, shopName, breakdown, timeseries = "false", sellerId } =
@@ -349,17 +348,6 @@ const getQCStatistics = async (req, res) => {
       ];
     }
 
-    const KNOWN = [
-      "Need Scale",
-      "Pending",
-      "Ready",
-      "Sent",
-      "Failed",
-      "QC Rejected",
-      "Cancelled",
-      "Address Invalid",
-    ];
-
     const basePipeline = [
       { $match: matchStage },
       {
@@ -372,13 +360,7 @@ const getQCStatistics = async (req, res) => {
       },
       { $unwind: { path: "$shop", preserveNullAndEmptyArrays: true } },
       ...(shopName && shopName.trim()
-        ? [
-          {
-            $match: {
-              "shop.name": { $regex: new RegExp(shopName.trim(), "i") },
-            },
-          },
-        ]
+        ? [{ $match: { "shop.name": { $regex: new RegExp(shopName.trim(), "i") } } }]
         : []),
       ...(searchOr ? [{ $match: { $or: searchOr } }] : []),
       {
@@ -398,9 +380,7 @@ const getQCStatistics = async (req, res) => {
           overall_status_bucket: {
             $let: {
               vars: { s: { $ifNull: ["$scale_overall_status", "Need Scale"] } },
-              in: {
-                $cond: [{ $in: ["$$s", KNOWN] }, "$$s", "Other"],
-              },
+              in: { $cond: [{ $in: ["$$s", KNOWN] }, "$$s", "Other"] },
             },
           },
         },
@@ -414,7 +394,7 @@ const getQCStatistics = async (req, res) => {
         $group: {
           _id: null,
           byStatus: { $push: { k: "$_id", v: "$orders" } },
-          totalOrders: { $sum: "$orders" },
+          totalOrders: { $sum: "$orders" }, // tổng theo toàn bộ bucket
         },
       },
       {
@@ -438,6 +418,7 @@ const getQCStatistics = async (req, res) => {
         "Address Invalid": c["Address Invalid"] || 0,
         Other: c["Other"] || 0,
       };
+      // All = ACTIVE
       counts["All"] =
         counts["Pending"] +
         counts["Sent"] +
@@ -448,10 +429,12 @@ const getQCStatistics = async (req, res) => {
     };
 
     const [overallRaw] = await OrderCustomProduct.aggregate(overallPipeline);
+    const counts = normalizeCounts(overallRaw?.counts);
 
+    // ĐẢM BẢO FE hiển thị All khớp với list: totalOrders = ACTIVE
     const overall = {
-      totalOrders: overallRaw?.totalOrders || 0,
-      counts: normalizeCounts(overallRaw?.counts),
+      totalOrders: counts["All"],
+      counts,
     };
 
     res.json({ overall });
@@ -463,6 +446,7 @@ const getQCStatistics = async (req, res) => {
     });
   }
 };
+
 
 const updateQCNoteForItem = async (req, res) => {
   try {
