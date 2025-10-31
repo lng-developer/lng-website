@@ -4,6 +4,8 @@ const mongoose = require("mongoose");
 const db = require("../models");
 const cloudinary = require("../utils/cloudinary");
 const FulfillmentService = require("../service/fulfillment"); // <<< NEW
+const { addPointsFromTask } = require("../service/pointsService");
+const TaskType = require('../enumeration/taskType')
 const OrderCustomProduct = db.orderCustomProduct;
 const VendorProduct = db.vendorProduct;
 const Listing = db.listing;
@@ -11,6 +13,7 @@ const User = db.user;
 const Team = db.Team;
 const Shop = db.shop;
 const upload = multer({ storage: multer.memoryStorage() });
+
 
 // ============ Helpers (giữ nguyên) ============
 function uploadStreamToCloudinary(buffer, opts = {}) {
@@ -313,6 +316,7 @@ const confirmScaleForItem = async (req, res) => {
     }
 
     item.scale_status = "Complete";
+
     if (note) item.qc_note = note;
 
     // Nếu fulfillment_file là Map rỗng và bạn vừa mới nạp file trước đó ở API khác,
@@ -324,6 +328,17 @@ const confirmScaleForItem = async (req, res) => {
 
     // === Nếu order đã "Ready" ===
     if (order.scale_overall_status === "Ready") {
+      const asin = item.asin;
+      const listing = await Listing.findOne({asin: asin}).select('asin_type').lean();
+      const asinType = listing?.asin_type || 'Normal';
+
+      await addPointsFromTask({
+        userId: order.scaleId,
+        taskId: orderId,
+        type: TaskType.ScaleTask,
+        difficulty: asinType,
+        quantity: Array.isArray(order.items) ? order.items.length : 0
+      });
 
       if (isAddressInvalid(order)) {
         order.scale_overall_status = "Address Invalid"; // bạn có thể đổi tên status nếu muốn

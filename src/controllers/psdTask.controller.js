@@ -6,8 +6,7 @@ const psdTaskService = require("../service/psdTask/psdTask.js");
 const { uploadBufferToWasabi } = require("../utils/wasabi.js");
 const mongoose = require("mongoose");
 const { addPointsFromTask } = require('../service/pointsService.js');
-
-
+const TaskType = require('../enumeration/taskType')
 // helper: chấp nhận role là string hoặc array
 function hasRole(userRole, target) {
   if (!userRole) return false;
@@ -405,6 +404,7 @@ const qcPSD = async (req, res) => {
       await addPointsFromTask({
         userId: designerId,
         taskId: taskId,
+        type: TaskType.PSDTask,
         difficulty: difficulty,
         note: note
       });

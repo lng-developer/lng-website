@@ -1,4 +1,5 @@
 const db = require('../models');
+const TaskType = require('../enumeration/taskType');
 const User = db.user
 const PointLog = db.PointLog
 /**
@@ -11,18 +12,29 @@ const PointMap = Object.freeze({
   EXTREMELY: 4,
 });
 
-async function addPointsFromTask({ userId, taskId, difficulty, note = '' }) {
+const ScaleAsinTypePoints = Object.freeze({
+  "Normal": 1,
+  "Custom Image": 1,
+  "Outline": 2,
+});
+
+async function addPointsFromTask({ userId, taskId, type, difficulty, quantity = 1, note = '' }) {
   if (!userId || !taskId) throw new Error('userId & taskId required');
   
-  const points = PointMap[difficulty?.toUpperCase()] || PointMap.EASY;
+  let points;
+  if (type === TaskType.ScaleTask) {
+    points = ScaleAsinTypePoints[difficulty] ?? ScaleAsinTypePoints["Normal"];
+  } else {
+    points = PointMap[difficulty?.toUpperCase()] ?? PointMap.EASY;
+  }
+  points = points * quantity;
 
-  console.log(points);
   const user = await User.findByIdAndUpdate(
     userId,
     { $inc: { 'wallet.balance': points } },
     { new: true, lean: true }
   );
-  
+
   if (!user) {
     throw new Error(`User ${userId} not found`);
   }
@@ -34,10 +46,12 @@ async function addPointsFromTask({ userId, taskId, difficulty, note = '' }) {
       task_id: taskId,
       points,
       note,
+      type,
       balance_after: user.wallet?.balance ?? 0
     });
   } catch (err) {
     if (err.code === 11000) {
+
       await User.findByIdAndUpdate(
         userId,
         { $inc: { 'wallet.balance': -points } }

@@ -4,7 +4,7 @@ const { uploadBufferToWasabi, getSignedUrlForKey } = require('../utils/wasabi');
 const multer = require('multer');
 const path = require('path');
 const { addPointsFromTask } = require('../service/pointsService.js');
-
+const TaskType = require('../enumeration/taskType')
 const ALLOWED_EXTS = ['.psd', '.psb', '.zip'];
 const MIME_BY_EXT = {
     '.psd': 'image/vnd.adobe.photoshop',
@@ -453,6 +453,7 @@ const approveTask = async (req, res) => {
         await addPointsFromTask({
                 userId: task.assignedTo?._id,
                 taskId: task._id,
+                type: TaskType.IdeaTask,
                 difficulty: task.difficulty,
         });
         res.json({ message: 'QC Passed', data: task });
