@@ -197,16 +197,12 @@ const connectExtension = async (req, res) => {
 };
 
 // Hàm xử lý request chính (fire-and-forget)
-const requestExtension = async (req, res) => {
+const makeJobId = () =>
+  "job_" + Date.now() + "_" + Math.random().toString(36).slice(2, 8);
+
+async function requestExtension(req, res) {
   try {
-    const {
-      shopId,
-      machineId,
-      type,
-      payload,
-      requireAck = false,
-      ackTimeoutMs = 5000,
-    } = req.body || {};
+    const { shopId, machineId, type, payload } = req.body || {};
     if (!shopId || !machineId || !type) {
       return res
         .status(400)
@@ -215,15 +211,14 @@ const requestExtension = async (req, res) => {
 
     const io = req.app.get("io");
     const presence = req.app.get("presence");
-    const ackMap = req.app.get("ackMap") || new Map();
-    req.app.set("ackMap", ackMap);
 
+    // tìm socketId hiện online (nếu có)
     const client =
       presence.getByMachine?.(machineId) ||
       presence.findBy?.({ shopId, machineId });
     const socketId = client?.socketId;
 
-    const jobId = `job_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+    const jobId = makeJobId();
     const task = { jobId, type, payload: payload || {} };
 
     let delivered = false;
@@ -231,31 +226,22 @@ const requestExtension = async (req, res) => {
       io.to(socketId).emit("server:task", task);
       delivered = true;
     } else {
+      // fallback room; nếu ext đã join `machine:${machineId}`
       io.to(`machine:${machineId}`).emit("server:task", task);
-      delivered = true; // best-effort
+      delivered = true; // coi như đã phát đi
     }
 
-    if (!requireAck) {
-      return res.json({ ok: true, jobId, delivered });
-    }
-
-    const waitAck = new Promise((resolve) => {
-      const to = setTimeout(
-        () => resolve({ ok: false, timeout: true }),
-        Number(ackTimeoutMs) || 5000
-      );
-      ackMap.set(jobId, (ackResult) => {
-        clearTimeout(to);
-        resolve(ackResult);
-      });
-    });
-
-    const ack = await waitAck;
-    return res.json({ ok: true, jobId, ack });
+    // TRẢ NGAY – không chờ ACK, không block
+    return res
+      .status(202)
+      .json({ ok: true, jobId, delivered, mode: "fire-and-forget" });
   } catch (e) {
-    return res.status(500).json({ ok: false, message: e.message });
+    console.error("command error", e);
+    return res
+      .status(500)
+      .json({ ok: false, message: String(e?.message || e) });
   }
-};
+}
 
 // GET /api/ext/clients/online
 const getClientOnline = async (req, res) => {
