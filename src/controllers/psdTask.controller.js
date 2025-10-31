@@ -5,7 +5,8 @@ const Listing = db.listing;
 const psdTaskService = require("../service/psdTask/psdTask.js");
 const { uploadBufferToWasabi } = require("../utils/wasabi.js");
 const mongoose = require("mongoose");
-
+const { addPointsFromTask } = require('../service/pointsService.js');
+const TaskType = require('../enumeration/taskType')
 // helper: chấp nhận role là string hoặc array
 function hasRole(userRole, target) {
   if (!userRole) return false;
@@ -269,7 +270,7 @@ async function requestPSD(req, res) {
 const assignDesigner = async (req, res) => {
   try {
     const { taskId } = req.params;
-    const { designer, priority, dueAt } = req.body;
+    const { designer, priority, difficulty, dueAt } = req.body;
 
     const task = await psdTaskService.changeStatus(
       taskId,
@@ -277,7 +278,7 @@ const assignDesigner = async (req, res) => {
       req.user.userId,
       "Assign designer",
       null,
-      { designer, priority, dueAt }
+      { designer, priority, difficulty, dueAt }
     );
     res.json(task);
   } catch (err) {
@@ -385,17 +386,28 @@ const qcPSD = async (req, res) => {
   try {
     const { taskId } = req.params;
     const { result, note } = req.body;
+    const userId = req.user.userId;
     const status = result === "pass" ? "QC Passed" : "QC Rejected";
     const task = await psdTaskService.changeStatus(
       taskId,
       status,
-      req.user.userId,
+      userId,
       "qc",
       note
     );
     if (status === "QC Rejected") {
       // xoá toàn bộ field `psd` khỏi listing
       await Listing.updateOne({ _id: task.listing }, { $unset: { psd: "" } });
+    } else {
+      const designerId = task.designer;
+      const difficulty = task.difficulty || "Easy";
+      await addPointsFromTask({
+        userId: designerId,
+        taskId: taskId,
+        type: TaskType.PSDTask,
+        difficulty: difficulty,
+        note: note
+      });
     }
     res.json(task);
   } catch (err) {

@@ -5,6 +5,7 @@ const pointLogSchema = new mongoose.Schema({
   task_id: { type: String, required: true },   // mã/id task nguồn điểm
   points:  { type: Number, required: true },   // luôn dương (chỉ cộng)
   note:    { type: String },                   // ghi chú ngắn (optional)
+  type: {type: String , enum: ["PSD Task", "Idea Task", "Scale Task"]},
   balance_after: { type: Number }              // snapshot sau khi cộng (optional)
 }, {
   timestamps: { createdAt: 'created_at', updatedAt: 'updated_at' }

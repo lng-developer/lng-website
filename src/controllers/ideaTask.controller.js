@@ -3,7 +3,8 @@ const IdeaTask = db.IdeaTask; // export trong models/index.js
 const { uploadBufferToWasabi, getSignedUrlForKey } = require('../utils/wasabi');
 const multer = require('multer');
 const path = require('path');
-
+const { addPointsFromTask } = require('../service/pointsService.js');
+const TaskType = require('../enumeration/taskType')
 const ALLOWED_EXTS = ['.psd', '.psb', '.zip'];
 const MIME_BY_EXT = {
     '.psd': 'image/vnd.adobe.photoshop',
@@ -309,7 +310,7 @@ const assignIdeaTask = async (req, res) => {
         const task = await IdeaTask.findById(req.params.id);
         if (!task) return res.status(404).json({ message: "Not found" });
 
-        if (difficulty !== undefined) task.difficulty = Number(difficulty);
+        if (difficulty !== undefined) task.difficulty = task.difficulty;
         if (assigneeUserId) task.assignedTo = assigneeUserId; // chỉ lưu ObjectId
 
         task.status = "Assigned";
@@ -444,12 +445,17 @@ const approveTask = async (req, res) => {
         if (!canApproveOrReject(req, task)) return res.status(403).json({ message: 'Access denied' });
 
         task.status = 'QC Passed';
-        task.history.push({ by: req.user.userId, action: 'approve' });  // <<==
+        task.history.push({ by: req.user.userId, action: 'approve' });
         await task.save();
 
         await task.populate('createdBy', 'full_name email role');
         await task.populate('assignedTo', 'full_name email role');
-
+        await addPointsFromTask({
+                userId: task.assignedTo?._id,
+                taskId: task._id,
+                type: TaskType.IdeaTask,
+                difficulty: task.difficulty,
+        });
         res.json({ message: 'QC Passed', data: task });
     } catch (error) {
         res.status(500).json({ error: { message: error.message } });

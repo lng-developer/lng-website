@@ -1,57 +1,77 @@
-const mongoose = require('mongoose');
 const db = require('../models');
+const TaskType = require('../enumeration/taskType');
 const User = db.user
 const PointLog = db.PointLog
 /**
  * Cộng điểm từ 1 task. Idempotent theo (user_id, task_id).
  */
-async function addPointsFromTask({ userId, taskId, points, note }) {
-    if (!userId || !taskId) throw new Error('userId & taskId required');
-    if (!Number.isInteger(points) || points <= 0) throw new Error('points must be positive integer');
+const PointMap = Object.freeze({
+  EASY: 1,
+  NORMAL: 2,
+  HARD: 3,
+  EXTREMELY: 4,
+});
 
-    const session = await mongoose.startSession();
-    try {
-        session.startTransaction();
+const ScaleAsinTypePoints = Object.freeze({
+  "Normal": 1,
+  "Custom Image": 1,
+  "Outline": 2,
+});
 
-        // Nếu đã có log cho task này -> bỏ qua (không cộng 2 lần)
-        const existed = await PointLog.findOne({ user_id: userId, task_id: taskId }).session(session);
-        if (existed) {
-            await session.abortTransaction();
-            session.endSession();
-            return { skipped: true, log: existed };
-        }
+async function addPointsFromTask({ userId, taskId, type, difficulty, quantity = 1, note = '' }) {
+  if (!userId || !taskId) throw new Error('userId & taskId required');
+  
+  let points;
+  if (type === TaskType.ScaleTask) {
+    points = ScaleAsinTypePoints[difficulty] ?? ScaleAsinTypePoints["Normal"];
+  } else {
+    points = PointMap[difficulty?.toUpperCase()] ?? PointMap.EASY;
+  }
+  points = points * quantity;
 
-        // Cộng điểm vào wallet
-        const user = await User.findByIdAndUpdate(
-            userId,
-            { $inc: { 'wallet.balance': points } },
-            { new: true, session }
-        );
-        if (!user) throw new Error('User not found');
+  const user = await User.findByIdAndUpdate(
+    userId,
+    { $inc: { 'wallet.balance': points } },
+    { new: true, lean: true }
+  );
 
-        // Ghi log + snapshot balance_after
-        const [log] = await PointLog.create([{
-            user_id: userId,
-            task_id: taskId,
-            points,
-            note,
-            balance_after: user.wallet?.balance ?? 0
-        }], { session });
+  if (!user) {
+    throw new Error(`User ${userId} not found`);
+  }
 
-        await session.commitTransaction();
-        session.endSession();
-        return { skipped: false, user, log };
-    } catch (err) {
-        await session.abortTransaction();
-        session.endSession();
+  let log;
+  try {
+    log = await PointLog.create({
+      user_id: userId,
+      task_id: taskId,
+      points,
+      note,
+      type,
+      balance_after: user.wallet?.balance ?? 0
+    });
+  } catch (err) {
+    if (err.code === 11000) {
 
-        // Trường hợp unique index nổ -> xem như đã cộng rồi, trả log cũ
-        if (err?.code === 11000) {
-            const log = await PointLog.findOne({ user_id: userId, task_id: taskId });
-            return { skipped: true, log };
-        }
-        throw err;
+      await User.findByIdAndUpdate(
+        userId,
+        { $inc: { 'wallet.balance': -points } }
+      );
+      
+      const existedLog = await PointLog.findOne({ 
+        user_id: userId, 
+        task_id: taskId 
+      }).lean();
+      
+      return { 
+        skipped: true, 
+        reason: 'Points already awarded for this task',
+        log: existedLog 
+      };
     }
+    throw err;
+  }
+
+  return { skipped: false, user, log };
 }
 
 module.exports = { addPointsFromTask };
