@@ -3,6 +3,7 @@ const IdeaTask = db.IdeaTask; // export trong models/index.js
 const { uploadBufferToWasabi, getSignedUrlForKey } = require('../utils/wasabi');
 const multer = require('multer');
 const path = require('path');
+const addPointsFromTask = require('../service/pointsService.js');
 
 const ALLOWED_EXTS = ['.psd', '.psb', '.zip'];
 const MIME_BY_EXT = {
@@ -444,12 +445,16 @@ const approveTask = async (req, res) => {
         if (!canApproveOrReject(req, task)) return res.status(403).json({ message: 'Access denied' });
 
         task.status = 'QC Passed';
-        task.history.push({ by: req.user.userId, action: 'approve' });  // <<==
+        task.history.push({ by: req.user.userId, action: 'approve' });
         await task.save();
 
         await task.populate('createdBy', 'full_name email role');
         await task.populate('assignedTo', 'full_name email role');
-
+        await addPointsFromTask({
+                userId: task.assignedTo?._id,
+                taskId: task._id,
+                difficulty: task.difficulty,
+        });
         res.json({ message: 'QC Passed', data: task });
     } catch (error) {
         res.status(500).json({ error: { message: error.message } });

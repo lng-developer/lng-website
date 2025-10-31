@@ -6,12 +6,6 @@ const psdTaskService = require("../service/psdTask/psdTask.js");
 const { uploadBufferToWasabi } = require("../utils/wasabi.js");
 const mongoose = require("mongoose");
 const addPointsFromTask = require('../service/pointsService.js');
-const PointMap = Object.freeze({
-  EASY: 1,
-  NORMAL: 2,
-  HARD: 3,
-  EXTREMELY: 4,
-});
 
 
 // helper: chấp nhận role là string hoặc array
@@ -408,11 +402,10 @@ const qcPSD = async (req, res) => {
     } else {
       const designerId = task.designer;
       const difficulty = task.difficulty || "Easy";
-      const point = PointMap[difficulty] || 1;      
       await addPointsFromTask({
         userId: designerId,
         taskId: taskId,
-        point: point,
+        difficulty: difficulty,
         note: note
       });
     }

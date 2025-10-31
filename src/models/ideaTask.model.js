@@ -13,8 +13,12 @@ const IdeaTaskSchema = new mongoose.Schema(
     // Người được phân công (reference User)
     assignedTo: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
 
-    difficulty: { type: Number, min: 1, max: 5 },
-
+    difficulty: {
+      type: String,
+      enum: ["Easy", "Normal", "Hard", "Extremely"],
+      default: "Easy",
+    },
+    
     status: {
       type: String,
       enum: [
