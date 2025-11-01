@@ -19,7 +19,7 @@ async function requestExtension(req, res) {
     const io = req.app.get("io");
     if (!io) return res.status(500).json({ ok: false, message: "io missing" });
 
-    const jobId = makeJobId();
+    const jobId = `job_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
     const task = { jobId, type: "IMPORT_ORDERS", payload: {} };
 
     // Phát theo ROOM (extension đã join: shop:..., machine:...)
