@@ -1,19 +1,21 @@
-// socket/index.js
+// src/socket/index.js
+// Realtime minimal: presence + task started/finished + (optional) ack
 const presence = require("../lib/presence");
-const logbus = require("../lib/logbus");
 
 module.exports = function registerSocketHandlers({ app, io }) {
-  // Simple auth
+  // --- Auth đơn giản ---
   io.use((socket, next) => {
     const { shopId, machineId, label, version, ua } =
       socket.handshake.auth || {};
     if (!shopId) return next(new Error("shopId required"));
     if (!machineId) return next(new Error("machineId required"));
-    socket.data.shopId = String(shopId);
-    socket.data.machineId = String(machineId);
-    socket.data.label = label || null;
-    socket.data.version = version || "";
-    socket.data.ua = ua || socket.handshake.headers["user-agent"] || "";
+    socket.data = {
+      shopId: String(shopId),
+      machineId: String(machineId),
+      label: label || null,
+      version: version || "",
+      ua: ua || socket.handshake.headers["user-agent"] || "",
+    };
     next();
   });
 
@@ -27,10 +29,11 @@ module.exports = function registerSocketHandlers({ app, io }) {
       socket.handshake.address ||
       "";
 
-    // Join rooms
+    // --- join rooms ---
     socket.join(`shop:${shopId}`);
     socket.join(`machine:${machineId}`);
 
+    // --- presence online ---
     presence.online({
       shopId,
       machineId,
@@ -41,106 +44,69 @@ module.exports = function registerSocketHandlers({ app, io }) {
       ip,
     });
 
-    io.emit("presence:update", {
+    io.to(`shop:${shopId}`).emit("presence:update", {
       kind: "online",
       at: Date.now(),
       client: {
         shopId,
         machineId,
-        label: label || `Client ${machineId}`,
+        label,
         version,
         socketId: socket.id,
         ua,
         ip,
-        lastSeen: Date.now(),
         status: "online",
+        lastSeen: Date.now(),
       },
     });
 
-    // EXT → SERVER log realtime
-    socket.on("ext:log", (payload = {}) => {
-      const event = {
-        at: payload.at || Date.now(),
-        shopId,
-        machineId,
-        type: payload.type || "info", // info|step|done|warn|error
-        message: payload.message || "",
-        ...payload,
-      };
-      io.emit("realtime:log", event);
-      io.to(`shop:${shopId}`).emit("realtime:log", event);
-      logbus.append(event);
-    });
-
-    // Heartbeat
-    socket.on("ext:heartbeat", (payload = {}) => {
-      presence.heartbeat(machineId, {
-        label: payload.label,
-        version: payload.version,
-        ua: payload.ua,
-        ip: payload.ip,
-      });
-      io.emit("presence:update", {
-        kind: "heartbeat",
-        at: Date.now(),
-        client: {
-          shopId,
-          machineId,
-          label: payload.label || label,
-          version: payload.version || version,
-          socketId: socket.id,
-          ua: payload.ua || ua,
-          ip: payload.ip || ip,
-          lastSeen: Date.now(),
-          status: "online",
-        },
-      });
-    });
-
-    // Client ACK
-    socket.on("client:ack", (ack) => {
-      const event = {
-        at: Date.now(),
-        type: "ack",
-        shopId,
-        machineId,
-        jobId: ack?.jobId || null,
-        ok: !!ack?.ok,
-        result: ack?.result || null,
-        error: ack?.error || null,
-        message: `ACK ${ack?.jobId || "?"} → ${ack?.ok ? "✅" : "❌"}`,
-      };
-      io.emit("realtime:log", event);
-      io.to(`shop:${shopId}`).emit("realtime:log", event);
-      logbus.append(event);
-
-      const ackMap = socket.request.app.get("ackMap");
-      const resolver = ackMap && ackMap.get(ack?.jobId);
-      if (resolver) {
-        ackMap.delete(ack.jobId);
-        resolver({
-          ok: !!ack.ok,
-          result: ack.result || null,
-          error: ack.error || null,
+    socket.on("fe:command", (cmd = {}) => {
+      const { shopId, machineId, type, payload } = cmd;
+      if (!shopId || !machineId || !type) {
+        // trả lại nhanh cho FE biết request không hợp lệ
+        socket.emit("fe:command:rejected", {
+          at: Date.now(),
+          reason: "shopId, machineId, type required",
         });
+        return;
       }
+
+      const jobId = `job_${Date.now()}_${Math.random()
+        .toString(36)
+        .slice(2, 8)}`;
+
+      // bắn trực tiếp theo room machine (Extension đã join machine:<id>)
+      io.to(`machine:${machineId}`).emit("server:task", {
+        jobId,
+        type, // "IMPORT_ORDERS" | "IMPORT_ADS_SPEND" (vẫn giữ logic cũ)
+        payload: payload || {},
+      });
+
+      // xác nhận “đã nhận” ngay cho FE (không chờ Extension)
+      socket.emit("fe:command:accepted", {
+        at: Date.now(),
+        jobId,
+        type,
+        machineId,
+      });
     });
 
+    // --- disconnect ---
     socket.on("disconnect", (reason) => {
       presence.offline(machineId);
-      io.emit("presence:update", {
+      io.to(`shop:${shopId}`).emit("presence:update", {
         kind: "offline",
         at: Date.now(),
         client: {
           shopId,
           machineId,
-          label: label || `Client ${machineId}`,
+          label,
           version,
           socketId: null,
           ua,
           ip,
-          lastSeen: Date.now(),
           status: "offline",
+          lastSeen: Date.now(),
         },
         reason,
       });

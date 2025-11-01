@@ -50,7 +50,7 @@ const {
   teamRoutes,
   extRoutes,
   adminSessionRoutes,
-  PointsRoutes
+  PointsRoutes,
 } = require("./src/routes");
 
 app.use("/api/role", roleRoutes);
@@ -78,7 +78,7 @@ app.use("/api/idea-task", ideaTaskRoutes);
 app.use("/api/logs", realtimeLogRoutes);
 app.use("/api/teams", teamRoutes);
 app.use("/api/admin", adminSessionRoutes);
-app.use("/api/points", PointsRoutes)
+app.use("/api/points", PointsRoutes);
 
 // ===== HTTP server
 const httpServer = http.createServer(app);

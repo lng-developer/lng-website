@@ -3,48 +3,26 @@ const mongoose = require("mongoose");
 
 const RealtimeLogSchema = new mongoose.Schema(
   {
-    ts: { type: Number, index: true },
-    day: { type: String, index: true },
+    shopId: { type: mongoose.Types.ObjectId, ref: "shop", index: true },
+    machineId: { type: String, index: true },
+    label: { type: String, default: null },
 
-    type: { type: String, index: true }, // 'AUTO' | 'CLICK' | 'STATUS'
-    clientId: { type: String, index: true },
-    label: { type: String, index: true },
-
-    // PHASES bây giờ là mảng [{type, status}]
-    phase: [
-      {
-        type: {
-          type: String,
-          enum: ["import", "report", "ads"],
-          required: true,
-        },
-        status: {
-          type: String,
-          enum: ["success", "fail", "running"],
-          required: true,
-        },
-      },
-    ],
-
-    status: { type: String, index: true }, // overall
-
-    // >>> THÊM TRƯỜNG THAM CHIẾU SHOP
-    shopId: { type: mongoose.Schema.Types.ObjectId, ref: "Shop", index: true },
-
-    ms: Number,
-    error: String,
-    meta: Object,
-
-    expireAt: {
-      type: Date,
-      index: process.env.LOG_TTL_DAYS ? { expireAfterSeconds: 0 } : undefined,
+    action: { type: String, enum: ["click", "auto"], required: true },
+    type: { type: String, default: "import_order", index: true },
+    level: {
+      type: String,
+      enum: ["info", "success", "error"],
+      default: "info",
     },
+
+    message: { type: String, required: true },
+    ts: { type: Date, default: Date.now, index: true },
+
+    jobId: { type: String, index: true }, // để nhóm log cho 1 lượt import
+    meta: { type: mongoose.Schema.Types.Mixed }, // tuỳ chọn, nếu cần thêm chi tiết
   },
   { versionKey: false }
 );
-
-RealtimeLogSchema.index({ day: 1, ts: 1 });
-RealtimeLogSchema.index({ type: 1, ts: 1 });
 
 module.exports = mongoose.model(
   "RealtimeLog",
