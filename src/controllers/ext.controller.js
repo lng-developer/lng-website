@@ -2,39 +2,41 @@ const db = require("../models");
 const Shop = db.shop;
 const RealtimeLog = db.RealtimeLog;
 
-// Hàm xử lý request chính (fire-and-forget)
-const makeJobId = () =>
-  "job_" + Date.now() + "_" + Math.random().toString(36).slice(2, 8);
-
 async function requestExtension(req, res) {
   try {
-    const { shopId, machineId, type, payload } = req.body || {};
-    if (!shopId || !machineId || !type) {
+    const {
+      shopId,
+      machineId,
+      action = "click",
+      label = null,
+    } = req.body || {};
+    if (!shopId || !machineId) {
       return res
         .status(400)
-        .json({ ok: false, message: "shopId, machineId, type required" });
+        .json({ ok: false, message: "shopId & machineId required" });
     }
 
     const io = req.app.get("io");
-    const presence = req.app.get("presence");
+    if (!io) return res.status(500).json({ ok: false, message: "io missing" });
 
-    const client =
-      presence.getByMachine?.(machineId) ||
-      presence.findBy?.({ shopId, machineId });
-    const socketId = client?.socketId;
+    const jobId = makeJobId();
+    const task = { jobId, type: "IMPORT_ORDERS", payload: {} };
 
-    const jobId = `job_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-    const task = { jobId, type, payload: payload || {} };
+    // Phát theo ROOM (extension đã join: shop:..., machine:...)
+    io.to(`machine:${machineId}`).emit("server:task", task);
 
-    if (socketId && io.sockets.sockets.get(socketId)) {
-      io.to(socketId).emit("server:task", task);
-    } else {
-      // fallback theo room (Extension join machine:<id>)
-      io.to(`machine:${machineId}`).emit("server:task", task);
-    }
+    // Ghi 1 log “start import requested”
+    await RealtimeLog.create({
+      shopId,
+      machineId,
+      label,
+      action, // 'click' | 'auto'
+      level: "info",
+      message: `Start import requested → jobId=${jobId}`,
+      ts: new Date(),
+    });
 
-    // TRẢ LUÔN — không đợi ACK
-    return res.json({ ok: true, jobId, delivered: true });
+    return res.json({ ok: true, jobId });
   } catch (e) {
     return res.status(500).json({ ok: false, message: e.message });
   }

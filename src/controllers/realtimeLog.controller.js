@@ -3,101 +3,138 @@ const RealtimeLog = db.RealtimeLog;
 const Shop = db.shop;
 const { Types } = require("mongoose");
 
-/**
- * Ghi 1 log
- */
-async function createExtLog({
+// helper
+async function writeLog({
   shopId,
   machineId,
-  label,
-  action, // 'click' | 'auto'
-  type = "import_order",
-  level = "info", // 'info' | 'warn' | 'error'
+  label = null,
+  action = "click",
+  level = "info",
   message,
-  jobId,
-  ts,
-  meta,
 }) {
-  const doc = await RealtimeLog.create({
-    shopId: Types.ObjectId.isValid(shopId)
-      ? new Types.ObjectId(shopId)
-      : shopId,
-    machineId: machineId || null,
-    label: label || null,
+  return RealtimeLog.create({
+    shopId,
+    machineId,
+    label,
     action,
-    type,
     level,
     message,
-    jobId: jobId || null,
-    ts: ts ? new Date(ts) : new Date(),
-    meta: meta || undefined,
+    ts: new Date(),
   });
-  return doc;
 }
 
 /**
- * Ghi nhiều log (tiện khi bạn batch từ extension)
+ * POST /api/logs/add
+ * body: { shopId, machineId, label, action, level, message }
+ * -> thêm 1 dòng log
  */
-async function createExtLogsBulk(logs = []) {
-  if (!Array.isArray(logs) || !logs.length) return { inserted: 0 };
-  const ops = logs.map((l) => ({
-    insertOne: {
-      document: {
-        ...l,
-        shopId: Types.ObjectId.isValid(l.shopId)
-          ? new Types.ObjectId(l.shopId)
-          : l.shopId,
-        ts: l.ts ? new Date(l.ts) : new Date(),
-      },
-    },
-  }));
-  const result = await RealtimeLog.bulkWrite(ops, { ordered: false });
-  return { inserted: result.insertedCount || 0 };
-}
-
-/**
- * Truy vấn log cho FE
- */
-async function queryExtLogs({
-  shopId,
-  machineId,
-  action, // optional: 'click' | 'auto'
-  type, // optional: 'import_order' ...
-  level, // optional
-  jobId, // optional: gom theo job
-  from, // epoch ms | ISO
-  to, // epoch ms | ISO
-  limit = 200, // default 200
-  cursorTs, // optional: paginate theo ts (ms)
-  sort = "desc", // 'desc' (mặc định) hoặc 'asc'
-}) {
-  const q = {};
-  if (shopId) q.shopId = shopId;
-  if (machineId) q.machineId = machineId;
-  if (action) q.action = action;
-  if (type) q.type = type;
-  if (level) q.level = level;
-  if (jobId) q.jobId = jobId;
-
-  // time range
-  const tsRange = {};
-  if (from) tsRange.$gte = new Date(from);
-  if (to) tsRange.$lte = new Date(to);
-  if (Object.keys(tsRange).length) q.ts = tsRange;
-
-  // cursor (keyset pagination)
-  if (cursorTs) {
-    const op = sort === "asc" ? "$gt" : "$lt";
-    q.ts = q.ts || {};
-    q.ts[op] = new Date(Number(cursorTs));
+async function addLog(req, res) {
+  try {
+    const {
+      shopId,
+      machineId,
+      label,
+      action = "click",
+      level = "info",
+      message,
+    } = req.body || {};
+    if (!shopId || !machineId || !message) {
+      return res
+        .status(400)
+        .json({ ok: false, message: "shopId, machineId, message required" });
+    }
+    const row = await writeLog({
+      shopId,
+      machineId,
+      label,
+      action,
+      level,
+      message,
+    });
+    return res.json({ ok: true, logId: row._id });
+  } catch (e) {
+    return res.status(500).json({ ok: false, message: e.message });
   }
-
-  const docs = await RealtimeLog.find(q)
-    .sort({ ts: sort === "asc" ? 1 : -1 })
-    .limit(Math.min(500, Number(limit || 200)))
-    .lean();
-
-  return { items: docs };
 }
 
-module.exports = { createExtLog, createExtLogsBulk, queryExtLogs };
+const appendLogs = async (req, res) => {
+  try {
+    const {
+      shopId,
+      machineId,
+      label,
+      action = "click",
+      lines,
+    } = req.body || {};
+    if (!shopId || !machineId || !Array.isArray(lines) || !lines.length) {
+      return res
+        .status(400)
+        .json({ ok: false, message: "shopId, machineId, lines[] required" });
+    }
+    const docs = lines
+      .filter((l) => l && l.message)
+      .map((l) => ({
+        shopId,
+        machineId,
+        label: label || null,
+        action,
+        level: l.level || "info",
+        message: String(l.message),
+        ts: l.at ? new Date(l.at) : new Date(),
+      }));
+    if (!docs.length) return res.json({ ok: true, inserted: 0 });
+    await RealtimeLog.insertMany(docs, { ordered: false });
+    return res.json({ ok: true, inserted: docs.length });
+  } catch (e) {
+    return res.status(500).json({ ok: false, message: e.message });
+  }
+};
+
+const getListLog = async (req, res) => {
+  try {
+    const { machineId, limit = "500", tzOffset } = req.query || {};
+
+    // Tính mốc "đầu ngày" và "hiện tại"
+    const now = new Date();
+    let start, end;
+
+    if (tzOffset !== undefined) {
+      // dịch sang múi giờ người dùng, set 00:00:00, rồi dịch ngược về UTC
+      const offsetMin = parseInt(tzOffset, 10) || 0; // phút
+      const nowShifted = new Date(now.getTime() + offsetMin * 60000);
+      const startShifted = new Date(nowShifted);
+      startShifted.setHours(0, 0, 0, 0);
+      start = new Date(startShifted.getTime() - offsetMin * 60000);
+      end = now; // tới hiện tại (UTC)
+    } else {
+      // theo giờ server
+      start = new Date(now);
+      start.setHours(0, 0, 0, 0);
+      end = now;
+    }
+
+    const where = { ts: { $gte: start, $lte: end } };
+    if (machineId) where.machineId = String(machineId);
+
+    const rows = await RealtimeLog.find(where)
+      .sort({ ts: -1 })
+      .limit(Math.min(Number(limit) || 500, 1000))
+      .lean();
+
+    const logs = rows.map((r) => ({
+      at: +new Date(r.ts),
+      shopId: String(r.shopId),
+      machineId: r.machineId,
+      label: r.label || null,
+      action: r.action,
+      level: r.level,
+      message: r.message,
+    }));
+
+    return res.json({ ok: true, logs });
+  } catch (e) {
+    return res.status(500).json({ ok: false, message: e.message });
+  }
+};
+
+module.exports = { addLog, getListLog, appendLogs };
