@@ -117,7 +117,6 @@ const getListLog = async (req, res) => {
     if (machineId) where.machineId = String(machineId);
 
     const rows = await RealtimeLog.find(where)
-      .sort({ ts: -1 })
       .limit(Math.min(Number(limit) || 500, 1000))
       .lean();
 

@@ -1,13 +1,10 @@
 // src/socket/index.js
-// Minimal Socket.IO: presence + room join. No lightweight logs, no command handling here.
 const presence = require("../lib/presence");
 
 module.exports = function registerSocketHandlers({ app, io }) {
-  // Lưu io & presence để chỗ khác (REST) dùng
   app.set("io", io);
   app.set("presence", presence);
 
-  // Auth đơn giản (có thể thay verify JWT)
   io.use((socket, next) => {
     const { shopId, machineId, label, version, ua } =
       socket.handshake.auth || {};
@@ -33,12 +30,11 @@ module.exports = function registerSocketHandlers({ app, io }) {
       socket.handshake.address ||
       "";
 
-    // Join rooms để REST có thể emit đến đúng client:
-    //   io.to(`machine:${machineId}`).emit("server:task", task)
+    // Join room để REST có thể emit đúng client nếu cần
     socket.join(`shop:${shopId}`);
     socket.join(`machine:${machineId}`);
 
-    // Presence ONLINE (RAM)
+    // ONLINE
     presence.online({
       shopId,
       machineId,
@@ -49,7 +45,6 @@ module.exports = function registerSocketHandlers({ app, io }) {
       ip,
     });
 
-    // Báo FE biết thay đổi trạng thái (nếu FE đang theo dõi)
     io.to(`shop:${shopId}`).emit("presence:update", {
       kind: "online",
       at: Date.now(),
@@ -66,33 +61,32 @@ module.exports = function registerSocketHandlers({ app, io }) {
       },
     });
 
-    // Heartbeat từ extension → cập nhật presence
-    socket.on("ext:heartbeat", (payload = {}) => {
+    // Heartbeat
+    socket.on("ext:heartbeat", (p = {}) => {
       presence.heartbeat(machineId, {
-        label: payload.label,
-        version: payload.version,
-        ua: payload.ua,
-        ip: payload.ip,
+        label: p.label,
+        version: p.version,
+        ua: p.ua,
+        ip: p.ip,
       });
-
       io.to(`shop:${shopId}`).emit("presence:update", {
         kind: "heartbeat",
         at: Date.now(),
         client: {
           shopId,
           machineId,
-          label: payload.label || label || `Client ${machineId}`,
-          version: payload.version || version || "",
+          label: p.label || label || `Client ${machineId}`,
+          version: p.version || version || "",
           socketId: socket.id,
-          ua: payload.ua || ua || "",
-          ip: payload.ip || ip || "",
+          ua: p.ua || ua || "",
+          ip: p.ip || ip || "",
           status: "online",
           lastSeen: Date.now(),
         },
       });
     });
 
-    // Ngắt kết nối → OFFLINE
+    // OFFLINE
     socket.on("disconnect", (reason) => {
       presence.offline(machineId);
       io.to(`shop:${shopId}`).emit("presence:update", {
