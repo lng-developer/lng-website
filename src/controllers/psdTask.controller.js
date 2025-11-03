@@ -401,9 +401,15 @@ const qcPSD = async (req, res) => {
     } else {
       const designerId = task.designer;
       const difficulty = task.difficulty || "Easy";
+      const listing = await Listing.findOne({ _id: task.listing })
+        .select('asin')
+        .lean();
+      if (!listing) {
+        console.warn(`[qcPSD] listing not found for task ${taskId}`);
+      }
       await addPointsFromTask({
         userId: designerId,
-        taskId: taskId,
+        taskId: listing.asin,
         type: TaskType.PSDTask,
         difficulty: difficulty,
         note: note
