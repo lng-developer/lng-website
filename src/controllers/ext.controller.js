@@ -44,17 +44,71 @@ async function requestExtension(req, res) {
 
 // GET /api/ext/clients/online
 const getClientOnline = async (req, res) => {
-  const presence = req.app.get("presence");
-  if (!presence) return res.json({ ok: true, clients: [] });
+  try {
+    const presence = req.app.get("presence");
+    if (!presence) return res.json([]);
 
-  const { shopId } = req.query || {};
-  let list = presence.snapshot(); // [{shopId, machineId, label, status, lastSeen, ua, ip, socketId, version}, ...]
+    // snapshot() đã lọc theo TTL → coi như online
+    const snap = presence.snapshot(); // [{machineId, shopId, label, version, ua, ip, lastSeen, socketId, ...}]
+    if (!snap.length) return res.json([]);
 
-  if (shopId) list = list.filter((c) => String(c.shopId) === String(shopId));
-  // chỉ trả online (tùy nhu cầu)
-  list = list.filter((c) => c.status === "online");
+    // Lấy thông tin shop name/store cho các shopId xuất hiện
+    const uniqueShopIds = [
+      ...new Set(snap.map((c) => String(c.shopId)).filter(Boolean)),
+    ];
 
-  return res.json({ ok: true, clients: list });
+    const shops = await Shop.find(
+      { _id: { $in: uniqueShopIds } },
+      { _id: 1, name: 1, store: 1 }
+    ).lean();
+
+    const shopMap = new Map(shops.map((s) => [String(s._id), s]));
+
+    const out = snap.map((c) => {
+      const shop = shopMap.get(String(c.shopId));
+      const lastSeenMs = c.lastSeen || Date.now();
+      return {
+        // tương thích FE cũ
+        socketId: c.socketId || null,
+        clientId: c.machineId || null,
+
+        // thông tin hiển thị
+        machineId: c.machineId || null,
+        label: c.label || shop?.name || shop?.store || `Client ${c.machineId}`,
+        version: c.version || "",
+        ua: c.ua || "",
+        ip: c.ip || "",
+
+        // shop
+        shopId: String(c.shopId || ""),
+        shopName: shop?.name || shop?.store || String(c.shopId || ""),
+
+        // key ổn định cho FE
+        id: `${String(c.shopId)}:${String(c.machineId)}`,
+
+        // thời gian
+        connectedAt: lastSeenMs, // presence không giữ firstSeen → dùng lastSeen làm mốc gần nhất
+        lastSeen: lastSeenMs,
+
+        // trạng thái luôn online vì lấy từ RAM realtime
+        status: "online",
+        statusSummary: {
+          overall: "success",
+          lastJobId: null,
+          lastTs: lastSeenMs,
+          phases: {},
+          onlineForSec: 0,
+          idleForSec: 0,
+        },
+      };
+    });
+
+    // sort theo lastSeen giảm dần
+    out.sort((a, b) => (b.lastSeen || 0) - (a.lastSeen || 0));
+    return res.json(out);
+  } catch (e) {
+    return res.status(500).json({ ok: false, message: e.message });
+  }
 };
 
 module.exports = {
