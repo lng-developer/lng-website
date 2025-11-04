@@ -3,7 +3,7 @@ const mongoose = require("mongoose");
 
 const RealtimeLogSchema = new mongoose.Schema(
   {
-    shopId: { type: mongoose.Types.ObjectId, ref: "shop", index: true },
+    shopId: { type: mongoose.Types.ObjectId, ref: "Shop", index: true },
     machineId: { type: String, index: true },
     label: { type: String, default: null },
     action: { type: String, enum: ["click", "auto"], required: true },
