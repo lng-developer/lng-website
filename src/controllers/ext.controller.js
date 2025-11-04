@@ -40,7 +40,7 @@ async function requestExtension(req, res) {
       ts: new Date(),
     });
 
-    return res.json({ ok: true, jobId });
+    return res.json({ ok: true });
   } catch (e) {
     return res.status(500).json({ ok: false, message: e.message });
   }

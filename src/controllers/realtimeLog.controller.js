@@ -94,20 +94,18 @@ const getListLog = async (req, res) => {
   try {
     const { machineId, limit = "500", tzOffset } = req.query || {};
 
-    // Tính mốc "đầu ngày" và "hiện tại"
+    // Xác định thời gian bắt đầu & kết thúc
     const now = new Date();
     let start, end;
 
     if (tzOffset !== undefined) {
-      // dịch sang múi giờ người dùng, set 00:00:00, rồi dịch ngược về UTC
-      const offsetMin = parseInt(tzOffset, 10) || 0; // phút
+      const offsetMin = parseInt(tzOffset, 10) || 0;
       const nowShifted = new Date(now.getTime() + offsetMin * 60000);
       const startShifted = new Date(nowShifted);
       startShifted.setHours(0, 0, 0, 0);
       start = new Date(startShifted.getTime() - offsetMin * 60000);
-      end = now; // tới hiện tại (UTC)
+      end = now;
     } else {
-      // theo giờ server
       start = new Date(now);
       start.setHours(0, 0, 0, 0);
       end = now;
@@ -117,12 +115,17 @@ const getListLog = async (req, res) => {
     if (machineId) where.machineId = String(machineId);
 
     const rows = await RealtimeLog.find(where)
+      .populate("shopId", "name") // chỉ lấy các field cần thiết
       .limit(Math.min(Number(limit) || 500, 1000))
       .lean();
 
     const logs = rows.map((r) => ({
       at: +new Date(r.ts),
-      shopId: String(r.shopId),
+      shop: r.shopId
+        ? {
+            shopName: r.shopId.name,
+          }
+        : null,
       machineId: r.machineId,
       label: r.label || null,
       action: r.action,
