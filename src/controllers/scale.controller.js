@@ -4,7 +4,7 @@ const mongoose = require("mongoose");
 const db = require("../models");
 const cloudinary = require("../utils/cloudinary");
 const FulfillmentService = require("../service/fulfillment"); // <<< NEW
-const { addPointsFromTask } = require("../service/pointsService");
+const { addPointsFromTask, addPenaltyForScaleReject } = require("../service/pointsService");
 const TaskType = require('../enumeration/taskType')
 const OrderCustomProduct = db.orderCustomProduct;
 const VendorProduct = db.vendorProduct;
@@ -257,7 +257,7 @@ const buildInvalidAddressMessage = (order) => {
 const confirmScaleForItem = async (req, res) => {
   try {
     const { orderId, orderItemId } = req.params;
-    const { decision, note, provider } = req.body || {}; // provider optional
+    const { decision, note, provider } = req.body || {};
 
     const d = String(decision || "").toLowerCase();
     if (!["approve", "reject"].includes(d)) {
@@ -269,10 +269,11 @@ const confirmScaleForItem = async (req, res) => {
     const order = await OrderCustomProduct.findOne({ orderId });
     if (!order) return res.status(404).json({ message: "Order not found" });
 
-    const item = order.items.find((i) => i.orderItemId === orderItemId);
+    const item = Array.isArray(order.items)
+      ? order.items.find((i) => i.orderItemId === orderItemId)
+      : null;
     if (!item) return res.status(404).json({ message: "Order item not found" });
 
-    // ===== helper: kiểm tra fulfillment_file có ít nhất 1 URL hợp lệ =====
     const hasAnyFulfillmentUrl = (ff) => {
       if (!ff) return false;
       if (ff instanceof Map) {
@@ -285,16 +286,40 @@ const confirmScaleForItem = async (req, res) => {
       if (typeof ff === "string") return !!ff;
       return false;
     };
-
     if (d === "reject") {
       item.scale_status = "QC Rejected";
-      // Xoá sạch file in để tránh lẫn với vòng duyệt sau
       item.fulfillment_file = new Map();
       item.markModified("fulfillment_file");
+
       if (note) item.qc_note = note;
 
-      // Cập nhật trạng thái tổng thể
       order.scale_overall_status = "QC Rejected";
+
+      // Trừ điểm người scale (idempotent theo orderId:orderItemId)
+      try {
+        // Lấy asin_type để áp mức phạt phù hợp
+        let asinType = "Normal";
+        if (item.asin) {
+          const listing = await Listing.findOne({ asin: item.asin })
+            .select("asin_type")
+            .lean();
+          asinType = listing?.asin_type || "Normal";
+        }
+
+        if (order.scaleId) {
+          await addPenaltyForScaleReject({
+            userId: order.scaleId,
+            orderId,
+            orderItemId,
+            asinType,
+            note: note || "QC Rejected",
+          });
+        }
+      } catch (penErr) {
+        // Không chặn flow reject, chỉ log để theo dõi
+        console.error("Penalty apply failed:", penErr);
+      }
+
       await order.save();
       return res.json({
         message: "Scale rejected. Item set to QC Rejected.",
@@ -304,7 +329,6 @@ const confirmScaleForItem = async (req, res) => {
       });
     }
 
-    // ====== APPROVE ======
     // Yêu cầu có ít nhất 1 nguồn in: fulfillment_file (front/back/...) hoặc svgFile (fallback)
     const hasFF = hasAnyFulfillmentUrl(item.fulfillment_file);
     const hasSvg = !!item.svgFile;
@@ -316,7 +340,6 @@ const confirmScaleForItem = async (req, res) => {
     }
 
     item.scale_status = "Complete";
-
     if (note) item.qc_note = note;
 
     // Nếu fulfillment_file là Map rỗng và bạn vừa mới nạp file trước đó ở API khác,
@@ -328,20 +351,25 @@ const confirmScaleForItem = async (req, res) => {
 
     // === Nếu order đã "Ready" ===
     if (order.scale_overall_status === "Ready") {
+      // Lấy asin_type để tính điểm scale
       const asin = item.asin;
-      const listing = await Listing.findOne({asin: asin}).select('asin_type').lean();
-      const asinType = listing?.asin_type || 'Normal';
+      const listing = asin
+        ? await Listing.findOne({ asin }).select("asin_type").lean()
+        : null;
+      const asinType = listing?.asin_type || "Normal";
 
+      // Cộng điểm theo số item trong đơn
       await addPointsFromTask({
         userId: order.scaleId,
-        taskId: orderId,
+        taskId: orderId, // idempotent cho cả đơn
         type: TaskType.ScaleTask,
         difficulty: asinType,
-        quantity: Array.isArray(order.items) ? order.items.length : 0
+        quantity: Array.isArray(order.items) ? order.items.length : 0,
       });
 
+      // Kiểm tra địa chỉ
       if (isAddressInvalid(order)) {
-        order.scale_overall_status = "Address Invalid"; // bạn có thể đổi tên status nếu muốn
+        order.scale_overall_status = "Address Invalid";
         await order.save();
         return res.status(409).json({
           message: buildInvalidAddressMessage(order),
@@ -364,6 +392,7 @@ const confirmScaleForItem = async (req, res) => {
         });
       }
 
+      // Gửi vendor
       let providerKey = String(provider || "").trim();
 
       try {
@@ -373,7 +402,6 @@ const confirmScaleForItem = async (req, res) => {
           providerKey = resolved.providerKey || providerKey; // có thể vẫn rỗng nếu không suy ra được
         }
       } catch (provErr) {
-        // Có nhiều vendor khác nhau trong cùng order → yêu cầu client chỉ định rõ
         const status = provErr.status || 409;
         return res.status(status).json({
           message:
@@ -431,9 +459,7 @@ const confirmScaleForItem = async (req, res) => {
       order_scale_overall_status: order.scale_overall_status,
     });
   } catch (err) {
-    return res
-      .status(500)
-      .json({ message: "Confirm failed", error: err.message });
+    return res.status(500).json({ message: "Confirm failed", error: err.message });
   }
 };
 
@@ -611,7 +637,7 @@ const getScaleList = async (req, res) => {
     /**
      * CHỈ giới hạn theo seller khi là Seller "thuần"
      * (không có bất kỳ role quyền cao nào khác).
-     * Design Leader phải luôn bypass filter này, kể cả khi tài khoản có Seller.
+     * Design Leader phải luôn bypass filter này, kể cả khi tài khoản có Seller.  
      */
     const isSellerOnly = isSeller && !(isAdmin || isCS || isDesignLeader);
 
@@ -628,8 +654,8 @@ const getScaleList = async (req, res) => {
     if (isCS) {
       const currentUser = await User.findById(userId).select('team_id').lean();
       if (!currentUser || !currentUser.team_id) {
-        return res.status(400).json({ 
-          message: "a CS must have a team" 
+        return res.status(400).json({
+          message: "a CS must have a team"
         });
       }
       const teamMemberIds = await User.find(

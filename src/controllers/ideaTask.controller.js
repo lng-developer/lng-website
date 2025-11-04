@@ -3,7 +3,7 @@ const IdeaTask = db.IdeaTask; // export trong models/index.js
 const { uploadBufferToWasabi, getSignedUrlForKey } = require('../utils/wasabi');
 const multer = require('multer');
 const path = require('path');
-const { addPointsFromTask } = require('../service/pointsService.js');
+const { addPointsFromTask, addPenaltyFromTask } = require('../service/pointsService.js');
 const TaskType = require('../enumeration/taskType')
 const ALLOWED_EXTS = ['.psd', '.psb', '.zip'];
 const MIME_BY_EXT = {
@@ -450,12 +450,16 @@ const approveTask = async (req, res) => {
 
         await task.populate('createdBy', 'full_name email role');
         await task.populate('assignedTo', 'full_name email role');
+
+        // === Giữ nguyên: Cộng điểm khi QC Passed ===
         await addPointsFromTask({
-                userId: task.assignedTo?._id,
-                taskId: task._id,
-                type: TaskType.IdeaTask,
-                difficulty: task.difficulty,
+            userId: task.assignedTo?._id || task.assignedTo, // hỗ trợ cả ObjectId & populated
+            taskId: String(task._id), // idempotent theo task
+            type: TaskType.IdeaTask,
+            difficulty: task.difficulty || 'Easy',
+            note: 'Idea QC Passed'
         });
+
         res.json({ message: 'QC Passed', data: task });
     } catch (error) {
         res.status(500).json({ error: { message: error.message } });
@@ -470,14 +474,34 @@ const rejectTask = async (req, res) => {
         if (!canApproveOrReject(req, task)) return res.status(403).json({ message: 'Access denied' });
 
         const prevKey = task.psd?.key || '';
-        task.psd = { key: '', url: '', uploadedAt: null, uploadedBy: undefined }; // uploadedBy là ref
+        task.psd = { key: '', url: '', uploadedAt: null, uploadedBy: undefined };
 
         task.status = 'QC Rejected';
-        task.history.push({ by: req.user.userId, action: 'reject', meta: { reason, clearedKey: prevKey } }); // <<==
+        task.history.push({
+            by: req.user.userId,
+            action: 'reject',
+            meta: { reason, clearedKey: prevKey }
+        });
         await task.save();
 
         await task.populate('createdBy', 'full_name email role');
         await task.populate('assignedTo', 'full_name email role');
+
+        // === NEW: Trừ điểm khi QC Rejected (idempotent) ===
+        if (task.assignedTo) {
+            try {
+                const penaltyTaskId = `${task._id}:idea_qc_reject`;
+                await addPenaltyFromTask({
+                    userId: task.assignedTo?._id || task.assignedTo,
+                    taskId: penaltyTaskId,
+                    type: TaskType.IdeaTask,
+                    difficulty: task.difficulty || 'Easy',
+                    note: reason || 'Idea QC Rejected'
+                });
+            } catch (penErr) {
+                console.error('[Idea.rejectTask] penalty failed:', penErr?.message || penErr);
+            }
+        }
 
         res.json({ message: 'QC Rejected', data: task });
     } catch (error) {

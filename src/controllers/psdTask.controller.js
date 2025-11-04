@@ -5,7 +5,7 @@ const Listing = db.listing;
 const psdTaskService = require("../service/psdTask/psdTask.js");
 const { uploadBufferToWasabi } = require("../utils/wasabi.js");
 const mongoose = require("mongoose");
-const { addPointsFromTask } = require('../service/pointsService.js');
+const { addPointsFromTask, addPenaltyFromTask } = require('../service/pointsService.js');
 const TaskType = require('../enumeration/taskType')
 // helper: chấp nhận role là string hoặc array
 function hasRole(userRole, target) {
@@ -388,6 +388,7 @@ const qcPSD = async (req, res) => {
     const { result, note } = req.body;
     const userId = req.user.userId;
     const status = result === "pass" ? "QC Passed" : "QC Rejected";
+
     const task = await psdTaskService.changeStatus(
       taskId,
       status,
@@ -395,10 +396,29 @@ const qcPSD = async (req, res) => {
       "qc",
       note
     );
+
     if (status === "QC Rejected") {
-      // xoá toàn bộ field `psd` khỏi listing
+      // Xoá toàn bộ field `psd` khỏi listing
       await Listing.updateOne({ _id: task.listing }, { $unset: { psd: "" } });
+
+      // === NEW: trừ điểm Designer theo difficulty của task (idempotent) ===
+      if (task?.designer) {
+        const penaltyTaskId = `${task._id}:psd_qc_reject`;
+        const difficulty = task.difficulty || 'Easy';
+        try {
+          await addPenaltyFromTask({
+            userId: task.designer,
+            taskId: penaltyTaskId,
+            type: TaskType.PSDTask,
+            difficulty,
+            note: note || 'PSD QC Rejected'
+          });
+        } catch (penErr) {
+          console.error('[qcPSD] penalty failed:', penErr?.message || penErr);
+        }
+      }
     } else {
+      // === QC Passed: Cộng điểm ===
       const designerId = task.designer;
       const difficulty = task.difficulty || "Easy";
       const listing = await Listing.findOne({ _id: task.listing })
@@ -409,12 +429,13 @@ const qcPSD = async (req, res) => {
       }
       await addPointsFromTask({
         userId: designerId,
-        taskId: listing.asin,
+        taskId: listing?.asin || task._id, // fallback để không lỗi nếu thiếu asin
         type: TaskType.PSDTask,
         difficulty: difficulty,
         note: note
       });
     }
+
     res.json(task);
   } catch (err) {
     res.status(500).json({ error: err.message });
