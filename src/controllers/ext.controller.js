@@ -9,6 +9,8 @@ async function requestExtension(req, res) {
       machineId,
       action = "click",
       label = null,
+      type,
+      payload,
     } = req.body || {};
     if (!shopId || !machineId) {
       return res
@@ -19,20 +21,22 @@ async function requestExtension(req, res) {
     const io = req.app.get("io");
     if (!io) return res.status(500).json({ ok: false, message: "io missing" });
 
-    const jobId = `job_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-    const task = { jobId, type: "IMPORT_ORDERS", payload: {} };
+    const task = { type: type, payload: payload };
 
-    // Phát theo ROOM (extension đã join: shop:..., machine:...)
+    let message =
+      type === "IMPORT_ORDERS"
+        ? "Start import orders ..."
+        : "Start import ads ...";
+
     io.to(`machine:${machineId}`).emit("server:task", task);
 
-    // Ghi 1 log “start import requested”
     await RealtimeLog.create({
       shopId,
       machineId,
       label,
-      action, // 'click' | 'auto'
+      action,
       level: "info",
-      message: `Start import requested → jobId=${jobId}`,
+      message: message,
       ts: new Date(),
     });
 

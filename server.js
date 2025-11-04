@@ -46,7 +46,7 @@ const {
   APORoutes,
   PsdTaskRoutes,
   ideaTaskRoutes,
-  realtimeLogRoutes, // vẫn có thể dùng lại để FE xem /logs (activity)
+  realtimeLogRoutes,
   teamRoutes,
   extRoutes,
   adminSessionRoutes,
