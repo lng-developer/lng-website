@@ -128,9 +128,9 @@ async function getAllWithLogs(req, res) {
     try {
         const {
             from, to, tz = 'Asia/Bangkok',
-            logsLimit = 100,
+            logsLimit = 1000,
             skip = 0,
-            limit = 100,
+            limit = 1000,
             sort = '-range'
         } = req.query;
 
