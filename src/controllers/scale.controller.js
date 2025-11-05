@@ -156,7 +156,7 @@ function normalizeProviderKey(vendorDoc) {
   if (ft.includes("merchize") || nm.includes("merchize")) return "merchize";
   if (ft.includes("printway") || nm.includes("printway")) return "printway";
   if (ft.includes("mangotee") || nm.includes("mangotee")) return "mangotee";
-
+  if (ft.includes("lng") || nm.includes("lng")) return "lng";
   // có thể bổ sung thêm provider khác ở đây
   return null;
 }
@@ -417,6 +417,7 @@ const confirmScaleForItem = async (req, res) => {
 
       try {
         const result = await FulfillmentService.send(order, providerKey);
+        console.log(providerKey);
         return res.json({
           message: result.alreadySent
             ? `Order already sent to ${result.vendorKey}.`
