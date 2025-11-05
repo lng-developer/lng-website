@@ -31,7 +31,7 @@ router.get(
  * @desc Lấy danh sách designer / lead designer / CS
  */
 router.get(
-  "/designers",
+  "/designer",
   authenticateToken,
   authorizeRoles("Admin", "Leader"), // tùy phân quyền
   userController.getAllDesigner

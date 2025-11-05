@@ -133,7 +133,7 @@ async function addPenaltyForScaleReject({
 
   const raw = ScaleRejectPenaltyPoints[asinType] ?? ScaleRejectPenaltyPoints["Normal"];
   const points = -Math.abs(raw); // luôn âm
-  const taskId = `${orderId}:${orderItemId}:qc_reject`;
+  const taskId = `${orderId}:${orderItemId}:QC-Reject`;
 
   const user = await User.findByIdAndUpdate(
     userId,
