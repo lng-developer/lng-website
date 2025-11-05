@@ -33,7 +33,7 @@ router.get(
 router.get(
   "/designer",
   authenticateToken,
-  authorizeRoles("Admin", "Leader"), // tùy phân quyền
+  authorizeRoles("Admin", "Design Leader"), // tùy phân quyền
   userController.getAllDesigner
 );
 
