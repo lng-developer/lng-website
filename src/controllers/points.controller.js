@@ -18,9 +18,9 @@ function canReadUser(user, targetUserId) {
 // POST /points/award
 async function award(req, res) {
     try {
-        const { userId, taskId, points, note } = req.body;
+        const { userId, taskId, points, note, type } = req.body;
         const result = await addPointsFromTask({
-            userId, taskId, points: parseInt(points, 1), note
+            userId, taskId, points: parseInt(points, 1), note, type
         });
         res.json({ success: true, data: result });
     } catch (e) {

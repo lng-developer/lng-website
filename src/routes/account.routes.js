@@ -14,4 +14,6 @@ router.put('/:id', authenticateToken, authorizeRoles('Admin'), accountController
 
 router.delete('/:id', authenticateToken, authorizeRoles('Admin'), accountController.deleteAccount);
 
+router.post('/:id/password/reset-temp', accountController.adminResetTempPassword);
+
 module.exports = router;

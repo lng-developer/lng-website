@@ -1,7 +1,7 @@
 const db = require('../models');
 const Account = db.account;
 const bcrypt = require('bcrypt');
-
+const crypto = require('crypto');
 
 const getAllAccounts = async (req, res) => {
     try {
@@ -75,10 +75,42 @@ const deleteAccount = async (req, res) => {
     }
 };
 
+const adminResetTempPassword = async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    // tạo mật khẩu tạm đơn giản: 10 ký tự
+    const tempPassword = crypto.randomBytes(6).toString('base64url'); // ~10 ký tự
+    const password_hash = await bcrypt.hash(tempPassword, 10);
+
+    const account = await Account.findByIdAndUpdate(
+      id,
+      {
+        password_hash,
+        refresh_token: null,           // đá hết phiên cũ
+        revokeAllBefore: new Date(),   // nếu có trường này
+        must_change_password: true,    // (tuỳ chọn) ép đổi khi login
+      },
+      { new: true }
+    );
+    if (!account) return res.status(404).json({ message: 'Account not found' });
+
+    // TRẢ VỀ mật khẩu tạm ngay để bạn gửi cho user (Zalo, chat nội bộ…)
+    return res.json({
+      message: 'Đã reset mật khẩu tạm. Hãy yêu cầu user đăng nhập và đổi ngay.',
+      username: account.username,
+      temp_password: tempPassword
+    });
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
+};
+
 module.exports = {
     getAllAccounts,
     getAccountById,
     createAccount,
     updateAccount,
-    deleteAccount
+    deleteAccount,
+    adminResetTempPassword
 };
