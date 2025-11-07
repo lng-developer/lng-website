@@ -4,8 +4,9 @@ const merchfox = require('./providers/merchfox');
 const merchize = require('./providers/merchize');
 const printway = require('./providers/printway');
 const mangotee = require('./providers/mangotee'); // <<< NEW
+const lng = require('./providers/lng');
 
-const PROVIDERS = [grabink, merchfox, merchize, printway, mangotee]; // <<< add mangotee
+const PROVIDERS = [grabink, merchfox, merchize, printway, mangotee, lng]; // <<< add mangotee
 const PROVIDER_MAP = new Map(PROVIDERS.map(p => [p.key, p]));
 
 /**
