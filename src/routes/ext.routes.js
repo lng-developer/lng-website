@@ -7,6 +7,8 @@ const upload = multer({ storage: multer.memoryStorage() });
 
 router.post("/command", extController.requestExtension);
 
+router.post("/pull-all", extController.pullAllOrder);
+
 router.get("/online", extController.getClientOnline);
 
 module.exports = router;
