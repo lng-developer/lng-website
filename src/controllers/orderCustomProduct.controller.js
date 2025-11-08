@@ -1259,16 +1259,8 @@ const getFrontendOrders = async (req, res) => {
 const getOrderStatistics = async (req, res) => {
   try {
     const {
-      from,
-      to,
-      search,
-      platform,
-      userNull,
-      noPsd,
-      shippingType,
-      shopName,
-      teamId,
-      openCase
+      from, to, search, platform, userNull, noPsd,
+      shippingType, shopName, teamId, openCase,
     } = req.query;
 
     // ===== RBAC =====
@@ -1277,51 +1269,24 @@ const getOrderStatistics = async (req, res) => {
       isAdmin: /^admin$/i.test(role),
       isSeller: /^seller$/i.test(role),
       isProduction: /^production$/i.test(role),
+      isDesignLeader: /^design[-_\s]?leader$/i.test(role),
     };
-
     if (!Object.values(roles).some(Boolean)) {
-      return res.status(403).json({ message: "Access denied: insufficient permissions" });
+      return res.status(403).json({ message: "Access denied" });
     }
 
-    // ===== VALIDATE IDS =====
+    // ===== VALIDATE IDS & BASE MATCH =====
     const ids = validateIds({ teamId, sellerId: null, userId });
-    if (ids.error) {
-      return res.status(400).json({ message: ids.error });
-    }
+    if (ids.error) return res.status(400).json({ message: ids.error });
 
-    // ===== BUILD INITIAL MATCH =====
-    let initialMatch = buildInitialMatch(ids, roles, userId, userNull);
-
-    // ===== TEAM FILTERING =====
-    // Check if current user is a team leader
-    const Team = db.Team;
-    const User = db.user;
-
-    const team = await Team.findOne({ leaderId: userId }).select("_id").lean();
-
-    // If user is a team leader, remove sellerId constraint
-    if (team && initialMatch.sellerId) {
-      delete initialMatch.sellerId;
-    }
-
-    // Build team member filter if needed
-    let teamMemberIds = null;
-    if (ids.teamObjectId || team) {
-      const targetTeamId = ids.teamObjectId || team._id;
-      const teamUsers = await User.find({ team_id: targetTeamId })
-        .select("_id")
-        .lean();
-      teamMemberIds = teamUsers.map(u => u._id);
-    }
-
-    // ===== BUILD FILTERS =====
+    const baseMatch = buildInitialMatch(ids, roles, userId, userNull);
     const filters = buildFilters({
       statuses: null,
       search,
       openCase,
       from,
       to,
-      isNoCostCenter: null,
+      isNoCostCenter: null,       // <-- để thống kê chủ đề riêng
       financialStatus: null,
       sevenDayAlert: null,
       platform,
@@ -1329,122 +1294,99 @@ const getOrderStatistics = async (req, res) => {
       shippingType,
     });
 
-    // Add team member filter to filters array
-    if (teamMemberIds && teamMemberIds.length > 0) {
-      filters.push({ sellerId: { $in: teamMemberIds } });
+    // ===== TEAM FILTER (nếu là leader) =====
+    const Team = db.Team;
+    const User = db.user;
+    const team = await Team.findOne({ leaderId: userId }).select("_id").lean();
+    if (team && baseMatch.sellerId) delete baseMatch.sellerId;
+    if (ids.teamObjectId || team) {
+      const tId = ids.teamObjectId || team._id;
+      const members = await User.find({ team_id: tId }).select("_id").lean();
+      filters.push({ sellerId: { $in: members.map(u => u._id) } });
     }
 
-    // ===== PRODUCTION VENDOR FILTER =====
+    // ===== PRODUCTION VENDOR (LNG Group) =====
     if (roles.isProduction) {
       const vendorFilter = await buildVendorFilter();
-      if (vendorFilter === null) {
+      if (!vendorFilter) {
         return res.json({
-          all: 0,
-          new: 0,
-          noCostCenter: 0,
-          paymentPending: 0,
-          fulfilled: 0,
-          shipped: 0,
-          cancelled: 0,
-          refund: 0,
-          openCase: 0,
-          invalidAddress: 0,
+          all: 0, new: 0, noCostCenter: 0, paymentPending: 0,
+          fulfilled: 0, shipped: 0, cancelled: 0, refund: 0,
+          openCase: 0, invalidAddress: 0,
         });
       }
       filters.push(vendorFilter);
     }
 
-    // ===== SHOP NAME FILTER =====
+    // ===== SHOP FILTER =====
     if (shopName) {
-      const Shop = db.shop;
-      const resFilter = await Shop.findOne(
-        { name: shopName },
-        { _id: 1 }
-      ).lean();
-      if (resFilter?._id) {
-        filters.push({ shopId: resFilter._id });
-      }
+      const shop = await db.shop.findOne({ name: shopName }).lean();
+      if (shop?._id) filters.push({ shopId: shop._id });
     }
 
-    // ===== BUILD BASE FILTER =====
-    const baseFilter = {};
+    // Gom tất cả filter vào $and
+    const match = { ...baseMatch };
+    if (filters.length) match.$and = filters;
 
-    // Add initialMatch conditions (sellerId, userNull, etc.)
-    if (Object.keys(initialMatch).length > 0) {
-      Object.assign(baseFilter, initialMatch);
-    }
+    // Điều kiện “No Cost Center” PHẢI giống get orders
+    const NO_COST_CENTER = {
+      $and: [
+        {
+          $or: [
+            { base_cost: { $exists: false } },
+            { base_cost: null },
+            { base_cost: 0 },
+          ],
+        },
+        { status: { $ne: "Cancelled" } }, // <-- loại Cancelled
+      ],
+    };
 
-    // Add all other filters with $and
-    if (filters.length > 0) {
-      baseFilter.$and = filters;
-    }
-
-    // ===== COUNT STATISTICS =====
-    const [
-      all,
-      newCount,
-      noCostCenter,
-      paymentPending,
-      fulfillment,
-      shipped,
-      cancelled,
-      refund,
-      openCaseCount,
-      invalidAddressCount,
-    ] = await Promise.all([
-      OrderCustomProduct.countDocuments(baseFilter),
-      OrderCustomProduct.countDocuments({ ...baseFilter, status: "New" }),
-      OrderCustomProduct.countDocuments({
-        ...baseFilter,
-        $and: [
-          {
-            $or: [
-              { base_cost: { $exists: false } },
-              { base_cost: null },
-              { base_cost: 0 },
-            ],
-          },
-          { status: { $ne: "Cancelled" } },
-        ],
-      }),
-      OrderCustomProduct.countDocuments({
-        ...baseFilter,
-        financialStatus: "Pending",
-      }),
-      OrderCustomProduct.countDocuments({ ...baseFilter, status: "Fulfilled" }),
-      OrderCustomProduct.countDocuments({ ...baseFilter, status: "Shipped" }),
-      OrderCustomProduct.countDocuments({ ...baseFilter, status: "Cancelled" }),
-      OrderCustomProduct.countDocuments({ ...baseFilter, status: "Refund" }),
-      OrderCustomProduct.countDocuments({
-        ...baseFilter,
-        case: { $exists: true, $not: { $size: 0 } },
-      }),
-      OrderCustomProduct.countDocuments({
-        ...baseFilter,
-        "address_validation.isValid": false,
-      }),
+    // ===== ONE-TRIP AGGREGATION WITH FACET =====
+    const [stat] = await OrderCustomProduct.aggregate([
+      { $match: match },
+      {
+        $facet: {
+          all: [{ $count: "c" }],
+          new: [{ $match: { status: "New" } }, { $count: "c" }],
+          noCostCenter: [{ $match: NO_COST_CENTER }, { $count: "c" }],
+          paymentPending: [{ $match: { financialStatus: "Pending" } }, { $count: "c" }],
+          fulfilled: [{ $match: { status: "Fulfilled" } }, { $count: "c" }],
+          shipped: [{ $match: { status: "Shipped" } }, { $count: "c" }],
+          cancelled: [{ $match: { status: "Cancelled" } }, { $count: "c" }],
+          refund: [{ $match: { status: "Refund" } }, { $count: "c" }],
+          openCase: [{ $match: { case: { $exists: true, $ne: [] } } }, { $count: "c" }],
+          invalidAddress: [{ $match: { "address_validation.isValid": false } }, { $count: "c" }],
+        },
+      },
+      {
+        $project: {
+          all: { $ifNull: [{ $arrayElemAt: ["$all.c", 0] }, 0] },
+          new: { $ifNull: [{ $arrayElemAt: ["$new.c", 0] }, 0] },
+          noCostCenter: { $ifNull: [{ $arrayElemAt: ["$noCostCenter.c", 0] }, 0] },
+          paymentPending: { $ifNull: [{ $arrayElemAt: ["$paymentPending.c", 0] }, 0] },
+          fulfilled: { $ifNull: [{ $arrayElemAt: ["$fulfilled.c", 0] }, 0] },
+          shipped: { $ifNull: [{ $arrayElemAt: ["$shipped.c", 0] }, 0] },
+          cancelled: { $ifNull: [{ $arrayElemAt: ["$cancelled.c", 0] }, 0] },
+          refund: { $ifNull: [{ $arrayElemAt: ["$refund.c", 0] }, 0] },
+          openCase: { $ifNull: [{ $arrayElemAt: ["$openCase.c", 0] }, 0] },
+          invalidAddress: { $ifNull: [{ $arrayElemAt: ["$invalidAddress.c", 0] }, 0] },
+        },
+      },
     ]);
 
-    res.json({
-      all,
-      new: newCount,
-      noCostCenter,
-      paymentPending,
-      fulfilled: fulfillment,
-      shipped,
-      cancelled,
-      refund,
-      openCase: openCaseCount,
-      invalidAddress: invalidAddressCount,
+    return res.json(stat || {
+      all: 0, new: 0, noCostCenter: 0, paymentPending: 0,
+      fulfilled: 0, shipped: 0, cancelled: 0, refund: 0,
+      openCase: 0, invalidAddress: 0,
     });
-  } catch (error) {
-    console.error("❌ getOrderStatistics error:", error);
-    res.status(500).json({
-      message: "Failed to retrieve order statistics",
-      error: error.message,
-    });
+  } catch (err) {
+    console.error("❌ getOrderStatistics error:", err);
+    res.status(500).json({ message: "Internal Server Error" });
   }
 };
+
+
 
 const updateOrderStatus = async (req, res) => {
   try {
