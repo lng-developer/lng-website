@@ -162,6 +162,51 @@ function buildLineItem(item = {}) {
     };
 }
 
+// --- helper: validate all line items have merchize_sku ---
+function precheckMerchizeSkus(payload) {
+    const bad = [];
+    for (const it of payload.items || []) {
+        // yêu cầu có merchize_sku / product_id tối thiểu
+        if (!it.merchize_sku && !it.product_id && !it.sku) {
+            bad.push({ name: it.name, reason: 'missing merchize_sku/product_id' });
+        }
+    }
+    if (bad.length) {
+        const err = new Error('Missing SKU for some items');
+        err.code = 'MISSING_SKU';
+        err.details = bad;
+        throw err;
+    }
+}
+
+// --- helper: treat 200 but vendor rejects as an error ---
+function assertMerchizeAccepted(resp) {
+    const data = resp?.data ?? {};
+
+    // Merchize thường có { success: false, message: "Invalid Merchize SKU: ..." }
+    const successField = typeof data.success === 'boolean' ? data.success : undefined;
+
+    // fallback: nếu có field errors hoặc message chứa "invalid"/"error"
+    const hasErrors = Array.isArray(data.errors) && data.errors.length > 0;
+    const msg = (data.message || '').toString();
+
+    const looksBad =
+        successField === false ||
+        hasErrors ||
+        /invalid|error|not\s*found|duplicate/i.test(msg);
+
+    if (looksBad) {
+        const err = new Error(
+            `Merchize rejected order: ${msg || 'Unknown error'}`
+        );
+        err.code = 'VENDOR_REJECTED';
+        err.vendor = 'merchize';
+        err.response = data; // để controller ghi log vào vendor_submissions
+        throw err;
+    }
+    return data;
+}
+
 async function send(orderDoc, options = {}) {
     const orderObj =
         typeof orderDoc?.toObject === 'function'
@@ -169,8 +214,7 @@ async function send(orderDoc, options = {}) {
             : orderDoc;
 
     const payload = buildPayload(orderObj, options);
-    console.log("Payload: ", payload);
-
+    console.log('Payload:', JSON.stringify(payload));
 
     if (!payload.items?.length) {
         const err = new Error('No items matching allowed statuses to send.');
@@ -186,6 +230,8 @@ async function send(orderDoc, options = {}) {
         err.code = 'NO_PRINT_FILES';
         throw err;
     }
+
+    precheckMerchizeSkus(payload);
 
     const baseURL =
         process.env.MERCHIZE_BASE_URL ||
@@ -204,12 +250,22 @@ async function send(orderDoc, options = {}) {
     };
 
     const resp = await axios.post(endpoint, payload, { headers });
+
+    // Giữ nguyên check HTTP, nhưng QUAN TRỌNG: kiểm tra body
     if (resp.status >= 300) {
         throw new Error(`Merchize responded with status ${resp.status}`);
     }
 
-    const externalId = resp.data?.id || resp.data?.order_id || resp.data?.data?.order_id || null;
-    return { data: resp.data, externalId };
+    const data = assertMerchizeAccepted(resp); // <-- sẽ throw nếu success=false
+    const externalId =
+        data?.id || data?.order_id || data?.data?.order_id || null;
+
+    return {
+        vendorKey: 'merchize',
+        alreadySent: false,
+        response: data,
+        externalId,
+    };
 }
 
 module.exports = {
