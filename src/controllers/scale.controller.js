@@ -1012,6 +1012,7 @@ const getScaleListForDesign = async (req, res) => {
       shopName,
       pngStatus,
       asin_type,
+      // NEW: chỉ lấy các order "Unassigned" khi = "true"
       unassigned = "", // "" | "true"
     } = req.query;
 
@@ -1033,7 +1034,7 @@ const getScaleListForDesign = async (req, res) => {
     };
 
     // ===== RBAC =====
-    const userRole = req.user?.role;
+    const userRole = req.user?.role; // string hoặc array
     const userId = req.user?.userId || "";
 
     const isAdmin = /^admin$/i.test(userRole);
@@ -1063,8 +1064,10 @@ const getScaleListForDesign = async (req, res) => {
       if (!mongoose.Types.ObjectId.isValid(userId)) {
         return res.status(400).json({ message: "Invalid user id in token" });
       }
+      // Designer chỉ xem order đã được assign cho chính họ
       initialMatch.scaleId = new mongoose.Types.ObjectId(userId);
     }
+    // Admin + Design Leader xem tất cả
 
     // ===== Base pipeline =====
     const pipeline = [
@@ -1106,12 +1109,12 @@ const getScaleListForDesign = async (req, res) => {
       // Filter shopName
       ...(shopName && shopName.trim()
         ? [
-            {
-              $match: {
-                "shop.name": { $regex: new RegExp(shopName.trim(), "i") },
-              },
+          {
+            $match: {
+              "shop.name": { $regex: new RegExp(shopName.trim(), "i") },
             },
-          ]
+          },
+        ]
         : []),
 
       // Filter search
@@ -1218,7 +1221,24 @@ const getScaleListForDesign = async (req, res) => {
       );
     }
 
-    // ===== FIX: Add fields TRƯỚC KHI filter =====
+    // ===== Unassigned filter (cấp ORDER) =====
+    // - unassigned === "true" => chỉ lấy order chưa có scaleId (missing/null/"")
+    //   hoặc assignment_status === "Unassigned"
+    // - Với designer: bỏ qua filter này để không xung đột với initialMatch.scaleId = userId
+    if (!isDesigner && String(unassigned || "").toLowerCase() === "true") {
+      pipeline.push({
+        $match: {
+          $or: [
+            { scaleId: { $exists: false } },
+            { scaleId: null },
+            { scaleId: "" },
+            { assignment_status: "Unassigned" }, // nếu có field này
+          ],
+        },
+      });
+    }
+
+    // ===== Bucket status =====
     pipeline.push({
       $addFields: {
         hasPendingItem: {
@@ -1230,15 +1250,6 @@ const getScaleListForDesign = async (req, res) => {
             },
           },
         },
-        // Đánh dấu order có phải Unassigned không
-        isUnassigned: {
-          $or: [
-            { $not: ["$scaleId"] },
-            { $eq: ["$scaleId", null] },
-            { $eq: ["$scaleId", ""] },
-            { $eq: ["$assignment_status", "Unassigned"] },
-          ],
-        },
         overall_status_bucket: {
           $let: {
             vars: { s: { $ifNull: ["$scale_overall_status", "Need Scale"] } },
@@ -1248,16 +1259,6 @@ const getScaleListForDesign = async (req, res) => {
       },
     });
 
-    // ===== FIX: Unassigned filter - áp dụng SAU khi có isUnassigned =====
-    const wantUnassignedOnly = !isDesigner && String(unassigned || "").toLowerCase() === "true";
-    
-    if (wantUnassignedOnly) {
-      pipeline.push({
-        $match: { isUnassigned: true },
-      });
-    }
-
-    // ===== Scale status filter =====
     let onlyPending = false;
     if (scale_status && String(scale_status).trim() !== "") {
       if (/^all$/i.test(scale_status.trim())) {
@@ -1282,18 +1283,14 @@ const getScaleListForDesign = async (req, res) => {
         }
       }
     } else {
-      // FIX: Nếu đang filter unassigned thì KHÔNG cần filter thêm status
-      if (!wantUnassignedOnly) {
-        pipeline.push({
-          $match: {
-            overall_status_bucket: {
-              $in: ["Need Scale", "Pending", "Sent", "QC Rejected"],
-            },
+      pipeline.push({
+        $match: {
+          overall_status_bucket: {
+            $in: ["Need Scale", "Pending", "Sent", "QC Rejected"],
           },
-        });
-      }
+        },
+      });
     }
-    
     if (onlyPending) pipeline.push({ $match: { hasPendingItem: true } });
 
     // Join Case
@@ -1420,10 +1417,10 @@ const getScaleListForDesign = async (req, res) => {
           listingId: item.listingId,
           listing: ldoc
             ? {
-                asin_type: ldoc.asin_type || null,
-                product_image: ldoc.product_image || null,
-                psd: ldoc.psd || null,
-              }
+              asin_type: ldoc.asin_type || null,
+              product_image: ldoc.product_image || null,
+              psd: ldoc.psd || null,
+            }
             : null,
         };
       });
@@ -1447,17 +1444,17 @@ const getScaleListForDesign = async (req, res) => {
         scale_overall_status: order.scale_overall_status,
         seller: order.seller
           ? {
-              _id: order.seller._id,
-              full_name: order.seller.full_name,
-              email: order.seller.email,
-            }
+            _id: order.seller._id,
+            full_name: order.seller.full_name,
+            email: order.seller.email,
+          }
           : null,
         scale_by: order.scale_by
           ? {
-              _id: order.scale_by._id,
-              full_name: order.scale_by.full_name,
-              email: order.scale_by.email,
-            }
+            _id: order.scale_by._id,
+            full_name: order.scale_by.full_name,
+            email: order.scale_by.email,
+          }
           : null,
       };
     });
@@ -1756,7 +1753,7 @@ async function getScaleStatisticsForDesign(req, res) {
       timeseries = "false",
       pngStatus,
       asin_type,
-      unassigned = "", // "" | "true"
+      unassigned = "",
     } = req.query;
 
     const KNOWN = [
@@ -1829,12 +1826,12 @@ async function getScaleStatisticsForDesign(req, res) {
       { $unwind: { path: "$shop", preserveNullAndEmptyArrays: true } },
       ...(shopName && shopName.trim()
         ? [
-          {
-            $match: {
-              "shop.name": { $regex: new RegExp(shopName.trim(), "i") },
+            {
+              $match: {
+                "shop.name": { $regex: new RegExp(shopName.trim(), "i") },
+              },
             },
-          },
-        ]
+          ]
         : []),
 
       // Filter search
@@ -1923,7 +1920,7 @@ async function getScaleStatisticsForDesign(req, res) {
       );
     }
 
-    // ===== bucket & counts =====
+    // ===== FIX: Thêm isUnassigned và bucket TRƯỚC =====
     basePipeline.push({
       $addFields: {
         hasPendingItem: {
@@ -1935,13 +1932,6 @@ async function getScaleStatisticsForDesign(req, res) {
             },
           },
         },
-        overall_status_bucket: {
-          $let: {
-            vars: { s: { $ifNull: ["$scale_overall_status", "Need Scale"] } },
-            in: { $cond: [{ $in: ["$$s", KNOWN] }, "$$s", "Other"] },
-          },
-        },
-        // NEW: đánh dấu Unassigned
         isUnassigned: {
           $or: [
             { $not: ["$scaleId"] },
@@ -1950,8 +1940,35 @@ async function getScaleStatisticsForDesign(req, res) {
             { $eq: ["$assignment_status", "Unassigned"] },
           ],
         },
+        overall_status_bucket: {
+          $let: {
+            vars: { s: { $ifNull: ["$scale_overall_status", "Need Scale"] } },
+            in: { $cond: [{ $in: ["$$s", KNOWN] }, "$$s", "Other"] },
+          },
+        },
       },
     });
+
+    // ===== FIX: Filter unassigned nếu cần =====
+    const wantUnassignedOnly = !isDesigner && String(unassigned || "").toLowerCase() === "true";
+    
+    if (wantUnassignedOnly) {
+      basePipeline.push({
+        $match: { isUnassigned: true },
+      });
+    }
+
+    // ===== FIX: CHỈ đếm orders có status hợp lệ (loại bỏ Cancelled, etc.) =====
+    // Giống logic default của List API
+    if (!wantUnassignedOnly) {
+      basePipeline.push({
+        $match: {
+          overall_status_bucket: {
+            $in: ["Need Scale", "Pending", "Sent", "QC Rejected"],
+          },
+        },
+      });
+    }
 
     const overallPipeline = [
       ...basePipeline,
@@ -2007,7 +2024,7 @@ async function getScaleStatisticsForDesign(req, res) {
 
     const normalizeCounts = (c = {}) => {
       const counts = {
-        Unassigned: c["Unassigned"] || 0, // NEW
+        Unassigned: c["Unassigned"] || 0,
         "Need Scale": c["Need Scale"] || 0,
         Pending: c["Pending"] || 0,
         Ready: c["Ready"] || 0,
@@ -2026,7 +2043,7 @@ async function getScaleStatisticsForDesign(req, res) {
 
     const overall = {
       totalOrders: overallRaw?.totalOrders || 0,
-      totalUnassigned: overallRaw?.totalUnassigned || 0, // NEW
+      totalUnassigned: overallRaw?.totalUnassigned || 0,
       counts: normalizeCounts(overallRaw?.counts || {}),
     };
 
@@ -2039,6 +2056,7 @@ async function getScaleStatisticsForDesign(req, res) {
     });
   }
 }
+
 
 /**
  * CS cập nhật ghi chú cho 1 item
