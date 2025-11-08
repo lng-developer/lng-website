@@ -1256,30 +1256,77 @@ const getOrderStatistics = async (req, res) => {
       noPsd,
       shippingType,
       shopName,
+      teamId,
       openCase
     } = req.query;
 
     // ===== RBAC =====
-    const role = req.user?.role || "";
-    const userId = req.user?.userId || "";
-    const isAdmin = /^admin$/i.test(role);
-    const isSeller = /^seller$/i.test(role);
-    const isProduction = /^production$/i.test(role);
+    const { role = "", userId = "" } = req.user || {};
+    const roles = {
+      isAdmin: /^admin$/i.test(role),
+      isSeller: /^seller$/i.test(role),
+      isProduction: /^production$/i.test(role),
+    };
 
-    if (!isAdmin && !isSeller && !isProduction) {
-      return res
-        .status(403)
-        .json({ message: "Access denied: insufficient permissions" });
+    if (!Object.values(roles).some(Boolean)) {
+      return res.status(403).json({ message: "Access denied: insufficient permissions" });
     }
 
-    const filters = [];
+    // ===== VALIDATE IDS =====
+    const ids = validateIds({ teamId, sellerId: null, userId });
+    if (ids.error) {
+      return res.status(400).json({ message: ids.error });
+    }
 
-    // Production role => stats only for vendor "LNG Groups"
-    if (isProduction) {
-      const vpIds = await getVendorProductIdsByVendorName("LNG Group");
-      console.log("getOrderStatistics: production vpIds length:", vpIds.length);
+    // ===== BUILD INITIAL MATCH =====
+    let initialMatch = buildInitialMatch(ids, roles, userId, userNull);
 
-      if (!vpIds || vpIds.length === 0) {
+    // ===== TEAM FILTERING =====
+    // Check if current user is a team leader
+    const Team = db.Team;
+    const User = db.user;
+    
+    const team = await Team.findOne({ leaderId: userId }).select("_id").lean();
+    
+    // If user is a team leader, remove sellerId constraint
+    if (team && initialMatch.sellerId) {
+      delete initialMatch.sellerId;
+    }
+
+    // Build team member filter if needed
+    let teamMemberIds = null;
+    if (ids.teamObjectId || team) {
+      const targetTeamId = ids.teamObjectId || team._id;
+      const teamUsers = await User.find({ team_id: targetTeamId })
+        .select("_id")
+        .lean();
+      teamMemberIds = teamUsers.map(u => u._id);
+    }
+
+    // ===== BUILD FILTERS =====
+    const filters = buildFilters({
+      statuses: null,
+      search,
+      openCase,
+      from,
+      to,
+      isNoCostCenter: null,
+      financialStatus: null,
+      sevenDayAlert: null,
+      platform,
+      noPsd,
+      shippingType,
+    });
+
+    // Add team member filter to filters array
+    if (teamMemberIds && teamMemberIds.length > 0) {
+      filters.push({ sellerId: { $in: teamMemberIds } });
+    }
+
+    // ===== PRODUCTION VENDOR FILTER =====
+    if (roles.isProduction) {
+      const vendorFilter = await buildVendorFilter();
+      if (vendorFilter === null) {
         return res.json({
           all: 0,
           new: 0,
@@ -1290,94 +1337,38 @@ const getOrderStatistics = async (req, res) => {
           cancelled: 0,
           refund: 0,
           openCase: 0,
+          invalidAddress: 0,
         });
       }
-
-      const vpIdsStr = vpIds.map((id) => String(id));
-      const vpIdsObj = vpIdsStr
-        .filter((s) => mongoose.Types.ObjectId.isValid(s))
-        .map((s) => new mongoose.Types.ObjectId(s));
-
-      filters.push({
-        $or: [
-          { "items.cost_breakdown.vendorProductId": { $in: vpIdsStr } },
-          { "items.cost_breakdown.vendorProductId": { $in: vpIdsObj } },
-        ],
-      });
+      filters.push(vendorFilter);
     }
 
-    // Seller only their orders (unless production)
-    if (isSeller && !isProduction) {
-      if (!mongoose.Types.ObjectId.isValid(userId)) {
-        return res.status(400).json({ message: "Invalid user id in token" });
-      }
-      filters.push({ sellerId: new mongoose.Types.ObjectId(userId) });
-    }
-
-    // Admin: userNull
-    if (isAdmin && userNull === "true") {
-      filters.push({ sellerId: { $in: [null, undefined] } });
-    }
-
-    if (from && to) {
-      if (isNaN(Date.parse(from)) || isNaN(Date.parse(to))) {
-        return res
-          .status(400)
-          .json({ message: "Invalid date format in from or to" });
-      }
-      filters.push({
-        purchase_date: { $gte: new Date(from), $lte: new Date(to) },
-      });
-    }
-
-    if (search) {
-      const keyword = new RegExp(search, "i");
-      filters.push({
-        $or: [
-          { orderId: keyword },
-          { "customer_infor.name": keyword },
-          { "items.sku": keyword },
-          { "items.asin": keyword },
-        ],
-      });
-    }
-
-    if (platform) filters.push({ platform });
-
-    if (noPsd === "true")
-      filters.push({ "items.snapshotImage": { $in: [null, ""] } });
-
-    if (openCase === "true")
-      filters.push({ case: { $exists: true, $not: { $size: 0 } } });
-
-    if (shippingType && shippingType.trim() !== "") {
-      const validShippingTypes = [
-        "Second Day",
-        "Ground",
-        "Overnight",
-        "Economy",
-        "Standard",
-        "Expedited",
-      ];
-      const types = shippingType
-        .split(",")
-        .map((t) => t.trim())
-        .filter((t) => validShippingTypes.includes(t));
-      if (types.length === 1) filters.push({ shipping_type: types[0] });
-      else if (types.length > 1)
-        filters.push({ shipping_type: { $in: types } });
-    }
-
+    // ===== SHOP NAME FILTER =====
     if (shopName) {
+      const Shop = db.shop;
       const resFilter = await Shop.findOne(
         { name: shopName },
         { _id: 1 }
       ).lean();
-      if (resFilter?._id) filters.push({ shopId: resFilter._id });
+      if (resFilter?._id) {
+        filters.push({ shopId: resFilter._id });
+      }
     }
 
-    const baseFilter = filters.length > 0 ? { $and: filters } : {};
+    // ===== BUILD BASE FILTER =====
+    const baseFilter = {};
+    
+    // Add initialMatch conditions (sellerId, userNull, etc.)
+    if (Object.keys(initialMatch).length > 0) {
+      Object.assign(baseFilter, initialMatch);
+    }
+    
+    // Add all other filters with $and
+    if (filters.length > 0) {
+      baseFilter.$and = filters;
+    }
 
+    // ===== COUNT STATISTICS =====
     const [
       all,
       newCount,
@@ -1410,7 +1401,7 @@ const getOrderStatistics = async (req, res) => {
       }),
       OrderCustomProduct.countDocuments({
         ...baseFilter,
-        "address_validation.isValid": false, // count invalid addresses
+        "address_validation.isValid": false,
       }),
     ]);
 

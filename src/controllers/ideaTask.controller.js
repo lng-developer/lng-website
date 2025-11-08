@@ -1,4 +1,5 @@
 const db = require('../models');
+const mongoose = require('mongoose');
 const IdeaTask = db.IdeaTask; // export trong models/index.js
 const { uploadBufferToWasabi, getSignedUrlForKey } = require('../utils/wasabi');
 const multer = require('multer');
@@ -82,37 +83,46 @@ const buildIdeaPsdKey = (ideaId, filename) => {
 };
 
 function buildFilterFromQuery(req) {
-    const { status, difficulty, assignee, from, to, search, mine } = req.query;
-
+    const { status, difficulty, assignee, from, to, search } = req.query;
     const filter = {};
-    if (status) filter.status = status;
-    if (difficulty) filter.difficulty = Number(difficulty);
-    if (assignee) filter['assignedTo.userId'] = assignee;
-    if (from && to) filter.createdAt = { $gte: new Date(from), $lte: new Date(to) };
-    if (search) filter.$text = { $search: search };
 
+    if (status) filter.status = status;
+    if (difficulty) filter.difficulty = difficulty;
+    if (assignee) filter['assignedTo'] = new mongoose.Types.ObjectId(assignee);
+        if (from && to) {
+        filter.createdAt = {
+            $gte: new Date(from),
+            $lte: new Date(to)
+        };
+    }
+    
+    if (search) filter.$text = { $search: search };
     const r = req.user?.role;
     const isAdmin = hasRole(r, 'Admin');
     const isDL = hasRole(r, 'Design Leader');
     const isDesigner = hasRole(r, 'Designer');
-    const me = req.user?.userId || '';
-
-    if (!isAdmin && !isDL) {
-        if (isDesigner) {
-            filter.$or = [{ 'assignedTo.userId': me }];
-        } else {
-            filter.$or = [{ 'createdBy.userId': me }];
-        }
+    const me = req.user?.userId;
+    const meObjectId = new mongoose.Types.ObjectId(me);
+    if (isAdmin) {
+        return filter;
     }
 
-    if (mine === 'true' && me) {
-        filter.$or = [
-            ...(filter.$or || []),
-            { 'createdBy.userId': me },
-            { 'assignedTo.userId': me },
-        ];
+    const orConditions = [];
+
+    if (isDL) {
+        orConditions.push(
+            { 'createdBy': meObjectId },
+            { 'assignedTo._id': meObjectId }
+        );
+    } else if (isDesigner) {
+        orConditions.push({ 'assignedTo': meObjectId });
+    } else {
+        orConditions.push({ 'createdBy': meObjectId });
     }
 
+    if (orConditions.length > 0) {
+        filter.$or = orConditions;
+    }
     return filter;
 }
 
@@ -133,7 +143,6 @@ const getAllIdeaTasks = async (req, res) => {
         const p = Math.max(1, Number(page));
         const limit = Math.max(1, Math.min(200, Number(perPage)));
         const skip = (p - 1) * limit;
-
         const [total, data] = await Promise.all([
             IdeaTask.countDocuments(filter),
             IdeaTask.find(filter)
@@ -171,22 +180,6 @@ const getAllIdeaTasks = async (req, res) => {
 const getIdeaTaskStatistics = async (req, res) => {
     try {
         let filter = buildFilterFromQuery(req);
-
-        const r = req.user?.role;
-        const isAdmin = hasRole(r, 'Admin');
-        const isDL = hasRole(r, 'Design Leader');
-        const me = req.user?.userId || '';
-
-        if (!isAdmin && !isDL) {
-            filter = {
-                ...filter,
-                $or: [
-                    { 'createdBy.userId': me },
-                    { 'assignedTo.userId': me },
-                ],
-            };
-        }
-
         const raw = await IdeaTask.aggregate([
             { $match: filter },
             { $group: { _id: '$status', count: { $sum: 1 } } },
