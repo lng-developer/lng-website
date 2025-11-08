@@ -1012,7 +1012,6 @@ const getScaleListForDesign = async (req, res) => {
       shopName,
       pngStatus,
       asin_type,
-      // NEW: chỉ lấy các order "Unassigned" khi = "true"
       unassigned = "", // "" | "true"
     } = req.query;
 
@@ -1034,7 +1033,7 @@ const getScaleListForDesign = async (req, res) => {
     };
 
     // ===== RBAC =====
-    const userRole = req.user?.role; // string hoặc array
+    const userRole = req.user?.role;
     const userId = req.user?.userId || "";
 
     const isAdmin = /^admin$/i.test(userRole);
@@ -1064,10 +1063,8 @@ const getScaleListForDesign = async (req, res) => {
       if (!mongoose.Types.ObjectId.isValid(userId)) {
         return res.status(400).json({ message: "Invalid user id in token" });
       }
-      // Designer chỉ xem order đã được assign cho chính họ
       initialMatch.scaleId = new mongoose.Types.ObjectId(userId);
     }
-    // Admin + Design Leader xem tất cả
 
     // ===== Base pipeline =====
     const pipeline = [
@@ -1109,12 +1106,12 @@ const getScaleListForDesign = async (req, res) => {
       // Filter shopName
       ...(shopName && shopName.trim()
         ? [
-          {
-            $match: {
-              "shop.name": { $regex: new RegExp(shopName.trim(), "i") },
+            {
+              $match: {
+                "shop.name": { $regex: new RegExp(shopName.trim(), "i") },
+              },
             },
-          },
-        ]
+          ]
         : []),
 
       // Filter search
@@ -1221,24 +1218,7 @@ const getScaleListForDesign = async (req, res) => {
       );
     }
 
-    // ===== Unassigned filter (cấp ORDER) =====
-    // - unassigned === "true" => chỉ lấy order chưa có scaleId (missing/null/"")
-    //   hoặc assignment_status === "Unassigned"
-    // - Với designer: bỏ qua filter này để không xung đột với initialMatch.scaleId = userId
-    if (!isDesigner && String(unassigned || "").toLowerCase() === "true") {
-      pipeline.push({
-        $match: {
-          $or: [
-            { scaleId: { $exists: false } },
-            { scaleId: null },
-            { scaleId: "" },
-            { assignment_status: "Unassigned" }, // nếu có field này
-          ],
-        },
-      });
-    }
-
-    // ===== Bucket status =====
+    // ===== FIX: Add fields TRƯỚC KHI filter =====
     pipeline.push({
       $addFields: {
         hasPendingItem: {
@@ -1250,6 +1230,15 @@ const getScaleListForDesign = async (req, res) => {
             },
           },
         },
+        // Đánh dấu order có phải Unassigned không
+        isUnassigned: {
+          $or: [
+            { $not: ["$scaleId"] },
+            { $eq: ["$scaleId", null] },
+            { $eq: ["$scaleId", ""] },
+            { $eq: ["$assignment_status", "Unassigned"] },
+          ],
+        },
         overall_status_bucket: {
           $let: {
             vars: { s: { $ifNull: ["$scale_overall_status", "Need Scale"] } },
@@ -1259,6 +1248,16 @@ const getScaleListForDesign = async (req, res) => {
       },
     });
 
+    // ===== FIX: Unassigned filter - áp dụng SAU khi có isUnassigned =====
+    const wantUnassignedOnly = !isDesigner && String(unassigned || "").toLowerCase() === "true";
+    
+    if (wantUnassignedOnly) {
+      pipeline.push({
+        $match: { isUnassigned: true },
+      });
+    }
+
+    // ===== Scale status filter =====
     let onlyPending = false;
     if (scale_status && String(scale_status).trim() !== "") {
       if (/^all$/i.test(scale_status.trim())) {
@@ -1283,14 +1282,18 @@ const getScaleListForDesign = async (req, res) => {
         }
       }
     } else {
-      pipeline.push({
-        $match: {
-          overall_status_bucket: {
-            $in: ["Need Scale", "Pending", "Sent", "QC Rejected"],
+      // FIX: Nếu đang filter unassigned thì KHÔNG cần filter thêm status
+      if (!wantUnassignedOnly) {
+        pipeline.push({
+          $match: {
+            overall_status_bucket: {
+              $in: ["Need Scale", "Pending", "Sent", "QC Rejected"],
+            },
           },
-        },
-      });
+        });
+      }
     }
+    
     if (onlyPending) pipeline.push({ $match: { hasPendingItem: true } });
 
     // Join Case
@@ -1417,10 +1420,10 @@ const getScaleListForDesign = async (req, res) => {
           listingId: item.listingId,
           listing: ldoc
             ? {
-              asin_type: ldoc.asin_type || null,
-              product_image: ldoc.product_image || null,
-              psd: ldoc.psd || null,
-            }
+                asin_type: ldoc.asin_type || null,
+                product_image: ldoc.product_image || null,
+                psd: ldoc.psd || null,
+              }
             : null,
         };
       });
@@ -1444,17 +1447,17 @@ const getScaleListForDesign = async (req, res) => {
         scale_overall_status: order.scale_overall_status,
         seller: order.seller
           ? {
-            _id: order.seller._id,
-            full_name: order.seller.full_name,
-            email: order.seller.email,
-          }
+              _id: order.seller._id,
+              full_name: order.seller.full_name,
+              email: order.seller.email,
+            }
           : null,
         scale_by: order.scale_by
           ? {
-            _id: order.scale_by._id,
-            full_name: order.scale_by.full_name,
-            email: order.scale_by.email,
-          }
+              _id: order.scale_by._id,
+              full_name: order.scale_by.full_name,
+              email: order.scale_by.email,
+            }
           : null,
       };
     });
