@@ -23,10 +23,10 @@ const getListings = async (req, res) => {
       page = 1,
       perPage = 10,
       asinType,
-      asinTypeMode, // excludeOutline | onlyOutline
+      asinTypeMode,
       seller,
       platform,
-      sort = "createdAt", // createdAt | updatedAt | total_sales | seller_name
+      sort = "createdAt",
       order = "desc",
       search,
       psdStatus,
@@ -45,14 +45,12 @@ const getListings = async (req, res) => {
     const isSeller = /^seller$/i.test(role);
 
     if (isSeller && !isAdmin) {
-      // Seller chỉ xem listing của mình
       filter.seller = userId;
     } else if (seller) {
-      // Admin (hoặc role khác) có thể lọc seller theo query
       filter.seller = seller;
     }
 
-    // asin_type filters
+    // Filters
     if (asinType) filter.asin_type = asinType;
     if (asinTypeMode === "excludeOutline") {
       filter.asin_type = { $ne: "Outline" };
@@ -63,7 +61,6 @@ const getListings = async (req, res) => {
     if (platform) filter.platform = platform;
     if (store) filter.store = store;
 
-    // psd.status (1 hoặc nhiều)
     if (psdStatus) {
       const statuses = psdStatus
         .split(",")
@@ -76,14 +73,12 @@ const getListings = async (req, res) => {
       }
     }
 
-    // date range cho listing (createdAt)
     if (from || to) {
       filter.createdAt = {};
       if (from) filter.createdAt.$gte = new Date(from);
       if (to) filter.createdAt.$lte = new Date(to);
     }
 
-    // search theo asin hoặc template.design_product
     if (search) {
       const regex = new RegExp(search, "i");
       filter.$or = [{ asin: regex }, { "template.design_product": regex }];
@@ -95,59 +90,151 @@ const getListings = async (req, res) => {
 
     const total = await Listing.countDocuments(filter);
 
-    // sort trên Listing (trừ seller_name và total_sales sẽ xử lý sau)
-    const mongoSort =
-      sort === "seller_name" || sort === "total_sales"
-        ? { createdAt: order === "asc" ? 1 : -1 } // tạm thời; sẽ resort trong memory
-        : { [sort]: order === "asc" ? 1 : -1 };
+    let listings;
 
-    let listings = await Listing.find(filter)
-      .sort(mongoSort)
-      .skip(skip)
-      .limit(limitNum)
-      .populate({ path: "seller", select: "full_name" })
-      .populate({ path: "store", select: "name" })
-      .lean();
+    if (sort === "total_sales") {
+      const allListings = await Listing.find(filter)
+        .populate({ path: "seller", select: "full_name" })
+        .populate({ path: "store", select: "name" })
+        .lean();
 
-    // ===== TÍNH total_sales CHO CÁC LISTING TRONG TRANG HIỆN TẠI =====
-    const listingIds = listings.map((l) => l._id).filter(Boolean);
-    let salesMap = new Map();
+      const listingIds = allListings.map((l) => l._id).filter(Boolean);
+      let salesMap = new Map();
 
-    if (listingIds.length > 0) {
-      const agg = await OrderCustomProduct.aggregate([
-        { $match: { "items.listingId": { $in: listingIds } } },
-        { $unwind: "$items" },
-        { $match: { "items.listingId": { $in: listingIds } } },
-        {
-          $group: {
-            _id: { listingId: "$items.listingId", orderId: "$orderId" },
+      if (listingIds.length > 0) {
+        const agg = await OrderCustomProduct.aggregate([
+          { $match: { "items.listingId": { $in: listingIds } } },
+          { $unwind: "$items" },
+          { $match: { "items.listingId": { $in: listingIds } } },
+          {
+            $group: {
+              _id: { listingId: "$items.listingId", orderId: "$orderId" },
+            },
           },
-        },
-        { $group: { _id: "$_id.listingId", orders: { $sum: 1 } } },
-      ]);
+          { $group: { _id: "$_id.listingId", orders: { $sum: 1 } } },
+        ]);
 
-      salesMap = new Map(agg.map((x) => [String(x._id), x.orders]));
-    }
+        salesMap = new Map(agg.map((x) => [String(x._id), x.orders]));
+      }
 
-    // gán total_sales vào từng listing
-    listings = listings.map((l) => ({
-      ...l,
-      total_sales: salesMap.get(String(l._id)) || 0,
-    }));
+      const listingsWithSales = allListings.map((l) => ({
+        ...l,
+        total_sales: salesMap.get(String(l._id)) || 0,
+      }));
 
-    // ===== RESORT TRONG MEMORY (nếu cần) =====
-    if (sort === "seller_name") {
-      listings.sort((a, b) => {
-        const A = (a.seller?.full_name || "").toString();
-        const B = (b.seller?.full_name || "").toString();
-        return order === "asc" ? A.localeCompare(B) : B.localeCompare(A);
-      });
-    } else if (sort === "total_sales") {
-      listings.sort((a, b) =>
+      listingsWithSales.sort((a, b) =>
         order === "asc"
           ? a.total_sales - b.total_sales
           : b.total_sales - a.total_sales
       );
+
+      // Pagination sau khi sort
+      listings = listingsWithSales.slice(skip, skip + limitNum);
+
+    } else if (sort === "seller_name") {
+      const pipeline = [
+        { $match: filter },
+        {
+          $lookup: {
+            from: "users",
+            localField: "seller",
+            foreignField: "_id",
+            as: "seller",
+          },
+        },
+        { $unwind: { path: "$seller", preserveNullAndEmptyArrays: true } },
+        {
+          $lookup: {
+            from: "stores",
+            localField: "store",
+            foreignField: "_id",
+            as: "store",
+          },
+        },
+        { $unwind: { path: "$store", preserveNullAndEmptyArrays: true } },
+        {
+          $addFields: {
+            seller_name: { $ifNull: ["$seller.full_name", ""] },
+          },
+        },
+        { $sort: { seller_name: order === "asc" ? 1 : -1 } },
+        { $skip: skip },
+        { $limit: limitNum },
+        {
+          $project: {
+            seller: { _id: 1, full_name: 1 },
+            store: { _id: 1, name: 1 },
+            asin: 1,
+            asin_type: 1,
+            platform: 1,
+            psd: 1,
+            template: 1,
+            createdAt: 1,
+            updatedAt: 1,
+          },
+        },
+      ];
+
+      listings = await Listing.aggregate(pipeline);
+
+      const listingIds = listings.map((l) => l._id).filter(Boolean);
+      let salesMap = new Map();
+
+      if (listingIds.length > 0) {
+        const agg = await OrderCustomProduct.aggregate([
+          { $match: { "items.listingId": { $in: listingIds } } },
+          { $unwind: "$items" },
+          { $match: { "items.listingId": { $in: listingIds } } },
+          {
+            $group: {
+              _id: { listingId: "$items.listingId", orderId: "$orderId" },
+            },
+          },
+          { $group: { _id: "$_id.listingId", orders: { $sum: 1 } } },
+        ]);
+
+        salesMap = new Map(agg.map((x) => [String(x._id), x.orders]));
+      }
+
+      listings = listings.map((l) => ({
+        ...l,
+        total_sales: salesMap.get(String(l._id)) || 0,
+      }));
+
+    } else {
+      const mongoSort = { [sort]: order === "asc" ? 1 : -1 };
+
+      listings = await Listing.find(filter)
+        .sort(mongoSort)
+        .skip(skip)
+        .limit(limitNum)
+        .populate({ path: "seller", select: "full_name" })
+        .populate({ path: "store", select: "name" })
+        .lean();
+
+      const listingIds = listings.map((l) => l._id).filter(Boolean);
+      let salesMap = new Map();
+
+      if (listingIds.length > 0) {
+        const agg = await OrderCustomProduct.aggregate([
+          { $match: { "items.listingId": { $in: listingIds } } },
+          { $unwind: "$items" },
+          { $match: { "items.listingId": { $in: listingIds } } },
+          {
+            $group: {
+              _id: { listingId: "$items.listingId", orderId: "$orderId" },
+            },
+          },
+          { $group: { _id: "$_id.listingId", orders: { $sum: 1 } } },
+        ]);
+
+        salesMap = new Map(agg.map((x) => [String(x._id), x.orders]));
+      }
+
+      listings = listings.map((l) => ({
+        ...l,
+        total_sales: salesMap.get(String(l._id)) || 0,
+      }));
     }
 
     return res.json({ total, listings, page: pageNum, perPage: limitNum });

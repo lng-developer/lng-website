@@ -1534,16 +1534,30 @@ async function getScaleStatistics(req, res) {
     // CHỈ Seller "thuần" mới bị giới hạn theo sellerId
     const isSellerOnly = isSeller && !(isAdmin || isCS || isDesignLeader);
 
+    if (!mongoose.Types.ObjectId.isValid(userId)) {
+      return res.status(400).json({ message: "Invalid user id in token" });
+    }
+
     // ===== Base match (time range + optional seller filter) =====
     const matchStage = {};
     if (from && to) {
       matchStage.createdAt = { $gte: new Date(from), $lte: new Date(to) };
     }
 
-    if (isSellerOnly) {
-      if (!mongoose.Types.ObjectId.isValid(userId)) {
-        return res.status(400).json({ message: "Invalid user id in token" });
+    if (isCS) {
+      const currentUser = await User.findById(userId).select('team_id').lean();
+      if (!currentUser || !currentUser.team_id) {
+        return res.status(400).json({
+          message: "a CS must have a team"
+        });
       }
+      const teamMemberIds = await User.find(
+        { team_id: currentUser.team_id },
+        { _id: 1 }
+      ).lean();
+      const memberIds = teamMemberIds.map(u => u._id);
+      matchStage.sellerId = { $in: memberIds };
+    } else if (isSellerOnly) {
       matchStage.sellerId = new mongoose.Types.ObjectId(userId);
     }
 
