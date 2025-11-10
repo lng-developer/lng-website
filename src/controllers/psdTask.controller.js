@@ -442,6 +442,51 @@ const qcPSD = async (req, res) => {
   }
 };
 
+const deletePsdTask = async (req, res) => {
+  try {
+    const { taskId } = req.params;
+
+    if (!mongoose.isValidObjectId(taskId)) {
+      return res.status(400).json({ message: "Invalid taskId" });
+    }
+
+    const role = req.user?.role;
+    const userId = req.user?.userId;
+    const isAdmin = hasRole(role, "Admin");
+    const isDesignLeader = hasRole(role, "Design Leader");
+
+    // Chỉ Admin & Design Leader được xóa
+    if (!isAdmin && !isDesignLeader) {
+      return res.status(403).json({ message: "Access denied" });
+    }
+
+    const task = await PsdTask.findById(taskId).lean();
+    if (!task) return res.status(404).json({ message: "Task not found" });
+
+    // Chặn xóa task đã QC Passed (tránh lệch điểm thưởng/kỷ luật)
+    if (task.status === "QC Passed") {
+      return res.status(409).json({
+        message:
+          "Cannot delete a task that has already QC Passed. Please revert/adjust points manually first.",
+      });
+    }
+
+    // Nếu bạn muốn "soft delete" thay vì xóa hẳn DB, dùng update sau:
+    // await PsdTask.updateOne(
+    //   { _id: taskId },
+    //   { $set: { deleted: true, deletedAt: new Date(), deletedBy: userId } }
+    // );
+    // return res.json({ ok: true, softDeleted: true });
+
+    // Hard delete
+    await PsdTask.deleteOne({ _id: taskId });
+
+    return res.json({ ok: true, message: "Task deleted" });
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
+};
+
 module.exports = {
   getTasks,
   requestPSD,
@@ -450,4 +495,5 @@ module.exports = {
   uploadPSD,
   qcPSD,
   getTaskStatistics,
+  deletePsdTask
 };
