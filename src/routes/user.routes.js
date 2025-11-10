@@ -17,6 +17,8 @@ router.get(
   userController.getAllUsers
 );
 
+router.get("/employee-code", userController.getAllEmployeeCodes);
+
 /**
  * @desc Lấy danh sách seller và admin
  */
@@ -71,5 +73,7 @@ router.delete(
  * @desc Lấy thông tin chi tiết 1 user
  */
 router.get("/:id", authenticateToken, userController.getUserById);
+
+
 
 module.exports = router;

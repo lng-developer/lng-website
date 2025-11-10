@@ -73,6 +73,18 @@ const deleteUser = async (req, res) => {
   res.status(204).send();
 };
 
+const getAllEmployeeCodes = async (req, res) => {
+  try {
+    // chỉ lấy field code (hoặc employeeCode) thôi
+    const users = await User.find({}, "employee_id");
+    const codes = users.map(u => u.employee_id).filter(Boolean); // loại bỏ null/undefined
+    res.json(codes);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: "Get employee codes failed", error: err.message });
+  }
+};
+
 module.exports = {
   getAllUsers,
   getUserById,
@@ -81,4 +93,5 @@ module.exports = {
   deleteUser,
   getAllSeller,
   getAllDesigner,
+  getAllEmployeeCodes
 };
