@@ -598,10 +598,18 @@ const getScaleList = async (req, res) => {
       scale_status,
       search,
       shopName,
+      // NEW: param lọc theo asin_type của Listing
       pngStatus, // "true" | "false"
     } = req.query;
 
-    const KNOWN = ["Need Scale", "Pending", "Ready", "Sent", "Failed", "QC Rejected"];
+    const KNOWN = [
+      "Need Scale",
+      "Pending",
+      "Ready",
+      "Sent",
+      "Failed",
+      "QC Rejected",
+    ];
 
     const canon = (s) => {
       const t = String(s || "").trim();
@@ -620,11 +628,18 @@ const getScaleList = async (req, res) => {
     const isDesignLeader = hasRole(userRole, "Design Leader");
     const isDesigner = hasRole(userRole, "Designer");
 
+    // Cho phép Admin, Seller, Customer Service, Design Leader
     if (!(isAdmin || isSeller || isCS || isDesignLeader || isDesigner)) {
-      return res.status(403).json({ message: "Access denied: insufficient permissions" });
+      return res
+        .status(403)
+        .json({ message: "Access denied: insufficient permissions" });
     }
 
-    // Seller "thuần" mới bị giới hạn theo sellerId
+    /**
+     * CHỈ giới hạn theo seller khi là Seller "thuần"
+     * (không có bất kỳ role quyền cao nào khác).
+     * Design Leader phải luôn bypass filter này, kể cả khi tài khoản có Seller.  
+     */
     const isSellerOnly = isSeller && !(isAdmin || isCS || isDesignLeader);
 
     if (!mongoose.Types.ObjectId.isValid(userId)) {
@@ -640,9 +655,14 @@ const getScaleList = async (req, res) => {
     if (isCS) {
       const currentUser = await User.findById(userId).select('team_id').lean();
       if (!currentUser || !currentUser.team_id) {
-        return res.status(400).json({ message: "a CS must have a team" });
+        return res.status(400).json({
+          message: "a CS must have a team"
+        });
       }
-      const teamMemberIds = await User.find({ team_id: currentUser.team_id }, { _id: 1 }).lean();
+      const teamMemberIds = await User.find(
+        { team_id: currentUser.team_id },
+        { _id: 1 }
+      ).lean();
       const memberIds = teamMemberIds.map(u => u._id);
       initialMatch.sellerId = { $in: memberIds };
     } else if (isSellerOnly) {
@@ -677,7 +697,13 @@ const getScaleList = async (req, res) => {
 
       // Filter shopName
       ...(shopName && shopName.trim()
-        ? [{ $match: { "shop.name": { $regex: new RegExp(shopName.trim(), "i") } } }]
+        ? [
+          {
+            $match: {
+              "shop.name": { $regex: new RegExp(shopName.trim(), "i") },
+            },
+          },
+        ]
         : []),
 
       // Filter search (mở rộng thêm seller)
@@ -703,7 +729,9 @@ const getScaleList = async (req, res) => {
       })(),
     ];
 
-    // ===== pngStatus: lọc theo asin_type (Custom Image | Outline)
+    // NEW ===== pngStatus: lọc theo asin_type của Listing (Custom Image | Outline)
+    // Mặc định (pngStatus !== 'true') -> LOẠI TRỪ các order có asin_type 'Custom Image' | 'Outline'
+    // Khi pngStatus === 'true' -> CHỈ LẤY các order này
     const wantPngStatus = String(pngStatus || "false").toLowerCase() === "true";
     pipeline.push(
       {
@@ -726,17 +754,26 @@ const getScaleList = async (req, res) => {
           as: "pngListings",
         },
       },
-      { $addFields: { hasPngAsinType: { $gt: [{ $size: "$pngListings" }, 0] } } },
-      wantPngStatus ? { $match: { hasPngAsinType: true } } : { $match: { hasPngAsinType: { $ne: true } } },
+      {
+        $addFields: { hasPngAsinType: { $gt: [{ $size: "$pngListings" }, 0] } },
+      },
+      wantPngStatus
+        ? { $match: { hasPngAsinType: true } }
+        : { $match: { hasPngAsinType: { $ne: true } } },
       { $unset: "pngListings" }
     );
+    // ===== end NEW
 
-    // Chuẩn hoá bucket + pending
+    // Chuẩn hoá bucket
     pipeline.push({
       $addFields: {
         hasPendingItem: {
           $anyElementTrue: {
-            $map: { input: "$items", as: "it", in: { $eq: ["$$it.scale_status", "Pending"] } },
+            $map: {
+              input: "$items",
+              as: "it",
+              in: { $eq: ["$$it.scale_status", "Pending"] },
+            },
           },
         },
         overall_status_bucket: {
@@ -748,34 +785,22 @@ const getScaleList = async (req, res) => {
       },
     });
 
-    // === NEW: Need Scale CHỈ hiển thị khi có base_cost > 0
-    pipeline.push(
-      {
-        $addFields: {
-          _baseCostValue: { $ifNull: [{ $ifNull: ["$base_cost.total", "$base_cost"] }, 0] },
-          hasBaseCost: { $gt: [{ $ifNull: [{ $ifNull: ["$_baseCostValue", 0] }, 0] }, 0] },
-        },
-      },
-      {
-        $match: {
-          $or: [
-            { overall_status_bucket: { $ne: "Need Scale" } },
-            { $and: [{ overall_status_bucket: "Need Scale" }, { hasBaseCost: true }] },
-          ],
-        },
-      },
-      { $unset: "_baseCostValue" }
-    );
-
-    // 3) Áp filter theo bucket (sau khi đã lọc need scale theo base_cost)
+    // 3) Áp filter theo bucket
     let onlyPending = false;
     if (scale_status && String(scale_status).trim() !== "") {
       if (/^all$/i.test(scale_status.trim())) {
         pipeline.push({
-          $match: { overall_status_bucket: { $in: ["Need Scale", "Pending", "Sent", "QC Rejected"] } },
+          $match: {
+            overall_status_bucket: {
+              $in: ["Need Scale", "Pending", "Sent", "QC Rejected"],
+            },
+          },
         });
       } else {
-        const wanted = String(scale_status).split(",").map(canon).filter(Boolean);
+        const wanted = String(scale_status)
+          .split(",")
+          .map(canon)
+          .filter(Boolean);
         const valid = wanted.filter((v) => KNOWN.includes(v));
         if (valid.length > 0) {
           pipeline.push({ $match: { overall_status_bucket: { $in: valid } } });
@@ -786,14 +811,26 @@ const getScaleList = async (req, res) => {
       }
     } else {
       pipeline.push({
-        $match: { overall_status_bucket: { $in: ["Need Scale", "Pending", "Sent", "QC Rejected"] } },
+        $match: {
+          overall_status_bucket: {
+            $in: ["Need Scale", "Pending", "Sent", "QC Rejected"],
+          },
+        },
       });
     }
-    if (onlyPending) pipeline.push({ $match: { hasPendingItem: true } });
+
+    if (onlyPending) {
+      pipeline.push({ $match: { hasPendingItem: true } });
+    }
 
     // 5) Join Case
     pipeline.push({
-      $lookup: { from: "cases", localField: "case", foreignField: "_id", as: "case" },
+      $lookup: {
+        from: "cases",
+        localField: "case",
+        foreignField: "_id",
+        as: "case",
+      },
     });
 
     // --- Count ---
@@ -807,6 +844,7 @@ const getScaleList = async (req, res) => {
     const limitNum = isAll ? totalCount || 1 : parseInt(perPage, 10) || 10;
     const skip = isAll ? 0 : (pageNum - 1) * limitNum;
 
+    // sort cũ: purchase_date asc → đơn cũ -> mới
     pipeline.push({ $sort: { purchase_date: 1, createdAt: 1 } });
     if (!isAll) pipeline.push({ $skip: skip }, { $limit: limitNum });
 
@@ -814,15 +852,20 @@ const getScaleList = async (req, res) => {
 
     // === Map vendor product name ===
     const vendorIdSet = new Set();
-    for (const o of orders) for (const it of o.items || []) {
-      const vId = it?.cost_breakdown?.vendorProductId;
-      if (vId) vendorIdSet.add(String(vId));
+    for (const o of orders) {
+      for (const it of o.items || []) {
+        const vId = it?.cost_breakdown?.vendorProductId;
+        if (vId) vendorIdSet.add(String(vId));
+      }
     }
 
     let vendorFullNameMap = new Map();
     if (vendorIdSet.size > 0) {
       const idObjs = [];
-      for (const id of vendorIdSet) if (mongoose.Types.ObjectId.isValid(id)) idObjs.push(new mongoose.Types.ObjectId(id));
+      for (const id of vendorIdSet) {
+        if (mongoose.Types.ObjectId.isValid(id))
+          idObjs.push(new mongoose.Types.ObjectId(id));
+      }
       if (idObjs.length > 0) {
         const vps = await VendorProduct.find({ _id: { $in: idObjs } })
           .select("product_name vendor_id")
@@ -839,17 +882,25 @@ const getScaleList = async (req, res) => {
     }
 
     const listingIdSet = new Set();
-    for (const o of orders) for (const it of o.items || []) {
-      const lid = it?.listingId;
-      if (lid) listingIdSet.add(String(lid));
+    for (const o of orders) {
+      for (const it of o.items || []) {
+        const lid = it?.listingId;
+        if (lid) listingIdSet.add(String(lid));
+      }
     }
 
+    // Query Listing 1 lần và map theo _id
     let listingMap = new Map();
     if (listingIdSet.size > 0) {
       const ids = [];
-      for (const id of listingIdSet) if (mongoose.Types.ObjectId.isValid(id)) ids.push(new mongoose.Types.ObjectId(id));
+      for (const id of listingIdSet) {
+        if (mongoose.Types.ObjectId.isValid(id))
+          ids.push(new mongoose.Types.ObjectId(id));
+      }
       if (ids.length > 0) {
-        const listings = await Listing.find({ _id: { $in: ids } }).select("asin_type product_image psd").lean();
+        const listings = await Listing.find({ _id: { $in: ids } })
+          .select("asin_type product_image psd")
+          .lean();
         listingMap = new Map(listings.map((l) => [String(l._id), l]));
       }
     }
@@ -869,7 +920,9 @@ const getScaleList = async (req, res) => {
           ? vendorFullNameMap.get(String(vendorProductId)) || null
           : null;
 
-        const ldoc = item?.listingId ? listingMap.get(String(item.listingId)) : null;
+        const ldoc = item?.listingId
+          ? listingMap.get(String(item.listingId))
+          : null;
 
         return {
           orderItemId: item.orderItemId || null,
@@ -899,7 +952,11 @@ const getScaleList = async (req, res) => {
           qc_note: item.qc_note,
           listingId: item.listingId,
           listing: ldoc
-            ? { asin_type: ldoc.asin_type || null, product_image: ldoc.product_image || null, psd: ldoc.psd || null }
+            ? {
+              asin_type: ldoc.asin_type || null,
+              product_image: ldoc.product_image || null,
+              psd: ldoc.psd || null,
+            }
             : null,
         };
       });
@@ -921,11 +978,14 @@ const getScaleList = async (req, res) => {
         address_validation: order.address_validation?.isValid,
         scale_overall_status: order.scale_overall_status,
         seller: order.seller
-          ? { _id: order.seller._id, full_name: order.seller.full_name, email: order.seller.email }
+          ? {
+            _id: order.seller._id,
+            full_name: order.seller.full_name,
+            email: order.seller.email,
+          }
           : null,
       };
     });
-
     res.json({
       data: result,
       totalCount,
@@ -934,10 +994,11 @@ const getScaleList = async (req, res) => {
     });
   } catch (error) {
     console.error("❌ getScaleList error:", error);
-    res.status(500).json({ message: "Failed to retrieve scale list", error: error.message });
+    res
+      .status(500)
+      .json({ message: "Failed to retrieve scale list", error: error.message });
   }
 };
-
 
 const getScaleListForDesign = async (req, res) => {
   try {
@@ -951,10 +1012,18 @@ const getScaleListForDesign = async (req, res) => {
       shopName,
       pngStatus,
       asin_type,
-      unassigned = "",
+      // NEW: chỉ lấy các order "Unassigned" khi = "true"
+      unassigned = "", // "" | "true"
     } = req.query;
 
-    const KNOWN = ["Need Scale", "Pending", "Ready", "Sent", "Failed", "QC Rejected"];
+    const KNOWN = [
+      "Need Scale",
+      "Pending",
+      "Ready",
+      "Sent",
+      "Failed",
+      "QC Rejected",
+    ];
 
     const canon = (s) => {
       const t = String(s || "").trim();
@@ -975,7 +1044,9 @@ const getScaleListForDesign = async (req, res) => {
     const isCS = hasRole(userRole, "Customer Service");
 
     if (!isAdmin && !isSeller && !isDesigner && !isDesignLeader && !isCS) {
-      return res.status(403).json({ message: "Access denied: insufficient permissions" });
+      return res
+        .status(403)
+        .json({ message: "Access denied: insufficient permissions" });
     }
 
     // ===== Match theo role =====
@@ -993,27 +1064,58 @@ const getScaleListForDesign = async (req, res) => {
       if (!mongoose.Types.ObjectId.isValid(userId)) {
         return res.status(400).json({ message: "Invalid user id in token" });
       }
+      // Designer chỉ xem order đã được assign cho chính họ
       initialMatch.scaleId = new mongoose.Types.ObjectId(userId);
     }
+    // Admin + Design Leader xem tất cả
 
     // ===== Base pipeline =====
     const pipeline = [
       { $match: initialMatch },
 
       // Join shop
-      { $lookup: { from: "shops", localField: "shopId", foreignField: "_id", as: "shop" } },
+      {
+        $lookup: {
+          from: "shops",
+          localField: "shopId",
+          foreignField: "_id",
+          as: "shop",
+        },
+      },
       { $unwind: { path: "$shop", preserveNullAndEmptyArrays: true } },
 
       // populate seller
-      { $lookup: { from: "users", localField: "sellerId", foreignField: "_id", as: "seller" } },
+      {
+        $lookup: {
+          from: "users",
+          localField: "sellerId",
+          foreignField: "_id",
+          as: "seller",
+        },
+      },
       { $unwind: { path: "$seller", preserveNullAndEmptyArrays: true } },
 
-      // populate scale_by
-      { $lookup: { from: "users", localField: "scaleId", foreignField: "_id", as: "scale_by" } },
+      // populate scale_by (user từ scaleId)
+      {
+        $lookup: {
+          from: "users",
+          localField: "scaleId",
+          foreignField: "_id",
+          as: "scale_by",
+        },
+      },
       { $unwind: { path: "$scale_by", preserveNullAndEmptyArrays: true } },
 
       // Filter shopName
-      ...(shopName && shopName.trim() ? [{ $match: { "shop.name": { $regex: new RegExp(shopName.trim(), "i") } } }] : []),
+      ...(shopName && shopName.trim()
+        ? [
+          {
+            $match: {
+              "shop.name": { $regex: new RegExp(shopName.trim(), "i") },
+            },
+          },
+        ]
+        : []),
 
       // Filter search
       ...(() => {
@@ -1039,13 +1141,19 @@ const getScaleListForDesign = async (req, res) => {
 
     // ===== asin_type / pngStatus =====
     const normAsinType = (s) => {
-      const t = String(s || "").trim().toLowerCase();
-      if (t === "custom image" || t === "custom_image" || t === "custom-image") return "Custom Image";
+      const t = String(s || "")
+        .trim()
+        .toLowerCase();
+      if (t === "custom image" || t === "custom_image" || t === "custom-image")
+        return "Custom Image";
       if (t === "outline") return "Outline";
       return null;
     };
 
-    const asinTypesRequested = (asin_type || "").split(",").map((x) => normAsinType(x)).filter(Boolean);
+    const asinTypesRequested = (asin_type || "")
+      .split(",")
+      .map((x) => normAsinType(x))
+      .filter(Boolean);
 
     if (asinTypesRequested.length > 0) {
       pipeline.push(
@@ -1069,12 +1177,17 @@ const getScaleListForDesign = async (req, res) => {
             as: "typeFilteredListings",
           },
         },
-        { $addFields: { hasWantedAsinType: { $gt: [{ $size: "$typeFilteredListings" }, 0] } } },
+        {
+          $addFields: {
+            hasWantedAsinType: { $gt: [{ $size: "$typeFilteredListings" }, 0] },
+          },
+        },
         { $match: { hasWantedAsinType: true } },
         { $unset: "typeFilteredListings" }
       );
     } else {
-      const wantPngStatus = String(pngStatus || "false").toLowerCase() === "true";
+      const wantPngStatus =
+        String(pngStatus || "false").toLowerCase() === "true";
       pipeline.push(
         {
           $lookup: {
@@ -1096,27 +1209,46 @@ const getScaleListForDesign = async (req, res) => {
             as: "pngListings",
           },
         },
-        { $addFields: { hasPngAsinType: { $gt: [{ $size: "$pngListings" }, 0] } } },
-        wantPngStatus ? { $match: { hasPngAsinType: true } } : { $match: { hasPngAsinType: { $ne: true } } },
+        {
+          $addFields: {
+            hasPngAsinType: { $gt: [{ $size: "$pngListings" }, 0] },
+          },
+        },
+        wantPngStatus
+          ? { $match: { hasPngAsinType: true } }
+          : { $match: { hasPngAsinType: { $ne: true } } },
         { $unset: "pngListings" }
       );
     }
 
-    // ===== Add flags & bucket
+    // ===== Unassigned filter (cấp ORDER) =====
+    // - unassigned === "true" => chỉ lấy order chưa có scaleId (missing/null/"")
+    //   hoặc assignment_status === "Unassigned"
+    // - Với designer: bỏ qua filter này để không xung đột với initialMatch.scaleId = userId
+    if (!isDesigner && String(unassigned || "").toLowerCase() === "true") {
+      pipeline.push({
+        $match: {
+          $or: [
+            { scaleId: { $exists: false } },
+            { scaleId: null },
+            { scaleId: "" },
+            { assignment_status: "Unassigned" }, // nếu có field này
+          ],
+        },
+      });
+    }
+
+    // ===== Bucket status =====
     pipeline.push({
       $addFields: {
         hasPendingItem: {
           $anyElementTrue: {
-            $map: { input: "$items", as: "it", in: { $eq: ["$$it.scale_status", "Pending"] } },
+            $map: {
+              input: "$items",
+              as: "it",
+              in: { $eq: ["$$it.scale_status", "Pending"] },
+            },
           },
-        },
-        isUnassigned: {
-          $or: [
-            { $not: ["$scaleId"] },
-            { $eq: ["$scaleId", null] },
-            { $eq: ["$scaleId", ""] },
-            { $eq: ["$assignment_status", "Unassigned"] },
-          ],
         },
         overall_status_bucket: {
           $let: {
@@ -1127,44 +1259,56 @@ const getScaleListForDesign = async (req, res) => {
       },
     });
 
-    // === NEW: Need Scale CHỈ hiển thị khi có base_cost > 0
-    pipeline.push(
-      {
-        $addFields: {
-          _baseCostValue: { $ifNull: [{ $ifNull: ["$base_cost.total", "$base_cost"] }, 0] },
-          hasBaseCost: { $gt: [{ $ifNull: [{ $ifNull: ["$_baseCostValue", 0] }, 0] }, 0] },
-        },
-      },
-      {
-        $match: {
-          $or: [
-            { overall_status_bucket: { $ne: "Need Scale" } },
-            { $and: [{ overall_status_bucket: "Need Scale" }, { hasBaseCost: true }] },
-          ],
-        },
-      },
-      { $unset: "_baseCostValue" }
-    );
-
-    // ===== Unassigned filter (cấp ORDER)
-    const wantUnassignedOnly = !isDesigner && String(unassigned || "").toLowerCase() === "true";
-    if (wantUnassignedOnly) {
-      pipeline.push({ $match: { isUnassigned: true } });
-    }
-
-    // ===== Bucket filter mặc định (trừ khi unassigned-only)
-    if (!wantUnassignedOnly) {
+    let onlyPending = false;
+    if (scale_status && String(scale_status).trim() !== "") {
+      if (/^all$/i.test(scale_status.trim())) {
+        pipeline.push({
+          $match: {
+            overall_status_bucket: {
+              $in: ["Need Scale", "Pending", "Sent", "QC Rejected"],
+            },
+          },
+        });
+      } else {
+        const wanted = String(scale_status)
+          .split(",")
+          .map(canon)
+          .filter(Boolean);
+        const valid = wanted.filter((v) => KNOWN.includes(v));
+        if (valid.length > 0) {
+          pipeline.push({ $match: { overall_status_bucket: { $in: valid } } });
+          onlyPending = valid.length === 1 && valid[0] === "Pending";
+        } else {
+          pipeline.push({ $match: { overall_status_bucket: "__NO_MATCH__" } });
+        }
+      }
+    } else {
       pipeline.push({
-        $match: { overall_status_bucket: { $in: ["Need Scale", "Pending", "Sent", "QC Rejected"] } },
+        $match: {
+          overall_status_bucket: {
+            $in: ["Need Scale", "Pending", "Sent", "QC Rejected"],
+          },
+        },
       });
     }
+    if (onlyPending) pipeline.push({ $match: { hasPendingItem: true } });
 
-    //  count
+    // Join Case
+    pipeline.push({
+      $lookup: {
+        from: "cases",
+        localField: "case",
+        foreignField: "_id",
+        as: "case",
+      },
+    });
+
+    // --- Count ---
     const countPipeline = [...pipeline, { $count: "total" }];
     const countResult = await OrderCustomProduct.aggregate(countPipeline);
     const totalCount = countResult?.[0]?.total || 0;
 
-    //  paginate
+    // --- Paginate ---
     const isAll = String(perPage).toLowerCase() === "all";
     const pageNum = parseInt(page, 10) || 1;
     const limitNum = isAll ? totalCount || 1 : parseInt(perPage, 10) || 10;
@@ -1175,17 +1319,22 @@ const getScaleListForDesign = async (req, res) => {
 
     const orders = await OrderCustomProduct.aggregate(pipeline);
 
-    // === Map vendor + listings
+    // === Map vendor + listings ===
     const vendorIdSet = new Set();
-    for (const o of orders) for (const it of o.items || []) {
-      const vId = it?.cost_breakdown?.vendorProductId;
-      if (vId) vendorIdSet.add(String(vId));
+    for (const o of orders) {
+      for (const it of o.items || []) {
+        const vId = it?.cost_breakdown?.vendorProductId;
+        if (vId) vendorIdSet.add(String(vId));
+      }
     }
 
     let vendorFullNameMap = new Map();
     if (vendorIdSet.size > 0) {
       const idObjs = [];
-      for (const id of vendorIdSet) if (mongoose.Types.ObjectId.isValid(id)) idObjs.push(new mongoose.Types.ObjectId(id));
+      for (const id of vendorIdSet) {
+        if (mongoose.Types.ObjectId.isValid(id))
+          idObjs.push(new mongoose.Types.ObjectId(id));
+      }
       if (idObjs.length > 0) {
         const vps = await VendorProduct.find({ _id: { $in: idObjs } })
           .select("product_name vendor_id")
@@ -1202,22 +1351,29 @@ const getScaleListForDesign = async (req, res) => {
     }
 
     const listingIdSet = new Set();
-    for (const o of orders) for (const it of o.items || []) {
-      const lid = it?.listingId;
-      if (lid) listingIdSet.add(String(lid));
+    for (const o of orders) {
+      for (const it of o.items || []) {
+        const lid = it?.listingId;
+        if (lid) listingIdSet.add(String(lid));
+      }
     }
 
     let listingMap = new Map();
     if (listingIdSet.size > 0) {
       const ids = [];
-      for (const id of listingIdSet) if (mongoose.Types.ObjectId.isValid(id)) ids.push(new mongoose.Types.ObjectId(id));
+      for (const id of listingIdSet) {
+        if (mongoose.Types.ObjectId.isValid(id))
+          ids.push(new mongoose.Types.ObjectId(id));
+      }
       if (ids.length > 0) {
-        const listings = await Listing.find({ _id: { $in: ids } }).select("asin_type product_image psd").lean();
+        const listings = await Listing.find({ _id: { $in: ids } })
+          .select("asin_type product_image psd")
+          .lean();
         listingMap = new Map(listings.map((l) => [String(l._id), l]));
       }
     }
 
-    // === Final mapping
+    // === Final mapping ===
     const result = orders.map((order) => {
       const items = (order.items || []).map((item) => {
         const surfaces = item.version3Data?.customizationInfo?.surfaces || [];
@@ -1233,7 +1389,9 @@ const getScaleListForDesign = async (req, res) => {
           ? vendorFullNameMap.get(String(vendorProductId)) || null
           : null;
 
-        const ldoc = item?.listingId ? listingMap.get(String(item.listingId)) : null;
+        const ldoc = item?.listingId
+          ? listingMap.get(String(item.listingId))
+          : null;
 
         return {
           orderItemId: item.orderItemId || null,
@@ -1258,7 +1416,11 @@ const getScaleListForDesign = async (req, res) => {
           qc_note: item.qc_note,
           listingId: item.listingId,
           listing: ldoc
-            ? { asin_type: ldoc.asin_type || null, product_image: ldoc.product_image || null, psd: ldoc.psd || null }
+            ? {
+              asin_type: ldoc.asin_type || null,
+              product_image: ldoc.product_image || null,
+              psd: ldoc.psd || null,
+            }
             : null,
         };
       });
@@ -1281,10 +1443,18 @@ const getScaleListForDesign = async (req, res) => {
         address_validation: order.address_validation?.isValid,
         scale_overall_status: order.scale_overall_status,
         seller: order.seller
-          ? { _id: order.seller._id, full_name: order.seller.full_name, email: order.seller.email }
+          ? {
+            _id: order.seller._id,
+            full_name: order.seller.full_name,
+            email: order.seller.email,
+          }
           : null,
         scale_by: order.scale_by
-          ? { _id: order.scale_by._id, full_name: order.scale_by.full_name, email: order.scale_by.email }
+          ? {
+            _id: order.scale_by._id,
+            full_name: order.scale_by.full_name,
+            email: order.scale_by.email,
+          }
           : null,
       };
     });
@@ -1297,10 +1467,11 @@ const getScaleListForDesign = async (req, res) => {
     });
   } catch (error) {
     console.error("❌ getScaleListForDesign error:", error);
-    res.status(500).json({ message: "Failed to retrieve scale list", error: error.message });
+    res
+      .status(500)
+      .json({ message: "Failed to retrieve scale list", error: error.message });
   }
 };
-
 
 // === helpers: normalize & check roles ===
 function extractRoles(userRole) {
@@ -1324,9 +1495,24 @@ function hasRole(userRole, roleName) {
 
 async function getScaleStatistics(req, res) {
   try {
-    const { from, to, search, shopName, breakdown, timeseries = "false", pngStatus } = req.query;
+    const {
+      from,
+      to,
+      search,
+      shopName,
+      breakdown,
+      timeseries = "false",
+      pngStatus, // NEW
+    } = req.query;
 
-    const KNOWN = ["Need Scale", "Pending", "Ready", "Sent", "Failed", "QC Rejected"];
+    const KNOWN = [
+      "Need Scale",
+      "Pending",
+      "Ready",
+      "Sent",
+      "Failed",
+      "QC Rejected",
+    ];
 
     // ===== RBAC =====
     const userRole = req.user?.role; // string | array | {roles:[]}
@@ -1338,10 +1524,14 @@ async function getScaleStatistics(req, res) {
     const isDesignLeader = hasRole(userRole, "Design Leader");
     const isDesigner = hasRole(userRole, "Designer");
 
+
     if (!(isAdmin || isSeller || isCS || isDesignLeader || isDesigner)) {
-      return res.status(403).json({ message: "Access denied: insufficient permissions" });
+      return res
+        .status(403)
+        .json({ message: "Access denied: insufficient permissions" });
     }
 
+    // CHỈ Seller "thuần" mới bị giới hạn theo sellerId
     const isSellerOnly = isSeller && !(isAdmin || isCS || isDesignLeader);
 
     if (!mongoose.Types.ObjectId.isValid(userId)) {
@@ -1357,9 +1547,14 @@ async function getScaleStatistics(req, res) {
     if (isCS) {
       const currentUser = await User.findById(userId).select('team_id').lean();
       if (!currentUser || !currentUser.team_id) {
-        return res.status(400).json({ message: "a CS must have a team" });
+        return res.status(400).json({
+          message: "a CS must have a team"
+        });
       }
-      const teamMemberIds = await User.find({ team_id: currentUser.team_id }, { _id: 1 }).lean();
+      const teamMemberIds = await User.find(
+        { team_id: currentUser.team_id },
+        { _id: 1 }
+      ).lean();
       const memberIds = teamMemberIds.map(u => u._id);
       matchStage.sellerId = { $in: memberIds };
     } else if (isSellerOnly) {
@@ -1377,6 +1572,9 @@ async function getScaleStatistics(req, res) {
         { "items.orderItemId": keyword },
         { "customer_infor.email": keyword },
         { "customer_infor.name": keyword },
+        // nếu cần thêm seller.* thì join users và mở comment dưới:
+        // { "seller.full_name": keyword },
+        // { "seller.email": keyword },
       ];
     }
 
@@ -1385,10 +1583,27 @@ async function getScaleStatistics(req, res) {
       { $match: matchStage },
 
       // Join shop
-      { $lookup: { from: "shops", localField: "shopId", foreignField: "_id", as: "shop" } },
+      {
+        $lookup: {
+          from: "shops",
+          localField: "shopId",
+          foreignField: "_id",
+          as: "shop",
+        },
+      },
       { $unwind: { path: "$shop", preserveNullAndEmptyArrays: true } },
 
-      ...(shopName && shopName.trim() ? [{ $match: { "shop.name": { $regex: new RegExp(shopName.trim(), "i") } } }] : []),
+      // (nếu cần search theo seller.*, thêm lookup users và $unwind ở đây)
+
+      ...(shopName && shopName.trim()
+        ? [
+          {
+            $match: {
+              "shop.name": { $regex: new RegExp(shopName.trim(), "i") },
+            },
+          },
+        ]
+        : []),
 
       ...(searchOr ? [{ $match: { $or: searchOr } }] : []),
     ];
@@ -1416,8 +1631,12 @@ async function getScaleStatistics(req, res) {
           as: "pngListings",
         },
       },
-      { $addFields: { hasPngAsinType: { $gt: [{ $size: "$pngListings" }, 0] } } },
-      wantPngStatus ? { $match: { hasPngAsinType: true } } : { $match: { hasPngAsinType: { $ne: true } } },
+      {
+        $addFields: { hasPngAsinType: { $gt: [{ $size: "$pngListings" }, 0] } },
+      },
+      wantPngStatus
+        ? { $match: { hasPngAsinType: true } }
+        : { $match: { hasPngAsinType: { $ne: true } } },
       { $unset: "pngListings" }
     );
 
@@ -1426,7 +1645,11 @@ async function getScaleStatistics(req, res) {
       $addFields: {
         hasPendingItem: {
           $anyElementTrue: {
-            $map: { input: "$items", as: "it", in: { $eq: ["$$it.scale_status", "Pending"] } },
+            $map: {
+              input: "$items",
+              as: "it",
+              in: { $eq: ["$$it.scale_status", "Pending"] },
+            },
           },
         },
         overall_status_bucket: {
@@ -1438,26 +1661,9 @@ async function getScaleStatistics(req, res) {
       },
     });
 
-    // ======== NEW: Need Scale chỉ tính khi có base_cost > 0 ========
+    // ===== Overall counts (Pending chỉ tính khi có item Pending) =====
     const overallPipeline = [
       ...basePipeline,
-      {
-        $addFields: {
-          _baseCostValue: { $ifNull: [{ $ifNull: ["$base_cost.total", "$base_cost"] }, 0] },
-          hasBaseCost: { $gt: [{ $ifNull: [{ $ifNull: ["$_baseCostValue", 0] }, 0] }, 0] },
-        },
-      },
-      {
-        $match: {
-          $or: [
-            { overall_status_bucket: { $ne: "Need Scale" } },
-            { $and: [{ overall_status_bucket: "Need Scale" }, { hasBaseCost: true }] },
-          ],
-        },
-      },
-      { $unset: "_baseCostValue" },
-
-      // ==== group giữ nguyên ====
       {
         $group: {
           _id: "$overall_status_bucket",
@@ -1465,7 +1671,12 @@ async function getScaleStatistics(req, res) {
           pendingAdj: {
             $sum: {
               $cond: [
-                { $and: [{ $eq: ["$overall_status_bucket", "Pending"] }, "$hasPendingItem"] },
+                {
+                  $and: [
+                    { $eq: ["$overall_status_bucket", "Pending"] },
+                    "$hasPendingItem",
+                  ],
+                },
                 1,
                 0,
               ],
@@ -1486,7 +1697,10 @@ async function getScaleStatistics(req, res) {
           _id: 0,
           totalOrders: 1,
           counts: {
-            $mergeObjects: [{ $arrayToObject: "$byStatus" }, { Pending: "$pendingAdj" }],
+            $mergeObjects: [
+              { $arrayToObject: "$byStatus" },
+              { Pending: "$pendingAdj" }, // overwrite Pending
+            ],
           },
         },
       },
@@ -1504,7 +1718,12 @@ async function getScaleStatistics(req, res) {
         "QC Rejected": c["QC Rejected"] || 0,
         Other: c["Other"] || 0,
       };
-      counts["All"] = counts["Need Scale"] + counts["Pending"] + counts["Sent"] + counts["QC Rejected"];
+      // All = Need Scale + Pending + Sent + QC Rejected (đúng quy ước list)
+      counts["All"] =
+        counts["Need Scale"] +
+        counts["Pending"] +
+        counts["Sent"] +
+        counts["QC Rejected"];
       return counts;
     };
 
@@ -1523,7 +1742,6 @@ async function getScaleStatistics(req, res) {
   }
 }
 
-
 async function getScaleStatisticsForDesign(req, res) {
   try {
     const {
@@ -1538,7 +1756,14 @@ async function getScaleStatisticsForDesign(req, res) {
       unassigned = "",
     } = req.query;
 
-    const KNOWN = ["Need Scale", "Pending", "Ready", "Sent", "Failed", "QC Rejected"];
+    const KNOWN = [
+      "Need Scale",
+      "Pending",
+      "Ready",
+      "Sent",
+      "Failed",
+      "QC Rejected",
+    ];
 
     // ===== RBAC =====
     const role = req.user?.role || "";
@@ -1551,10 +1776,12 @@ async function getScaleStatisticsForDesign(req, res) {
     const isCS = hasRole(role, "Customer Service");
 
     if (!isAdmin && !isSeller && !isDesigner && !isDesignLeader && !isCS) {
-      return res.status(403).json({ message: "Access denied: insufficient permissions" });
+      return res
+        .status(403)
+        .json({ message: "Access denied: insufficient permissions" });
     }
 
-    // ===== Base match =====
+    // ===== Base match (time range + role filter) =====
     const matchStage = {};
     if (from && to) {
       matchStage.createdAt = { $gte: new Date(from), $lte: new Date(to) };
@@ -1572,7 +1799,7 @@ async function getScaleStatisticsForDesign(req, res) {
       matchStage.scaleId = new mongoose.Types.ObjectId(userId);
     }
 
-    // ===== Search =====
+    // ===== Search filter =====
     let searchOr = null;
     if (search && search.trim() !== "") {
       const keyword = new RegExp(search.trim(), "i");
@@ -1588,12 +1815,26 @@ async function getScaleStatisticsForDesign(req, res) {
     // ===== Base pipeline =====
     const basePipeline = [
       { $match: matchStage },
-
-      { $lookup: { from: "shops", localField: "shopId", foreignField: "_id", as: "shop" } },
+      {
+        $lookup: {
+          from: "shops",
+          localField: "shopId",
+          foreignField: "_id",
+          as: "shop",
+        },
+      },
       { $unwind: { path: "$shop", preserveNullAndEmptyArrays: true } },
+      ...(shopName && shopName.trim()
+        ? [
+            {
+              $match: {
+                "shop.name": { $regex: new RegExp(shopName.trim(), "i") },
+              },
+            },
+          ]
+        : []),
 
-      ...(shopName && shopName.trim() ? [{ $match: { "shop.name": { $regex: new RegExp(shopName.trim(), "i") } } }] : []),
-
+      // Filter search
       ...(searchOr ? [{ $match: { $or: searchOr } }] : []),
     ];
 
@@ -1601,7 +1842,8 @@ async function getScaleStatisticsForDesign(req, res) {
     const normalizeAsinTypeToken = (s) => {
       if (!s) return null;
       const t = String(s).trim().toLowerCase();
-      if (t === "custom image" || t === "custom_image" || t === "custom-image") return "Custom Image";
+      if (t === "custom image" || t === "custom_image" || t === "custom-image")
+        return "Custom Image";
       if (t === "outline") return "Outline";
       return s.trim();
     };
@@ -1636,7 +1878,11 @@ async function getScaleStatisticsForDesign(req, res) {
             as: "typeFilteredListings",
           },
         },
-        { $addFields: { hasWantedAsinType: { $gt: [{ $size: "$typeFilteredListings" }, 0] } } },
+        {
+          $addFields: {
+            hasWantedAsinType: { $gt: [{ $size: "$typeFilteredListings" }, 0] },
+          },
+        },
         { $match: { hasWantedAsinType: true } },
         { $unset: "typeFilteredListings" }
       );
@@ -1662,18 +1908,28 @@ async function getScaleStatisticsForDesign(req, res) {
             as: "pngListings",
           },
         },
-        { $addFields: { hasPngAsinType: { $gt: [{ $size: "$pngListings" }, 0] } } },
-        wantPngStatus ? { $match: { hasPngAsinType: true } } : { $match: { hasPngAsinType: { $ne: true } } },
+        {
+          $addFields: {
+            hasPngAsinType: { $gt: [{ $size: "$pngListings" }, 0] },
+          },
+        },
+        wantPngStatus
+          ? { $match: { hasPngAsinType: true } }
+          : { $match: { hasPngAsinType: { $ne: true } } },
         { $unset: "pngListings" }
       );
     }
 
-    // ===== Flags & bucket
+    // ===== FIX: Thêm isUnassigned và bucket TRƯỚC =====
     basePipeline.push({
       $addFields: {
         hasPendingItem: {
           $anyElementTrue: {
-            $map: { input: "$items", as: "it", in: { $eq: ["$$it.scale_status", "Pending"] } },
+            $map: {
+              input: "$items",
+              as: "it",
+              in: { $eq: ["$$it.scale_status", "Pending"] },
+            },
           },
         },
         isUnassigned: {
@@ -1693,38 +1949,29 @@ async function getScaleStatisticsForDesign(req, res) {
       },
     });
 
-    // ===== Filter unassigned nếu cần
+    // ===== FIX: Filter unassigned nếu cần =====
     const wantUnassignedOnly = !isDesigner && String(unassigned || "").toLowerCase() === "true";
+    
     if (wantUnassignedOnly) {
-      basePipeline.push({ $match: { isUnassigned: true } });
-    }
-
-    // ===== Bucket list filter mặc định (nếu không phải unassigned-only)
-    if (!wantUnassignedOnly) {
       basePipeline.push({
-        $match: { overall_status_bucket: { $in: ["Need Scale", "Pending", "Sent", "QC Rejected"] } },
+        $match: { isUnassigned: true },
       });
     }
 
-    // ======== NEW: Need Scale chỉ tính khi có base_cost > 0 ========
+    // ===== FIX: CHỈ đếm orders có status hợp lệ (loại bỏ Cancelled, etc.) =====
+    // Giống logic default của List API
+    if (!wantUnassignedOnly) {
+      basePipeline.push({
+        $match: {
+          overall_status_bucket: {
+            $in: ["Need Scale", "Pending", "Sent", "QC Rejected"],
+          },
+        },
+      });
+    }
+
     const overallPipeline = [
       ...basePipeline,
-      {
-        $addFields: {
-          _baseCostValue: { $ifNull: [{ $ifNull: ["$base_cost.total", "$base_cost"] }, 0] },
-          hasBaseCost: { $gt: [{ $ifNull: [{ $ifNull: ["$_baseCostValue", 0] }, 0] }, 0] },
-        },
-      },
-      {
-        $match: {
-          $or: [
-            { overall_status_bucket: { $ne: "Need Scale" } },
-            { $and: [{ overall_status_bucket: "Need Scale" }, { hasBaseCost: true }] },
-          ],
-        },
-      },
-      { $unset: "_baseCostValue" },
-
       {
         $group: {
           _id: "$overall_status_bucket",
@@ -1732,13 +1979,20 @@ async function getScaleStatisticsForDesign(req, res) {
           pendingAdj: {
             $sum: {
               $cond: [
-                { $and: [{ $eq: ["$overall_status_bucket", "Pending"] }, "$hasPendingItem"] },
+                {
+                  $and: [
+                    { $eq: ["$overall_status_bucket", "Pending"] },
+                    "$hasPendingItem",
+                  ],
+                },
                 1,
                 0,
               ],
             },
           },
-          unassignedCount: { $sum: { $cond: ["$isUnassigned", 1, 0] } },
+          unassignedCount: {
+            $sum: { $cond: ["$isUnassigned", 1, 0] },
+          },
         },
       },
       {
@@ -1779,7 +2033,11 @@ async function getScaleStatisticsForDesign(req, res) {
         "QC Rejected": c["QC Rejected"] || 0,
         Other: c["Other"] || 0,
       };
-      counts["All"] = counts["Need Scale"] + counts["Pending"] + counts["Sent"] + counts["QC Rejected"];
+      counts["All"] =
+        counts["Need Scale"] +
+        counts["Pending"] +
+        counts["Sent"] +
+        counts["QC Rejected"];
       return counts;
     };
 
@@ -1798,7 +2056,6 @@ async function getScaleStatisticsForDesign(req, res) {
     });
   }
 }
-
 
 
 /**
