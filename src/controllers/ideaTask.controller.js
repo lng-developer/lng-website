@@ -103,7 +103,7 @@ function buildFilterFromQuery(req) {
     const isDesigner = hasRole(r, 'Designer');
     const me = req.user?.userId;
     const meObjectId = new mongoose.Types.ObjectId(me);
-    if (isAdmin) {
+    if (isAdmin || isDL) {
         return filter;
     }
 
