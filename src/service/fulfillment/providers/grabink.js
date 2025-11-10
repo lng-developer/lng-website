@@ -261,6 +261,12 @@ async function send(orderDoc) {
 
     const endpoint = process.env.GRABINK_ENDPOINT || 'https://be.grabink.co/api/external/order';
     const headers = { 'Content-Type': 'application/json' };
+
+
+    // 🟩 Thêm log payload ở đây
+    console.log('=== [Grabink] Sending Payload ===');
+    console.log(JSON.stringify(payload, null, 2));
+    console.log('=== [Grabink] Endpoint:', endpoint, '===');
     const resp = await axios.post(endpoint, payload, { headers });
 
     if (resp.status >= 300) throw new Error(`Grabink responded with status ${resp.status}`);

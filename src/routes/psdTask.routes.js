@@ -55,4 +55,6 @@ router.post(
   PsdTaskController.uploadPSD
 );
 
+router.delete("/:taskId", authenticateToken, PsdTaskController.deletePsdTask);
+
 module.exports = router;
