@@ -38,7 +38,7 @@ const getQCList = async (req, res) => {
       from,
       to,
       scale_status, // filter theo scale_overall_status (order-level)
-      search,       // regex theo orderId (+ mở rộng sku/orderItemId/email/name/seller)
+      search, // regex theo orderId (+ mở rộng sku/orderItemId/email/name/seller)
       shopName,
       sellerId,
     } = req.query;
@@ -109,7 +109,13 @@ const getQCList = async (req, res) => {
       },
       { $unwind: { path: "$seller", preserveNullAndEmptyArrays: true } },
       ...(shopName && shopName.trim() !== ""
-        ? [{ $match: { "shop.name": { $regex: new RegExp(shopName.trim(), "i") } } }]
+        ? [
+            {
+              $match: {
+                "shop.name": { $regex: new RegExp(shopName.trim(), "i") },
+              },
+            },
+          ]
         : []),
       {
         $lookup: {
@@ -156,7 +162,7 @@ const getQCList = async (req, res) => {
           as: "scaledBy",
         },
       },
-      { $unwind: { path: "$scaledBy", preserveNullAndEmptyArrays: true } },
+      { $unwind: { path: "$scaledBy", preserveNullAndEmptyArrays: true } }
     );
 
     // ---- Count ----
@@ -273,10 +279,10 @@ const getQCList = async (req, res) => {
           listingId: item.listingId,
           listing: ldoc
             ? {
-              asin_type: ldoc.asin_type || null,
-              product_image: ldoc.product_image || null,
-              psd: ldoc.psd || null,
-            }
+                asin_type: ldoc.asin_type || null,
+                product_image: ldoc.product_image || null,
+                psd: ldoc.psd || null,
+              }
             : null,
         };
       });
@@ -299,13 +305,13 @@ const getQCList = async (req, res) => {
         scale_overall_status: order.scale_overall_status,
         scaledBy: order.scaledBy
           ? {
-            _id: order.scaledBy._id,
-            full_name: order.scaledBy.full_name,
-            email: order.scaledBy.email,
-          }
+              _id: order.scaledBy._id,
+              full_name: order.scaledBy.full_name,
+              email: order.scaledBy.email,
+            }
           : null,
         seller: order.seller
-          ? { email: order.seller.email }
+          ? { email: order.seller.email, full_name: order.seller.full_name }
           : null,
       };
     });
@@ -328,8 +334,15 @@ const getQCList = async (req, res) => {
 // ====== GET QC STATISTICS ======
 const getQCStatistics = async (req, res) => {
   try {
-    const { from, to, search, shopName, breakdown, timeseries = "false", sellerId } =
-      req.query;
+    const {
+      from,
+      to,
+      search,
+      shopName,
+      breakdown,
+      timeseries = "false",
+      sellerId,
+    } = req.query;
 
     const matchStage = {};
     if (from && to) {
@@ -360,7 +373,13 @@ const getQCStatistics = async (req, res) => {
       },
       { $unwind: { path: "$shop", preserveNullAndEmptyArrays: true } },
       ...(shopName && shopName.trim()
-        ? [{ $match: { "shop.name": { $regex: new RegExp(shopName.trim(), "i") } } }]
+        ? [
+            {
+              $match: {
+                "shop.name": { $regex: new RegExp(shopName.trim(), "i") },
+              },
+            },
+          ]
         : []),
       ...(searchOr ? [{ $match: { $or: searchOr } }] : []),
       {
@@ -446,7 +465,6 @@ const getQCStatistics = async (req, res) => {
     });
   }
 };
-
 
 const updateQCNoteForItem = async (req, res) => {
   try {
