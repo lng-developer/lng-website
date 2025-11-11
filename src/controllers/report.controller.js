@@ -225,268 +225,6 @@ const iso = (d) => d.toISOString();
 const pad2 = (n) => String(n).padStart(2, "0");
 const labelDDMM = (d) => `${pad2(d.getUTCDate())}-${pad2(d.getUTCMonth() + 1)}`;
 
-// GET /api/report?from=...&to=...&seller=optional (seller có thể là 1 id hoặc nhiều id, ngăn bởi dấu phẩy)
-// YÊU CẦU: đã import đủ các model & lib
-// const mongoose = require('mongoose');
-// const OrderCustomProduct = db.orderCustomProduct;
-// const AdsDailySummary = db.AdsDailySummary;
-
-// const getReportMatrix = async (req, res) => {
-//   try {
-//     const { from, to, seller, userNull } = req.query;
-//     if (!from || !to) {
-//       return res
-//         .status(400)
-//         .json({ message: "from & to are required (ISO UTC)" });
-//     }
-
-//     // ===== 0) Quyền hạn =====
-//     const role = req.user?.role || "";
-//     const userId = req.user?.userId || "";
-//     const isAdmin = /^admin$/i.test(role);
-//     const isSeller = /^seller$/i.test(role);
-
-//     if (!isAdmin && !isSeller) {
-//       return res
-//         .status(403)
-//         .json({ message: "Access denied: insufficient permissions" });
-//     }
-//     if (isSeller && !mongoose.Types.ObjectId.isValid(userId)) {
-//       return res.status(400).json({ message: "Invalid user id in token" });
-//     }
-
-//     // ===== 1) chuẩn bị date list =====
-//     const dayList = makeDayList(from, to);
-//     const dayIndex = new Map(dayList.map((d, i) => [iso(d), i]));
-//     const fromDate = new Date(from);
-//     const toDate = new Date(to);
-
-//     // ===== 2) Build match theo quyền & query =====
-//     const matchStage = {
-//       purchase_date: { $gte: fromDate, $lte: toDate },
-//       amazon_finance_total: { $exists: true, $ne: null },
-
-//       // NEW: loại bỏ đơn hủy khỏi report
-//       status: { $nin: ["Cancelled", "Canceled"] },
-//     };
-
-//     let sellerIdSet = null;
-//     if (isSeller) {
-//       matchStage.sellerId = new mongoose.Types.ObjectId(userId);
-//       sellerIdSet = new Set([String(userId)]);
-//     } else {
-//       if (seller) {
-//         const ids = seller
-//           .split(",")
-//           .map((s) => s.trim())
-//           .filter(Boolean)
-//           .map((id) => new mongoose.Types.ObjectId(id));
-//         if (ids.length === 1) matchStage.sellerId = ids[0];
-//         else if (ids.length > 1) matchStage.sellerId = { $in: ids };
-//         sellerIdSet = new Set(ids.map(String));
-//       }
-//       if (userNull === "true") {
-//         if (matchStage.sellerId) {
-//           if (matchStage.sellerId.$in) {
-//             matchStage.sellerId.$in.push(null, undefined);
-//           } else {
-//             matchStage.sellerId = {
-//               $in: [matchStage.sellerId, null, undefined],
-//             };
-//           }
-//         } else {
-//           matchStage.sellerId = { $in: [null, undefined] };
-//         }
-//       }
-//     }
-
-//     // ===== 3) Aggregation đơn hàng (có thêm 3 trường cần dùng) =====
-//     const rows = await OrderCustomProduct.aggregate([
-//       { $match: matchStage },
-//       {
-//         $lookup: {
-//           from: "users",
-//           localField: "sellerId",
-//           foreignField: "_id",
-//           as: "seller",
-//         },
-//       },
-//       {
-//         $addFields: {
-//           sellerName: { $ifNull: [{ $first: "$seller.full_name" }, "Unknown"] },
-//         },
-//       },
-//       {
-//         $addFields: {
-//           day: {
-//             $dateTrunc: {
-//               date: "$purchase_date",
-//               unit: "day",
-//               timezone: "UTC",
-//             },
-//           },
-//         },
-//       },
-//       {
-//         $group: {
-//           _id: {
-//             sellerId: "$sellerId",
-//             sellerName: "$sellerName",
-//             day: "$day",
-//           },
-//           items: { $sum: 1 },
-//           revenue: { $sum: { $ifNull: ["$amazon_finance_total.revenue", 0] } },
-//           fee: { $sum: { $ifNull: ["$amazon_finance_total.fee", 0] } },
-//           shipping_tax: {
-//             $sum: { $ifNull: ["$amazon_finance_total.shipping_tax", 0] },
-//           },
-//           item_promotion_discount: {
-//             $sum: {
-//               $ifNull: ["$amazon_finance_total.item_promotion_discount", 0],
-//             },
-//           },
-//           item_tax: {
-//             $sum: { $ifNull: ["$amazon_finance_total.item_tax", 0] },
-//           },
-//           baseCost: { $sum: { $ifNull: ["$base_cost", 0] } },
-//           ads: { $sum: { $ifNull: ["$ads", 0] } },
-//           opCost: { $sum: { $ifNull: ["$op_cost", 0] } },
-//           refund: { $sum: { $ifNull: ["$refund", 0] } },
-//         },
-//       },
-//       { $sort: { "_id.day": 1 } },
-//     ]);
-
-//     // ===== 4) Lấy dữ liệu ADS từ AdsDailySummary =====
-//     const adsDocs = await AdsDailySummary.find(
-//       { day: { $gte: dayList[0], $lte: dayList[dayList.length - 1] } },
-//       { day: 1, by_seller: 1 }
-//     ).lean();
-
-//     const adsMap = new Map(); // key = `${sellerId}|${iso(day)}`
-//     for (const doc of adsDocs) {
-//       const dayIso = iso(doc.day);
-//       for (const row of doc.by_seller || []) {
-//         const sid = row?.seller?._id;
-//         if (!sid) continue;
-//         if (sellerIdSet && !sellerIdSet.has(String(sid))) continue;
-//         const key = `${String(sid)}|${dayIso}`;
-//         adsMap.set(key, {
-//           spend: Number(row.spend || 0),
-//           sellerName: row.seller.full_name || "Unknown",
-//         });
-//       }
-//     }
-
-//     // ===== 5) Gộp kết quả đơn hàng theo sellerName/ngày =====
-//     const result = {};
-//     const zeroArr = () => Array(dayList.length).fill(0);
-
-//     for (const r of rows) {
-//       const sellerName = r._id.sellerName || "Unknown";
-//       const idx = dayIndex.get(iso(r._id.day));
-//       if (idx == null) continue;
-
-//       if (!result[sellerName]) {
-//         result[sellerName] = {
-//           fee: zeroArr(),
-//           opCost: zeroArr(),
-//           refund: zeroArr(),
-//           items: zeroArr(),
-//           revenue: zeroArr(),
-//           baseCost: zeroArr(),
-//           ads: zeroArr(),
-//           // 3 mảng finance
-//           shippingTax: zeroArr(),
-//           itemPromotionDiscount: zeroArr(),
-//           itemTax: zeroArr(),
-//           profit1: zeroArr(),
-//           profit2: zeroArr(),
-//         };
-//       }
-
-//       const S = result[sellerName];
-//       S.items[idx] = r.items || 0;
-//       S.revenue[idx] = +(r.revenue || 0).toFixed(2);
-//       S.baseCost[idx] = +(r.baseCost || 0).toFixed(2);
-//       S.fee[idx] = +(r.fee || 0).toFixed(2);
-//       S.opCost[idx] = +(r.opCost || 0).toFixed(2);
-//       S.refund[idx] = +(r.refund || 0).toFixed(2);
-//       S.ads[idx] = +(r.ads || 0).toFixed(2);
-
-//       S.shippingTax[idx] = +(r.shipping_tax || 0).toFixed(2);
-//       S.itemPromotionDiscount[idx] = +(r.item_promotion_discount || 0).toFixed(
-//         2
-//       );
-//       S.itemTax[idx] = +(r.item_tax || 0).toFixed(2);
-//     }
-
-//     // ===== 6) Ghi đè ADS từ AdsDailySummary =====
-//     for (const [key, val] of adsMap.entries()) {
-//       const [_, dayIso] = key.split("|");
-//       const idx = dayIndex.get(dayIso);
-//       if (idx == null) continue;
-
-//       const sellerName = val.sellerName || "Unknown";
-//       if (!result[sellerName]) {
-//         result[sellerName] = {
-//           fee: zeroArr(),
-//           opCost: zeroArr(),
-//           refund: zeroArr(),
-//           items: zeroArr(),
-//           revenue: zeroArr(),
-//           baseCost: zeroArr(),
-//           ads: zeroArr(),
-//           shippingTax: zeroArr(),
-//           itemPromotionDiscount: zeroArr(),
-//           itemTax: zeroArr(),
-//           profit1: zeroArr(),
-//           profit2: zeroArr(),
-//         };
-//       }
-//       result[sellerName].ads[idx] = +(val.spend || 0).toFixed(2);
-//     }
-
-//     // ===== 7) Tính profit1/profit2 + totals =====
-//     for (const sellerName of Object.keys(result)) {
-//       const S = result[sellerName];
-//       for (let i = 0; i < dayList.length; i++) {
-//         const p1 =
-//           S.revenue[i] -
-//           (S.baseCost[i] +
-//             S.fee[i] +
-//             S.ads[i] +
-//             S.shippingTax[i] +
-//             S.itemPromotionDiscount[i] +
-//             S.itemTax[i]);
-//         const p2 = p1 - (S.opCost[i] + S.refund[i]);
-//         S.profit1[i] = +p1.toFixed(2);
-//         S.profit2[i] = +p2.toFixed(2);
-//       }
-//       const sum = (a) => +a.reduce((x, y) => x + (y || 0), 0).toFixed(2);
-//       result[sellerName].totals = {
-//         items: S.items.reduce((x, y) => x + (y || 0), 0),
-//         revenue: sum(S.revenue),
-//         baseCost: sum(S.baseCost),
-//         ads: sum(S.ads),
-//         fee: sum(S.fee),
-//         opCost: sum(S.opCost),
-//         refund: sum(S.refund),
-//         profit1: sum(S.profit1),
-//         profit2: sum(S.profit2),
-//       };
-//     }
-
-//     const dates = dayList.map(labelDDMM);
-//     return res.json({ date: dates, data: result });
-//   } catch (e) {
-//     console.error(e);
-//     return res
-//       .status(500)
-//       .json({ message: "Get report failed", error: e.message });
-//   }
-// };
-
 const getReportMatrix = async (req, res) => {
   try {
     const { from, to, seller, userNull } = req.query;
@@ -511,7 +249,7 @@ const getReportMatrix = async (req, res) => {
       return res.status(400).json({ message: "Invalid user id in token" });
     }
 
-    // ===== 1) Chuẩn bị date list =====
+    // ===== 1) chuẩn bị date list =====
     const dayList = makeDayList(from, to);
     const dayIndex = new Map(dayList.map((d, i) => [iso(d), i]));
     const fromDate = new Date(from);
@@ -521,12 +259,12 @@ const getReportMatrix = async (req, res) => {
     const matchStage = {
       purchase_date: { $gte: fromDate, $lte: toDate },
       amazon_finance_total: { $exists: true, $ne: null },
+
+      // NEW: loại bỏ đơn hủy khỏi report
       status: { $nin: ["Cancelled", "Canceled"] },
     };
 
-    const BOSS_ID = new mongoose.Types.ObjectId("68b93ed3f02eed8dec002ee3");
     let sellerIdSet = null;
-
     if (isSeller) {
       matchStage.sellerId = new mongoose.Types.ObjectId(userId);
       sellerIdSet = new Set([String(userId)]);
@@ -537,7 +275,6 @@ const getReportMatrix = async (req, res) => {
           .map((s) => s.trim())
           .filter(Boolean)
           .map((id) => new mongoose.Types.ObjectId(id));
-
         if (ids.length === 1) matchStage.sellerId = ids[0];
         else if (ids.length > 1) matchStage.sellerId = { $in: ids };
         sellerIdSet = new Set(ids.map(String));
@@ -557,19 +294,7 @@ const getReportMatrix = async (req, res) => {
       }
     }
 
-    // 👉 Loại bỏ seller có ID là Boss
-    if (!matchStage.sellerId) {
-      matchStage.sellerId = { $ne: BOSS_ID };
-    } else if (matchStage.sellerId.$in) {
-      matchStage.sellerId.$in = matchStage.sellerId.$in.filter(
-        (id) => String(id) !== String(BOSS_ID)
-      );
-      if (matchStage.sellerId.$in.length === 0) delete matchStage.sellerId;
-    } else if (String(matchStage.sellerId) === String(BOSS_ID)) {
-      delete matchStage.sellerId;
-    }
-
-    // ===== 3) Aggregation đơn hàng =====
+    // ===== 3) Aggregation đơn hàng (có thêm 3 trường cần dùng) =====
     const rows = await OrderCustomProduct.aggregate([
       { $match: matchStage },
       {
@@ -626,7 +351,7 @@ const getReportMatrix = async (req, res) => {
       { $sort: { "_id.day": 1 } },
     ]);
 
-    // ===== 4) Lấy dữ liệu ADS =====
+    // ===== 4) Lấy dữ liệu ADS từ AdsDailySummary =====
     const adsDocs = await AdsDailySummary.find(
       { day: { $gte: dayList[0], $lte: dayList[dayList.length - 1] } },
       { day: 1, by_seller: 1 }
@@ -638,7 +363,6 @@ const getReportMatrix = async (req, res) => {
       for (const row of doc.by_seller || []) {
         const sid = row?.seller?._id;
         if (!sid) continue;
-        if (String(sid) === "68b93ed3f02eed8dec002ee3") continue; // 👉 Bỏ boss ra
         if (sellerIdSet && !sellerIdSet.has(String(sid))) continue;
         const key = `${String(sid)}|${dayIso}`;
         adsMap.set(key, {
@@ -666,6 +390,7 @@ const getReportMatrix = async (req, res) => {
           revenue: zeroArr(),
           baseCost: zeroArr(),
           ads: zeroArr(),
+          // 3 mảng finance
           shippingTax: zeroArr(),
           itemPromotionDiscount: zeroArr(),
           itemTax: zeroArr(),
@@ -682,6 +407,7 @@ const getReportMatrix = async (req, res) => {
       S.opCost[idx] = +(r.opCost || 0).toFixed(2);
       S.refund[idx] = +(r.refund || 0).toFixed(2);
       S.ads[idx] = +(r.ads || 0).toFixed(2);
+
       S.shippingTax[idx] = +(r.shipping_tax || 0).toFixed(2);
       S.itemPromotionDiscount[idx] = +(r.item_promotion_discount || 0).toFixed(
         2
