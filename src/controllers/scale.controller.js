@@ -1771,7 +1771,7 @@ async function getScaleStatisticsForDesign(req, res) {
 
     const isAdmin = /^admin$/i.test(role);
     const isSeller = /^seller$/i.test(role);
-    const isDesigner = /^design(?:er)?$/i.test(role);
+    const isDesigner = /^designer$/i.test(role);
     const isDesignLeader = /^design\s*leader$/i.test(role);
     const isCS = hasRole(role, "Customer Service");
 
