@@ -89,13 +89,13 @@ function buildFilterFromQuery(req) {
     if (status) filter.status = status;
     if (difficulty) filter.difficulty = difficulty;
     if (assignee) filter['assignedTo'] = new mongoose.Types.ObjectId(assignee);
-        if (from && to) {
+    if (from && to) {
         filter.createdAt = {
             $gte: new Date(from),
             $lte: new Date(to)
         };
     }
-    
+
     if (search) filter.$text = { $search: search };
     const r = req.user?.role;
     const isAdmin = hasRole(r, 'Admin');
@@ -522,6 +522,63 @@ const addComment = async (req, res) => {
     }
 };
 
+const getIdeaPsdSignedUrl = async (req, res) => {
+    try {
+        const { id } = req.params;
+        const expires = Math.max(
+            60,
+            Math.min(86400, Number(req.query.expires) || 3600)
+        );
+        const asAttachment = String(req.query.download || "") === "1";
+
+        const task = await IdeaTask.findById(id);
+        if (!task) {
+            return res.status(404).json({ message: "Task không tồn tại" });
+        }
+
+        // Quyền: ai xem được task thì được tải PSD
+        if (!canView(req, task)) {
+            return res.status(403).json({ message: "Access denied" });
+        }
+
+        if (!task.psd || !task.psd.key) {
+            return res
+                .status(404)
+                .json({ message: "Task chưa có file PSD / ZIP để tải" });
+        }
+
+        const key = task.psd.key;
+        const ext = (path.extname(key) || ".zip").toLowerCase();
+
+        // Đặt tên file tải về cho đẹp
+        const safeTitle = String(task.title || task._id).replace(
+            /[^\w\-.]+/g,
+            "_"
+        );
+        const filename = `${safeTitle}${ext}`;
+
+        const url = await getSignedUrlForKey(key, {
+            expiresIn: expires,
+            asAttachment,
+            filename,
+        });
+
+        return res.json({
+            id: String(task._id),
+            key,
+            signed_url: url,
+            expires_in: expires,
+        });
+    } catch (error) {
+        console.error("Error getIdeaPsdSignedUrl:", error);
+        return res.status(500).json({
+            message: "Lỗi tạo signed URL cho IdeaTask",
+            error: error.message,
+        });
+    }
+};
+
+
 
 module.exports = {
     getAllIdeaTasks,
@@ -536,4 +593,5 @@ module.exports = {
     rejectTask,
     addComment,
     getIdeaTaskStatistics,
+    getIdeaPsdSignedUrl
 };
