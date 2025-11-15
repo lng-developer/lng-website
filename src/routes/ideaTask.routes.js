@@ -56,5 +56,5 @@ router.get('/:id', ideaTaskController.getIdeaTaskById);
 router.post('/', ideaTaskController.createIdeaTask);
 router.put('/:id', ideaTaskController.updateIdeaTask);
 router.delete('/:id', authorizeRoles('Admin', 'Design Leader'), ideaTaskController.deleteIdeaTask);
-router.get('/idea-tasks/:id/psd', ideaTaskController.getIdeaPsdSignedUrl);
+router.get('/:id/psd', ideaTaskController.getIdeaPsdSignedUrl);
 module.exports = router;
