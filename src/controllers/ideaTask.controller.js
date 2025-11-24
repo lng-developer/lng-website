@@ -81,6 +81,7 @@ const canEditIdeaBasics = (req, task) => {
   const isDL = hasRole(r, "Design Leader");
   const me = req.user?.userId;
   if (isAdmin || isDL) return true;
+  if (task.createdBy?.userId === me) return true;
   return task.status === "New" && task.createdBy?.userId === me;
 };
 
