@@ -1545,18 +1545,18 @@ async function getScaleStatistics(req, res) {
     }
 
     if (isCS) {
-      const currentUser = await User.findById(userId).select('team_id').lean();
-      if (!currentUser || !currentUser.team_id) {
-        return res.status(400).json({
-          message: "a CS must have a team"
-        });
-      }
-      const teamMemberIds = await User.find(
-        { team_id: currentUser.team_id },
-        { _id: 1 }
-      ).lean();
-      const memberIds = teamMemberIds.map(u => u._id);
-      matchStage.sellerId = { $in: memberIds };
+      // const currentUser = await User.findById(userId).select('team_id').lean();
+      // if (!currentUser || !currentUser.team_id) {
+      //   return res.status(400).json({
+      //     message: "a CS must have a team"
+      //   });
+      // }
+      // const teamMemberIds = await User.find(
+      //   { team_id: currentUser.team_id },
+      //   { _id: 1 }
+      // ).lean();
+      // const memberIds = teamMemberIds.map(u => u._id);
+      // matchStage.sellerId = { $in: memberIds };
     } else if (isSellerOnly) {
       matchStage.sellerId = new mongoose.Types.ObjectId(userId);
     }
