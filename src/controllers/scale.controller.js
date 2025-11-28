@@ -653,18 +653,18 @@ const getScaleList = async (req, res) => {
     }
 
     if (isCS) {
-      const currentUser = await User.findById(userId).select('team_id').lean();
-      if (!currentUser || !currentUser.team_id) {
-        return res.status(400).json({
-          message: "a CS must have a team"
-        });
-      }
-      const teamMemberIds = await User.find(
-        { team_id: currentUser.team_id },
-        { _id: 1 }
-      ).lean();
-      const memberIds = teamMemberIds.map(u => u._id);
-      initialMatch.sellerId = { $in: memberIds };
+      // const currentUser = await User.findById(userId).select('team_id').lean();
+      // if (!currentUser || !currentUser.team_id) {
+      //   return res.status(400).json({
+      //     message: "a CS must have a team"
+      //   });
+      // }
+      // const teamMemberIds = await User.find(
+      //   { team_id: currentUser.team_id },
+      //   { _id: 1 }
+      // ).lean();
+      // const memberIds = teamMemberIds.map(u => u._id);
+      // initialMatch.sellerId = { $in: memberIds };
     } else if (isSellerOnly) {
       initialMatch.sellerId = new mongoose.Types.ObjectId(userId);
     }
@@ -1826,12 +1826,12 @@ async function getScaleStatisticsForDesign(req, res) {
       { $unwind: { path: "$shop", preserveNullAndEmptyArrays: true } },
       ...(shopName && shopName.trim()
         ? [
-            {
-              $match: {
-                "shop.name": { $regex: new RegExp(shopName.trim(), "i") },
-              },
+          {
+            $match: {
+              "shop.name": { $regex: new RegExp(shopName.trim(), "i") },
             },
-          ]
+          },
+        ]
         : []),
 
       // Filter search
@@ -1951,7 +1951,7 @@ async function getScaleStatisticsForDesign(req, res) {
 
     // ===== FIX: Filter unassigned nếu cần =====
     const wantUnassignedOnly = !isDesigner && String(unassigned || "").toLowerCase() === "true";
-    
+
     if (wantUnassignedOnly) {
       basePipeline.push({
         $match: { isUnassigned: true },
@@ -2096,6 +2096,78 @@ const updateCSNoteForItem = async (req, res) => {
   }
 };
 
+const resetScaleForOrdersBulk = async (req, res) => {
+  try {
+    const { orderIds = [], note = "" } = req.body || {};
+
+    if (!Array.isArray(orderIds) || orderIds.length === 0) {
+      return res.status(400).json({
+        message: "orderIds must be a non-empty array"
+      });
+    }
+
+    const results = [];
+
+    for (const oid of orderIds) {
+      try {
+        const order = await OrderCustomProduct.findOne({ orderId: oid });
+        if (!order) {
+          results.push({
+            orderId: oid,
+            status: "failed",
+            error: "Order not found"
+          });
+          continue;
+        }
+
+        // Reset từng item trong order
+        for (const item of order.items || []) {
+          item.scale_status = "Need Scale";
+          item.fulfillment_file = new Map();
+          item.qc_note = note || "";
+          item.markModified("fulfillment_file");
+        }
+
+        // Reset trạng thái tổng
+        order.scale_overall_status = "Need Scale";
+        order.status = "New"
+
+        // Nếu muốn reset scaleId -> mở comment
+        order.scaleId = null;
+
+        // Nếu muốn reset vendor submissions -> mở comment
+        // order.vendor_submissions = {};
+        // order.grabink_submission = undefined;
+
+        await order.save();
+
+        results.push({
+          orderId: oid,
+          status: "success",
+          scale_overall_status: "Need Scale"
+        });
+      } catch (err) {
+        results.push({
+          orderId: oid,
+          status: "failed",
+          error: err.message
+        });
+      }
+    }
+
+    return res.json({
+      message: "Bulk reset completed",
+      total: results.length,
+      results
+    });
+  } catch (err) {
+    return res.status(500).json({
+      message: "Bulk reset failed",
+      error: err.message
+    });
+  }
+};
+
 module.exports = {
   uploadFulfillmentFileForItem,
   confirmScaleForItem,
@@ -2105,4 +2177,5 @@ module.exports = {
   getScaleStatistics,
   getScaleListForDesign,
   getScaleStatisticsForDesign,
+  resetScaleForOrdersBulk
 };
