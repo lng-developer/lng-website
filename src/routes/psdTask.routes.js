@@ -50,11 +50,22 @@ router.post(
 router.post(
   "/:taskId/upload",
   authenticateToken,
-  authorizeRoles("Admin", "Designer", "Seller", "Design Leader"),
+  authorizeRoles(
+    "Admin",
+    "Designer",
+    "Seller",
+    "Design Leader",
+    "Customer Service"
+  ),
   upload.single("file"),
   PsdTaskController.uploadPSD
 );
 
-router.delete("/:taskId", authenticateToken, authorizeRoles("Admin", "Design Leader"), PsdTaskController.deletePsdTask);
+router.delete(
+  "/:taskId",
+  authenticateToken,
+  authorizeRoles("Admin", "Design Leader"),
+  PsdTaskController.deletePsdTask
+);
 
 module.exports = router;
