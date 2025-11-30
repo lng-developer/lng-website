@@ -200,7 +200,7 @@ function buildPayload(orderObj = {}) {
     const { firstName, lastName } = splitName(customer.name || "");
 
     return {
-        order_id: `${orderObj.orderId}-1` || `${orderObj.order_id}-1` || "",
+        order_id: orderObj.orderId|| orderObj.order_id || "",
         seller: orderObj.seller || orderObj.sellerCode || "",
         user_id: orderObj.user_id || orderObj.userId || "",
         shipping_method: mapShippingMethod(orderObj),
