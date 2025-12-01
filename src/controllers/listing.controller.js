@@ -705,6 +705,143 @@ const importListingsFromExcel = async (req, res) => {
   }
 };
 
+// ==============================
+// Export toàn bộ ASIN + Seller + Store
+// ==============================
+// ==============================
+// Export toàn bộ ASIN + Seller + Store + Total Sales
+// ==============================
+const exportAsinSellerStore = async (req, res) => {
+  try {
+    const {
+      asinType,
+      asinTypeMode,
+      seller,
+      platform,
+      search,
+      from,
+      to,
+      store,
+    } = req.query;
+
+    // ===== RBAC =====
+    const role = req.user?.role;
+    const userId = req.user?.userId;
+
+    const isAdmin = /^admin$/i.test(role);
+    const isSeller = /^seller$/i.test(role);
+
+    const filter = {};
+
+    if (isSeller && !isAdmin) {
+      filter.seller = userId;
+    } else if (seller) {
+      filter.seller = seller;
+    }
+
+    // Filters giống getListings
+    if (asinType) filter.asin_type = asinType;
+    if (asinTypeMode === "excludeOutline") {
+      filter.asin_type = { $ne: "Outline" };
+    } else if (asinTypeMode === "onlyOutline") {
+      filter.asin_type = "Outline";
+    }
+
+    if (platform) filter.platform = platform;
+    if (store) filter.store = store;
+
+    if (from || to) {
+      filter.createdAt = {};
+      if (from) filter.createdAt.$gte = new Date(from);
+      if (to) filter.createdAt.$lte = new Date(to);
+    }
+
+    if (search) {
+      const regex = new RegExp(search, "i");
+      filter.$or = [{ asin: regex }, { "template.design_product": regex }];
+    }
+
+    // Lấy toàn bộ listing (không paging)
+    const listings = await Listing.find(filter)
+      .populate({ path: "seller", select: "full_name email" })
+      .populate({ path: "store", select: "name" })
+      .lean();
+
+    if (!listings.length) {
+      return res.json({
+        message: "Không có dữ liệu để export",
+        total: 0,
+      });
+    }
+
+    // ===== TÍNH TOTAL SALES giống getListings =====
+    const listingIds = listings.map((l) => l._id).filter(Boolean);
+    let salesMap = new Map();
+
+    if (listingIds.length > 0) {
+      const agg = await OrderCustomProduct.aggregate([
+        { $match: { "items.listingId": { $in: listingIds } } },
+        { $unwind: "$items" },
+        { $match: { "items.listingId": { $in: listingIds } } },
+        {
+          $group: {
+            _id: { listingId: "$items.listingId", orderId: "$orderId" },
+          },
+        },
+        { $group: { _id: "$_id.listingId", orders: { $sum: 1 } } },
+      ]);
+
+      salesMap = new Map(agg.map((x) => [String(x._id), x.orders]));
+    }
+
+    // Map ra dữ liệu Excel
+    const rows = listings.map((l) => ({
+      ASIN: l.asin || "",
+      Platform: l.platform || "",
+      "ASIN Type": l.asin_type || "",
+      "Total Sales": salesMap.get(String(l._id)) || 0, // 👈 cột mới
+      "Seller ID": l.seller?._id?.toString() || "",
+      "Seller Name": l.seller?.full_name || "",
+      "Seller Email": l.seller?.email || "",
+      "Store ID": l.store?._id?.toString() || "",
+      "Store Name": l.store?.name || "",
+      "Created At": l.createdAt
+        ? new Date(l.createdAt).toISOString().slice(0, 19).replace("T", " ")
+        : "",
+    }));
+
+    // Tạo workbook Excel
+    const worksheet = XLSX.utils.json_to_sheet(rows);
+    const workbook = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(workbook, worksheet, "ASINs");
+
+    const buffer = XLSX.write(workbook, {
+      bookType: "xlsx",
+      type: "buffer",
+    });
+
+    const filename = `asin_seller_store_${Date.now()}.xlsx`;
+
+    res.setHeader(
+      "Content-Disposition",
+      `attachment; filename="${filename}"`
+    );
+    res.setHeader(
+      "Content-Type",
+      "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    );
+
+    return res.status(200).send(Buffer.from(buffer));
+  } catch (error) {
+    console.error("Error exportAsinSellerStore:", error);
+    return res
+      .status(500)
+      .json({ message: "Lỗi export ASIN", error: error.message });
+  }
+};
+
+
+
 module.exports = {
   getListings,
   upsertListing,
@@ -715,4 +852,5 @@ module.exports = {
   getPsdStatistics,
   getListingStatistics,
   updateListing,
+  exportAsinSellerStore
 };

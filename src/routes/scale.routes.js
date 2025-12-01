@@ -94,4 +94,9 @@ router.get(
   scaleController.getScaleStatisticsForDesign
 );
 
+router.put(
+  "/orders/reset/bulk",
+  scaleController.resetScaleForOrdersBulk
+);
+
 module.exports = router;

@@ -28,17 +28,34 @@ function pickUrl(ff, key) {
 }
 
 function buildArtwork(ff = {}) {
+    const front = pickUrl(ff, "front");
+    const back = pickUrl(ff, "back");
+
+    const right =
+        pickUrl(ff, "right") ||
+        pickUrl(ff, "right_sleeve") ||
+        pickUrl(ff, "rightSleeve");
+
+    const left =
+        pickUrl(ff, "left") ||
+        pickUrl(ff, "left_sleeve") ||
+        pickUrl(ff, "leftSleeve");
+
     return {
-        artwork_front: pickUrl(ff, "front"),
-        artwork_back: pickUrl(ff, "back"),
-        artwork_right: pickUrl(ff, "right"),
-        artwork_left: pickUrl(ff, "left"),
+        artwork_front: front,
+        artwork_back: back,
+        artwork_right: right,
+        artwork_left: left,
         artwork_hood: pickUrl(ff, "hood"),
         artwork_bothsides: pickUrl(ff, "bothsides"),
-        artwork_right_upper_sleeves: pickUrl(ff, "right_upper_sleeves"),
-        artwork_right_lower_sleeves: pickUrl(ff, "right_lower_sleeves"),
-        artwork_left_upper_sleeves: pickUrl(ff, "left_upper_sleeves"),
-        artwork_left_lower_sleeves: pickUrl(ff, "left_lower_sleeves"),
+        artwork_right_upper_sleeves:
+            pickUrl(ff, "right_upper_sleeves") || pickUrl(ff, "right_upper_sleeve"),
+        artwork_right_lower_sleeves:
+            pickUrl(ff, "right_lower_sleeves") || pickUrl(ff, "right_lower_sleeve"),
+        artwork_left_upper_sleeves:
+            pickUrl(ff, "left_upper_sleeves") || pickUrl(ff, "left_upper_sleeve"),
+        artwork_left_lower_sleeves:
+            pickUrl(ff, "left_lower_sleeves") || pickUrl(ff, "left_lower_sleeve"),
         artwork_left_chest: pickUrl(ff, "left_chest"),
         artwork_right_chest: pickUrl(ff, "right_chest"),
         artwork_front_bottom_right: pickUrl(ff, "front_bottom_right"),
@@ -48,14 +65,15 @@ function buildArtwork(ff = {}) {
     };
 }
 
+
 function buildPrintwayItem(item) {
     const ff = item.fulfillment_file || {};
     const sku =
         item?.cost_breakdown?.matchedSku || item?.mapped_sku || item?.sku || "";
 
     return {
-        product_location: item?.cost_breakdown?.product_location || "PW",
-        made_in_location: item?.cost_breakdown?.made_in_location || "VN",
+        //product_location: item?.cost_breakdown?.product_location || "PW",
+       // made_in_location: item?.cost_breakdown?.made_in_location,
         product_name: item?.cost_breakdown?.itemDisplayName || item?.title || "",
         item_sku: sku,
         variant_id: item?.variant_id || "",
@@ -86,7 +104,7 @@ function buildPayload(orderObj) {
         store_code: orderObj.store_code || "",
         shipping_email: customer.email || "",
         firstName,
-        lastName:  `${lastName}...`,
+        lastName: `${lastName}...`,
         shipping_address1: customer.address || "",
         shipping_address2: customer.address_2 || "",
         shipping_city: customer.city || "",

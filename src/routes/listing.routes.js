@@ -32,6 +32,11 @@ router.get(
   listingController.getListingStatistics
 );
 
+router.get(
+  "/export-asins",
+  listingController.exportAsinSellerStore
+);
+
 router.put("/:id", authenticateToken, listingController.updateListing);
 
 module.exports = router;
