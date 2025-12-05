@@ -22,6 +22,7 @@ const IdeaTask = require("./ideaTask.model");
 const RealtimeLog = require("./realtimeLog.model");
 const Team = require("./team.model");
 const PointLog = require("./pointLogs.model")
+const OrderHistory = require("./orderHistory.model")
 // Cau hinh mongoose dang global
 mongoose.Promise = global.Promise;
 // Dinh nghia doi tuong DB
@@ -51,6 +52,7 @@ db.IdeaTask = IdeaTask;
 db.RealtimeLog = RealtimeLog;
 db.Team = Team;
 db.PointLog = PointLog
+db.OrderHistory = OrderHistory
 db.connectDB = async () => {
   await mongoose
     .connect(process.env.MONGO_URI, {
