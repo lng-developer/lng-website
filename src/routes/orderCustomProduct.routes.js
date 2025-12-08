@@ -71,4 +71,6 @@ router.put("/:orderId", authenticateToken, controller.updateScaleOrder);
 
 router.post("/:orderId/replace", authenticateToken, controller.createReplacementOrder);
 
+router.post("/:orderId/validate-address", controller.validateAddressByOrderId);
+
 module.exports = router;
