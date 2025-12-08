@@ -230,7 +230,9 @@ const listShippingBatches = async (req, res, next) => {
       status: b.status,
       createdAt: b.createdAt,
       fileName: b.fileName,
-      stats: b.stats, // totalOrders / totalFake / totalReal
+      stats: b.stats,
+      completed: b.completed,
+      tracking_fakes: b.tracking_fakes,
     }));
 
     return res.json({
