@@ -25,6 +25,7 @@ const teamRoutes = require("./team.routes");
 const extRoutes = require("./ext.routes");
 const adminSessionRoutes = require("./admin.session.routes");
 const PointsRoutes = require("./points.routes");
+const ShippingBatchRoutes = require("./shippingBatch.routes");
 
 module.exports = {
   roleRoutes,
@@ -54,4 +55,5 @@ module.exports = {
   extRoutes,
   adminSessionRoutes,
   PointsRoutes,
+  ShippingBatchRoutes,
 };

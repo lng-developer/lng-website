@@ -23,6 +23,7 @@ const realtimeLogController = require("./realtimeLog.controller");
 const teamController = require("./team.controller");
 const extController = require("./ext.controller");
 const pointController = require("./points.controller");
+const shippingBatchController = require("./shippingBatch.contrller");
 
 module.exports = {
   roleController,
@@ -49,5 +50,6 @@ module.exports = {
   realtimeLogController,
   teamController,
   extController,
-  pointController
+  pointController,
+  shippingBatchController,
 };
