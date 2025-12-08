@@ -323,6 +323,49 @@ const validateAddressWithSmarty = async (address) => {
   }
 };
 
+const validateAddressByOrderId = async (req, res) => {
+  try {
+    const { orderId } = req.params;
+
+    // 1. Tìm order theo ID
+    const existingOrder = await OrderCustomProduct.findOne({ orderId });
+    if (!existingOrder) {
+      return res.status(404).json({
+        message: "Order not found",
+        orderId,
+      });
+    }
+    // 3. Lấy address từ order (customer_infor)
+    const address = existingOrder.customer_infor;
+    if (!address) {
+      return res.status(400).json({
+        message: "Order does not have customer_infor to validate",
+        orderId,
+      });
+    }
+
+    // 4. Gọi Smarty để validate
+    const validationResult = await validateAddressWithSmarty(address);
+
+    // 5. Lưu kết quả vào order
+    existingOrder.address_validation = validationResult;
+    await existingOrder.save();
+
+    // 6. Trả response
+    return res.json({
+      orderId,
+      addressChecked: true,
+      addressValid: validationResult.isValid,
+      smartyResponse: validationResult.smartyResponse,
+    });
+  } catch (err) {
+    return res.status(500).json({
+      message: "Failed to validate address",
+      error: err.message,
+    });
+  }
+};
+
 // Helper nén ảnh
 async function compressToUnderLimit(buffer, maxBytes = MAX_CLOUDINARY_BYTES) {
   const widths = [2200, 2000, 1600];
@@ -3183,4 +3226,5 @@ module.exports = {
   updateItemTracking,
   createReplacementOrder,
   updateScaleOrder,
+  validateAddressByOrderId
 };
