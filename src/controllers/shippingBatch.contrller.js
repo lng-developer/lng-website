@@ -273,14 +273,14 @@ const createUpdateBatchFromSystem = async (req, res, next) => {
         .json({ message: "No fake tracking to update in this batch" });
     }
 
-    const resolvedItems = []; // các đơn đã tìm được tracking thật (dùng cho batch mới)
-    const remainingFakes = []; // những đơn vẫn chưa có tracking thật
+    const resolvedItems = []; // các đơn đã tìm được tracking thật (cho batch mới)
+    const remainingFakes = []; // những đơn vẫn chưa có tracking thật, giữ lại trong batch gốc
 
     // 1) Duyệt từng đơn fake trong batch gốc
     for (const fakeItem of original.tracking_fakes) {
       const { orderId, tracking: fakeTracking } = fakeItem;
 
-      // pull tracking thật từ hệ thống bạn
+      // pull tracking thật từ hệ thống bạn (thêm machineId/label nếu cần)
       const realTracking = await getRealTrackingForOrder(orderId);
 
       if (realTracking) {
@@ -305,14 +305,17 @@ const createUpdateBatchFromSystem = async (req, res, next) => {
       }
     }
 
+    // 2) Nếu không order nào có real -> không tạo batch mới, không đụng batch gốc
     if (resolvedItems.length === 0) {
-      // Không order nào có tracking thật -> không tạo batch update
-      return res.status(400).json({
+      return res.status(200).json({
         message: "No real tracking found for fake orders in this batch",
+        updateBatchCreated: false,
+        originalBatchId: original._id,
+        remainingFakeCount: original.tracking_fakes.length,
       });
     }
 
-    // 2) Cập nhật lại fake list + stats cho batch gốc
+    // 3) Cập nhật lại fake list + stats cho batch gốc
     original.tracking_fakes = remainingFakes;
     original.stats.totalOrders = original.completed.length;
     original.stats.totalFake = original.completed.filter(
@@ -324,18 +327,17 @@ const createUpdateBatchFromSystem = async (req, res, next) => {
 
     await original.save();
 
-    // 3) Tạo batch mới type UPDATE_FAKE cho những đơn đã có real tracking
+    // 4) Tạo batch mới type UPDATE_FAKE cho những đơn đã có real tracking
     const updateFileName = `update_${original.machineId}_${Date.now()}.txt`;
 
     const updateBatch = await ShippingBatch.create({
       machineId: original.machineId,
       label: original.label,
       type: "UPDATE_FAKE",
-      confirmShipDate: original.confirmShipDate, // hoặc new Date(), tùy bạn muốn
       fileName: updateFileName,
       status: "CONFIRM_FILE_READY",
-      completed: resolvedItems, // batch update chỉ chứa những đơn cần update
-      tracking_fakes: [], // vì đây là batch update, không giữ fake ở đây
+      completed: resolvedItems, // batch update chỉ chứa các đơn cần update
+      tracking_fakes: [], // batch update không chứa fake
       stats: {
         totalOrders: resolvedItems.length,
         totalFake: 0,
@@ -343,7 +345,7 @@ const createUpdateBatchFromSystem = async (req, res, next) => {
       },
     });
 
-    // 4) Build file update để gửi Amazon (chỉ các đơn vừa resolved)
+    // 5) Build file update để gửi Amazon (chỉ các đơn vừa resolved)
     const rows = resolvedItems.map((r) => ({
       orderId: r.orderId,
       tracking: r.tracking,
@@ -351,6 +353,7 @@ const createUpdateBatchFromSystem = async (req, res, next) => {
     const updateFileContent = buildPlainTextFile(rows);
 
     return res.status(201).json({
+      updateBatchCreated: true,
       updateBatchId: updateBatch._id,
       originalBatchId: original._id,
       machineId: updateBatch.machineId,
@@ -359,7 +362,7 @@ const createUpdateBatchFromSystem = async (req, res, next) => {
       fileName: updateBatch.fileName,
       stats: updateBatch.stats,
       updateFileContent, // FE/extension dùng string này để tải file update
-      remainingFakeCount: remainingFakes.length,
+      remainingFakeCount: remainingFakes.length, // số đơn vẫn còn fake trong batch gốc
     });
   } catch (err) {
     next(err);
