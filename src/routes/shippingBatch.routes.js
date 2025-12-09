@@ -11,7 +11,7 @@ router.post(
 );
 router.get("/", shippingBatchController.listShippingBatches);
 router.post(
-  "/shipping-batches/:batchId/update-from-system",
+  "/:batchId/update-from-system",
   shippingBatchController.createUpdateBatchFromSystem
 );
 
