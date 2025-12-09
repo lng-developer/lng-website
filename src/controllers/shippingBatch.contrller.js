@@ -34,7 +34,7 @@ function buildPlainTextFile(rows) {
   return content;
 }
 
-function parseOrderIdsFromTxt(fileBuffer) {
+function parseOrdersWithDaysFromTxt(fileBuffer) {
   const raw = fileBuffer.toString("utf8");
 
   const lines = raw
@@ -45,42 +45,46 @@ function parseOrderIdsFromTxt(fileBuffer) {
   if (lines.length === 0) return [];
 
   const headerLine = lines[0];
-  let delimiter = "\t";
+  const delimiter = "\t"; // Amazon report: TAB-separated
 
   const headers = headerLine
     .split(delimiter)
     .map((h) => h.trim().toLowerCase());
+
   const orderIdIndex = headers.findIndex(
     (h) => h === "order-id" || h === '"order-id"'
+  );
+  const daysPastPromiseIndex = headers.findIndex(
+    (h) => h === "days-past-promise" || h === '"days-past-promise"'
   );
 
   if (orderIdIndex === -1) {
     throw new Error("Không tìm thấy cột 'order-id' trong file TXT");
   }
+  if (daysPastPromiseIndex === -1) {
+    throw new Error("Không tìm thấy cột 'days-past-promise' trong file TXT");
+  }
 
-  const orderIds = [];
+  const rows = [];
+
   for (let i = 1; i < lines.length; i++) {
     const line = lines[i];
     if (!line) continue;
 
     const cols = line.split(delimiter);
-    const val = (cols[orderIdIndex] || "").trim();
-    if (!val) continue;
+    const orderId = (cols[orderIdIndex] || "").trim();
+    const daysStr = (cols[daysPastPromiseIndex] || "").trim();
 
-    orderIds.push(val);
+    if (!orderId) continue;
+
+    const daysPastPromise = Number(daysStr);
+
+    rows.push({ orderId, daysPastPromise });
   }
 
-  return Array.from(new Set(orderIds));
+  return rows;
 }
 
-/**
- * POST /api/shipping-batches
- * multipart/form-data:
- *  - file: TXT (mỗi dòng 1 orderId)
- *  - machineId: string
- *  - label: string
- *  - confirmShipDate: (optional) yyyy-mm-dd / ISO string
- */
 const createBatchFromFile = async (req, res, next) => {
   try {
     const { machineId, label } = req.body;
@@ -97,16 +101,34 @@ const createBatchFromFile = async (req, res, next) => {
         .json({ message: "machineId and label are required" });
     }
 
-    // 1) Lấy danh sách orderId từ file
-    const orderIds = parseOrderIdsFromTxt(file.buffer);
+    // 1) Parse file: lấy orderId + days-past-promise
+    const rows = parseOrdersWithDaysFromTxt(file.buffer);
+    if (!rows.length) {
+      return res.status(400).json({ message: "No valid rows found in file" });
+    }
+
+    // 2) Lọc: chỉ lấy days-past-promise = -2 và unique orderId
+    const orderIds = [];
+    const seen = new Set();
+
+    for (const row of rows) {
+      if (row.daysPastPromise !== -2) continue; // chỉ lấy -2
+      const id = row.orderId;
+      if (!id || seen.has(id)) continue; // bỏ trùng
+      seen.add(id);
+      orderIds.push(id);
+    }
+
     if (!orderIds.length) {
-      return res.status(400).json({ message: "No orderId found in file" });
+      return res.status(400).json({
+        message: "No orderId with days-past-promise = -2 found in file",
+      });
     }
 
     const completed = [];
     const tracking_fakes = [];
 
-    // 2) Với mỗi orderId: lấy tracking hoặc gen fake
+    // 3) Với mỗi orderId đã lọc: lấy tracking hoặc gen fake
     for (const orderId of orderIds) {
       const realTracking = await getRealTrackingForOrder(
         orderId,
@@ -140,14 +162,14 @@ const createBatchFromFile = async (req, res, next) => {
       }
     }
 
-    // 3) Stats
+    // 4) Stats
     const stats = {
       totalOrders: completed.length,
       totalFake: completed.filter((r) => r.isFake).length,
       totalReal: completed.filter((r) => !r.isFake).length,
     };
 
-    // 4) Tạo record batch
+    // 5) Tạo record batch
     const fileName = `confirm_${machineId}_${Date.now()}.txt`;
 
     const batch = await ShippingBatch.create({
@@ -161,12 +183,12 @@ const createBatchFromFile = async (req, res, next) => {
       stats,
     });
 
-    // 5) Build nội dung file confirm ship từ "completed"
-    const rows = completed.map((r) => ({
+    // 6) Build file confirm ship từ "completed"
+    const rowsForFile = completed.map((r) => ({
       orderId: r.orderId,
       tracking: r.tracking,
     }));
-    const confirmFileContent = buildPlainTextFile(rows);
+    const confirmFileContent = buildPlainTextFile(rowsForFile);
 
     return res.status(201).json({
       batchId: batch._id,
@@ -175,7 +197,7 @@ const createBatchFromFile = async (req, res, next) => {
       status: batch.status,
       fileName: batch.fileName,
       stats: batch.stats,
-      confirmFileContent, // FE / extension dùng string này để tải file
+      confirmFileContent,
     });
   } catch (err) {
     next(err);
