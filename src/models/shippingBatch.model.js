@@ -65,14 +65,11 @@ const ShippingBatchSchema = new mongoose.Schema(
       default: "CONFIRM",
     },
 
-    fileName: { type: String }, // tên file confirm ship output
+    fileName: { type: String },
 
     status: {
       type: String,
-      enum: [
-        "CREATED", // mới tạo batch, đã có completed + tracking_fakes
-        "CONFIRM_FILE_READY", // file confirm ship đã generate xong
-      ],
+      enum: ["CREATED", "CONFIRM_FILE_READY", "UPDATE_FAKE"],
       default: "CREATED",
     },
 
