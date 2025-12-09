@@ -126,7 +126,8 @@ function normalizeVendorKey(nameOrType) {
     s.includes("mangoteeprints")
   )
     return "mangotee";
-  if (["beeful", "merchfox", "merchize", "printway", "mangotee"].includes(s)) return s;
+  if (["beeful", "merchfox", "merchize", "printway", "mangotee"].includes(s))
+    return s;
   return "";
 }
 
@@ -144,8 +145,8 @@ async function buildVendorMapsFromVpidSet(vpidSet) {
   const vendorIds = [...new Set(vps.map((vp) => vp.vendor_id).filter(Boolean))];
   const vendors = vendorIds.length
     ? await Vendor.find({ _id: { $in: vendorIds } })
-      .select({ _id: 1, name: 1, fulfillment_type: 1 })
-      .lean()
+        .select({ _id: 1, name: 1, fulfillment_type: 1 })
+        .lean()
     : [];
 
   const vendorMap = new Map(vendors.map((v) => [String(v._id), v]));
@@ -154,7 +155,8 @@ async function buildVendorMapsFromVpidSet(vpidSet) {
   for (const vp of vps) {
     const vend = vendorMap.get(String(vp.vendor_id));
     const vendorKey =
-      normalizeVendorKey(vend?.fulfillment_type) || normalizeVendorKey(vend?.name);
+      normalizeVendorKey(vend?.fulfillment_type) ||
+      normalizeVendorKey(vend?.name);
     vpidToVendor.set(String(vp._id), {
       vendorKey,
       vendorName: vend?.name || "",
@@ -182,16 +184,30 @@ function groupItemsByVendorWithMap(doc, vpidToVendor) {
 // ====== VENDOR FETCHERS ======
 async function fetchBeeful(orderId) {
   const url = `/api/external/order/${encodeURIComponent(orderId)}`;
-  const res = await httpBeeful.get(url, { params: { api_key: GRABINK_API_KEY } });
+  const res = await httpBeeful.get(url, {
+    params: { api_key: GRABINK_API_KEY },
+  });
   if (DEBUG)
-    console.log("[Beeful][HTTP]", res.status, "| keys:", Object.keys(res.data || {}));
+    console.log(
+      "[Beeful][HTTP]",
+      res.status,
+      "| keys:",
+      Object.keys(res.data || {})
+    );
   if (!res.data || typeof res.data !== "object")
     throw new Error(`Beeful empty (HTTP ${res.status})`);
-  if (res.status >= 400 || res.data?.message === "Not Found" || res.data?.error) {
-    throw new Error(`Beeful error: ${res.data?.message || res.data?.error || res.status}`);
+  if (
+    res.status >= 400 ||
+    res.data?.message === "Not Found" ||
+    res.data?.error
+  ) {
+    throw new Error(
+      `Beeful error: ${res.data?.message || res.data?.error || res.status}`
+    );
   }
   const raw = res.data;
-  const tracking = norm(raw?.tracking?.trackingNumber) || norm(raw?.trackingId) || "";
+  const tracking =
+    norm(raw?.tracking?.trackingNumber) || norm(raw?.trackingId) || "";
   const carrier = norm(raw?.shippingProvider);
   const shipped = lower(raw?.status) === "shipped" || Boolean(tracking);
   return { tracking, carrier, shipped, raw };
@@ -208,11 +224,16 @@ function parseMerchFoxResp(orderId, res) {
       throw new Error(`[MerchFox ${status}] Non-JSON for ${orderId}: ${head}`);
     }
   }
-  if (!raw || typeof raw !== "object") throw new Error(`MerchFox bad JSON (HTTP ${status})`);
+  if (!raw || typeof raw !== "object")
+    throw new Error(`MerchFox bad JSON (HTTP ${status})`);
   if (status >= 400)
-    throw new Error(`MerchFox HTTP ${status}: ${raw.message || raw.error || "Error"}`);
+    throw new Error(
+      `MerchFox HTTP ${status}: ${raw.message || raw.error || "Error"}`
+    );
   if (raw.code !== 0 || !raw.data)
-    throw new Error(`MerchFox API code=${raw.code}: ${raw.message || "Unknown"}`);
+    throw new Error(
+      `MerchFox API code=${raw.code}: ${raw.message || "Unknown"}`
+    );
   return raw.data;
 }
 
@@ -272,10 +293,20 @@ async function fetchMerchize(orderId) {
     params: { external_number: orderId },
   });
   if (DEBUG)
-    console.log("[Merchize][HTTP tracking]", res.status, "| keys:", Object.keys(res.data || {}));
-  if (res.status >= 400) throw new Error(`Merchize HTTP ${res.status} (tracking)`);
+    console.log(
+      "[Merchize][HTTP tracking]",
+      res.status,
+      "| keys:",
+      Object.keys(res.data || {})
+    );
+  if (res.status >= 400)
+    throw new Error(`Merchize HTTP ${res.status} (tracking)`);
 
-  if (res.data?.success === true && Array.isArray(res.data.data) && res.data.data.length > 0) {
+  if (
+    res.data?.success === true &&
+    Array.isArray(res.data.data) &&
+    res.data.data.length > 0
+  ) {
     const obj = res.data.data[0];
     const tracking = norm(obj?.tracking_number);
     const carrier = norm(obj?.tracking_company);
@@ -289,10 +320,20 @@ async function fetchMerchize(orderId) {
     params: { external_number: orderId },
   });
   if (DEBUG)
-    console.log("[Merchize][HTTP detail]", res.status, "| keys:", Object.keys(res.data || {}));
-  if (res.status >= 400) throw new Error(`Merchize HTTP ${res.status} (detail)`);
+    console.log(
+      "[Merchize][HTTP detail]",
+      res.status,
+      "| keys:",
+      Object.keys(res.data || {})
+    );
+  if (res.status >= 400)
+    throw new Error(`Merchize HTTP ${res.status} (detail)`);
 
-  if (res.data?.success === true && Array.isArray(res.data.data) && res.data.data.length > 0) {
+  if (
+    res.data?.success === true &&
+    Array.isArray(res.data.data) &&
+    res.data.data.length > 0
+  ) {
     const obj = res.data.data[0];
     const tracking = norm(obj?.tracking_number);
     const carrier = norm(obj?.tracking_company);
@@ -310,7 +351,12 @@ function _pwPickLatest(list) {
     .map((t) => ({
       trackingNumber: (t?.trackingNumber ?? t?.tracking_number ?? "").trim(),
       trackingUrl: (t?.trackingUrl ?? t?.tracking_url ?? "").trim(),
-      carrierName: (t?.carrierName ?? t?.carrier ?? t?.carrierCode ?? "").trim(),
+      carrierName: (
+        t?.carrierName ??
+        t?.carrier ??
+        t?.carrierCode ??
+        ""
+      ).trim(),
       updatedAtMs: new Date(t?.updatedAt ?? t?.updated_at ?? 0).getTime(),
     }))
     .sort((a, b) => (b.updatedAtMs || 0) - (a.updatedAtMs || 0))[0];
@@ -343,7 +389,8 @@ async function fetchPrintway(orderId, doc) {
       transformResponse: [(d) => d],
     });
 
-    if (DEBUG) console.log("[Printway v3][HTTP]", res.status, "| body:", t.body);
+    if (DEBUG)
+      console.log("[Printway v3][HTTP]", res.status, "| body:", t.body);
 
     if (res.status >= 400) {
       lastErr = new Error(`Printway v3 HTTP ${res.status}`);
@@ -358,7 +405,8 @@ async function fetchPrintway(orderId, doc) {
       continue;
     }
 
-    const payload = (raw && typeof raw === "object" && (raw.data || raw)) || null;
+    const payload =
+      (raw && typeof raw === "object" && (raw.data || raw)) || null;
     if (!payload) {
       lastErr = new Error("Printway v3 empty payload");
       continue;
@@ -419,7 +467,8 @@ async function fetchMangoTee(orderId) {
   if (res.status >= 400) throw new Error(`MangoTee HTTP ${res.status}`);
 
   const raw = res.data;
-  if (!raw || typeof raw !== "object") throw new Error("MangoTee empty payload");
+  if (!raw || typeof raw !== "object")
+    throw new Error("MangoTee empty payload");
   if (raw.status !== true || raw.code !== "SUCCESS" || !raw.data) {
     throw new Error(`MangoTee bad response: code=${raw.code}`);
   }
@@ -432,7 +481,8 @@ async function fetchMangoTee(orderId) {
   let carrier = "";
   const ev = _mtPickLatestEvent(data.events || []);
   if (ev) {
-    if (!tracking && isValidTrackingNumber(ev.trackingNumber)) tracking = ev.trackingNumber;
+    if (!tracking && isValidTrackingNumber(ev.trackingNumber))
+      tracking = ev.trackingNumber;
     carrier = ev.carrierName || carrier;
   }
 
@@ -445,7 +495,11 @@ async function fetchMangoTee(orderId) {
 }
 
 // ====== APPLY RESULT INTO ORDER DOC ======
-function applyToItemsOfVendor(doc, vendorKey, { tracking, carrier, shipped, raw }) {
+function applyToItemsOfVendor(
+  doc,
+  vendorKey,
+  { tracking, carrier, shipped, raw }
+) {
   let changed = 0;
 
   doc.items = (doc.items || []).map((it) => {
@@ -467,18 +521,20 @@ function applyToItemsOfVendor(doc, vendorKey, { tracking, carrier, shipped, raw 
         vendorKey === "beeful"
           ? "Beeful"
           : vendorKey === "merchfox"
-            ? "MerchFox"
-            : vendorKey === "merchize"
-              ? "Merchize"
-              : vendorKey === "printway"
-                ? "Printway"
-                : vendorKey === "mangotee"
-                  ? "MangoTee"
-                  : norm(ti.fulfillment),
+          ? "MerchFox"
+          : vendorKey === "merchize"
+          ? "Merchize"
+          : vendorKey === "printway"
+          ? "Printway"
+          : vendorKey === "mangotee"
+          ? "MangoTee"
+          : norm(ti.fulfillment),
       tracking: tracking || prevTracking,
       status: shipped ? "Shipped" : thePrevStatus || "New",
       updated_at: new Date(),
-      note: [norm(ti.note), carrier && `carrier:${carrier}`].filter(Boolean).join(" | "),
+      note: [norm(ti.note), carrier && `carrier:${carrier}`]
+        .filter(Boolean)
+        .join(" | "),
     };
 
     if (
@@ -542,7 +598,8 @@ async function updateOrderByVendors(orderId, vpidToVendorPrefetched = null) {
     const vpid = it?.cost_breakdown?.vendorProductId;
     if (vpid) vpidSet.add(String(vpid));
   }
-  const vpidToVendor = vpidToVendorPrefetched || (await buildVendorMapsFromVpidSet(vpidSet));
+  const vpidToVendor =
+    vpidToVendorPrefetched || (await buildVendorMapsFromVpidSet(vpidSet));
 
   doc.__vpidToVendor = vpidToVendor;
 
@@ -605,7 +662,13 @@ async function runBatch({ max = 100, dryRun = false } = {}) {
   }
   const vpidToVendor = await buildVendorMapsFromVpidSet(vpidSet);
 
-  const knownKeys = new Set(["beeful", "merchfox", "merchize", "printway", "mangotee"]);
+  const knownKeys = new Set([
+    "beeful",
+    "merchfox",
+    "merchize",
+    "printway",
+    "mangotee",
+  ]);
   const filtered = candidates.filter((o) => {
     const groups = groupItemsByVendorWithMap(o, vpidToVendor);
     return Object.keys(groups).some((k) => knownKeys.has(k));
@@ -673,7 +736,9 @@ const vendorSyncList = async (req, res) => {
   try {
     const { orderIds = [] } = req.body || {};
     if (!Array.isArray(orderIds) || !orderIds.length) {
-      return res.status(400).json({ ok: false, message: "orderIds[] required" });
+      return res
+        .status(400)
+        .json({ ok: false, message: "orderIds[] required" });
     }
 
     let ok = 0,
@@ -691,7 +756,11 @@ const vendorSyncList = async (req, res) => {
       }
     }
 
-    return res.json({ ok: true, summary: { ok, fail, scanned: orderIds.length }, details });
+    return res.json({
+      ok: true,
+      summary: { ok, fail, scanned: orderIds.length },
+      details,
+    });
   } catch (e) {
     return res.status(500).json({ ok: false, message: e.message });
   }
@@ -766,12 +835,23 @@ async function requestExtension(req, res) {
 
     const task = { type: type, payload: payload };
 
-    let message =
-      type === "IMPORT_ORDERS"
-        ? "Start import orders ..."
-        : "Start import ads ...";
-
     io.to(`machine:${machineId}`).emit("server:task", task);
+
+    let message = "";
+
+    switch (type) {
+      case "IMPORT_ORDERS":
+        message = "Start import orders ...";
+        break;
+      case "IMPORT_ADS_SPEND":
+        message = "Start import ads ...";
+        break;
+      case "IMPORT_FBM_ORDERS":
+        message = "Start import FBM orders ...";
+        break;
+      default:
+        break;
+    }
 
     await RealtimeLog.create({
       shopId,

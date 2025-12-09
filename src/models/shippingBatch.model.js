@@ -61,7 +61,7 @@ const ShippingBatchSchema = new mongoose.Schema(
 
     type: {
       type: String,
-      enum: ["CONFIRM"],
+      enum: ["CONFIRM", "UPDATE_FAKE"],
       default: "CONFIRM",
     },
 
