@@ -369,26 +369,38 @@ const createUpdateBatchFromSystem = async (req, res, next) => {
   }
 };
 
-function buildShipDateString() {
-  const now = new Date();
+function buildShipDateString(baseDate) {
+  // baseDate: Date hoặc string, nếu không truyền thì dùng today
+  const ref = baseDate ? new Date(baseDate) : new Date();
+
   const shipDate = new Date(
     Date.UTC(
-      now.getUTCFullYear(),
-      now.getUTCMonth(),
-      now.getUTCDate(),
+      ref.getUTCFullYear(),
+      ref.getUTCMonth(),
+      ref.getUTCDate(),
       0,
       22,
       22
     )
   );
+
   return shipDate.toISOString().replace(".000Z", "+00:00");
+}
+
+// Chuẩn hóa field để bỏ khoảng trắng, dấu " và dấu , ở cuối
+function normalizeField(value) {
+  if (value === null || value === undefined) return "";
+  return String(value)
+    .trim() // bỏ khoảng trắng 2 đầu
+    .replace(/^"+|"+$/g, "") // bỏ " ở đầu/cuối nếu có
+    .replace(/,+$/g, ""); // bỏ dấu phẩy ở cuối (case "9214...,")
 }
 
 function buildCompletedShippingFile(completed, options = {}) {
   const {
     carrierCode = "USPS",
     shipMethod = "USPS First Class",
-    shipDate = buildShipDateString(),
+    shipDate, // đã build sẵn ở ngoài, không tự build nữa
   } = options;
 
   let content =
@@ -397,13 +409,15 @@ function buildCompletedShippingFile(completed, options = {}) {
   for (const item of completed) {
     if (!item.orderId || !item.tracking) continue;
 
-    content += [
-      item.orderId,
-      shipDate,
-      carrierCode,
-      item.tracking,
-      shipMethod,
-    ].join("\t");
+    const orderId = normalizeField(item.orderId);
+    const tracking = normalizeField(item.tracking);
+
+    if (!orderId || !tracking) continue;
+
+    content += [orderId, shipDate, carrierCode, tracking, shipMethod].join(
+      "\t"
+    );
+
     content += "\n";
   }
 
@@ -426,7 +440,9 @@ const downloadCompletedFile = async (req, res, next) => {
         .json({ message: "No completed data to export for this batch" });
     }
 
-    let shipDateStr;
+    let shipDateBase;
+
+    // Case 1: FE truyền shipDate manual → ưu tiên
     if (shipDate) {
       const d = new Date(shipDate);
       if (isNaN(d.getTime())) {
@@ -434,10 +450,14 @@ const downloadCompletedFile = async (req, res, next) => {
           .status(400)
           .json({ message: "shipDate is invalid date format" });
       }
-      shipDateStr = d.toISOString().replace(".000Z", "+00:00");
-    } else {
-      shipDateStr = buildShipDateString();
+      shipDateBase = d;
     }
+    // Case 2: FE không truyền -> dùng ngày batch.createdAt
+    else {
+      shipDateBase = batch.createdAt ? new Date(batch.createdAt) : new Date();
+    }
+
+    const shipDateStr = buildShipDateString(shipDateBase);
 
     const fileContent = buildCompletedShippingFile(batch.completed, {
       carrierCode,
