@@ -369,8 +369,101 @@ const createUpdateBatchFromSystem = async (req, res, next) => {
   }
 };
 
+function buildShipDateString() {
+  const now = new Date();
+  const shipDate = new Date(
+    Date.UTC(
+      now.getUTCFullYear(),
+      now.getUTCMonth(),
+      now.getUTCDate(),
+      0,
+      22,
+      22
+    )
+  );
+  return shipDate.toISOString().replace(".000Z", "+00:00");
+}
+
+function buildCompletedShippingFile(completed, options = {}) {
+  const {
+    carrierCode = "USPS",
+    shipMethod = "USPS First Class",
+    shipDate = buildShipDateString(),
+  } = options;
+
+  let content =
+    "order-id\tship-date\tcarrier-code\ttracking-number\tship-method\n";
+
+  for (const item of completed) {
+    if (!item.orderId || !item.tracking) continue;
+
+    content += [
+      item.orderId,
+      shipDate,
+      carrierCode,
+      item.tracking,
+      shipMethod,
+    ].join("\t");
+    content += "\n";
+  }
+
+  return content;
+}
+
+const downloadCompletedFile = async (req, res, next) => {
+  try {
+    const { batchId } = req.params;
+    const { carrierCode, shipMethod, shipDate } = req.query;
+
+    const batch = await ShippingBatch.findById(batchId);
+    if (!batch) {
+      return res.status(404).json({ message: "Batch not found" });
+    }
+
+    if (!batch.completed || batch.completed.length === 0) {
+      return res
+        .status(400)
+        .json({ message: "No completed data to export for this batch" });
+    }
+
+    let shipDateStr;
+    if (shipDate) {
+      const d = new Date(shipDate);
+      if (isNaN(d.getTime())) {
+        return res
+          .status(400)
+          .json({ message: "shipDate is invalid date format" });
+      }
+      shipDateStr = d.toISOString().replace(".000Z", "+00:00");
+    } else {
+      shipDateStr = buildShipDateString();
+    }
+
+    const fileContent = buildCompletedShippingFile(batch.completed, {
+      carrierCode,
+      shipMethod,
+      shipDate: shipDateStr,
+    });
+
+    const filename =
+      batch.fileName ||
+      (batch.type === "UPDATE_FAKE"
+        ? `update_confirmShip_${batch._id}.txt`
+        : `confirmShip_${batch._id}.txt`);
+
+    res
+      .status(200)
+      .set("Content-Type", "text/tab-separated-values; charset=utf-8")
+      .set("Content-Disposition", `attachment; filename="${filename}"`)
+      .send(fileContent);
+  } catch (err) {
+    next(err);
+  }
+};
+
 module.exports = {
   createBatchFromFile,
   listShippingBatches,
   createUpdateBatchFromSystem,
+  downloadCompletedFile,
 };

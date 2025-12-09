@@ -14,5 +14,9 @@ router.post(
   "/:batchId/update-from-system",
   shippingBatchController.createUpdateBatchFromSystem
 );
+router.get(
+  "/shipping-batches/:batchId/download",
+  shippingBatchController.downloadCompletedFile
+);
 
 module.exports = router;
