@@ -440,10 +440,11 @@ const downloadCompletedFile = async (req, res, next) => {
         .json({ message: "No completed data to export for this batch" });
     }
 
+    // ✅ Xác định base date để build ship-date
     let shipDateBase;
 
-    // Case 1: FE truyền shipDate manual → ưu tiên
     if (shipDate) {
+      // FE truyền custom shipDate (ưu tiên cao nhất)
       const d = new Date(shipDate);
       if (isNaN(d.getTime())) {
         return res
@@ -451,9 +452,8 @@ const downloadCompletedFile = async (req, res, next) => {
           .json({ message: "shipDate is invalid date format" });
       }
       shipDateBase = d;
-    }
-    // Case 2: FE không truyền -> dùng ngày batch.createdAt
-    else {
+    } else {
+      // Không truyền → luôn dùng ngày tạo batch
       shipDateBase = batch.createdAt ? new Date(batch.createdAt) : new Date();
     }
 
