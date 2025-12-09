@@ -1564,6 +1564,15 @@ const updateCustomerInfo = async (req, res) => {
       order.customer_infor[key] = customer_infor[key];
     });
 
+    const address = order.customer_infor;
+    if (!address) {
+      return res.status(400).json({
+        message: "Order does not have customer_infor to validate",
+        orderId,
+      });
+    }
+    const validationResult = await validateAddressWithSmarty(address);
+    order.address_validation = validationResult;
     await order.save();
 
     res
