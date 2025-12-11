@@ -255,6 +255,8 @@ const listShippingBatches = async (req, res, next) => {
       stats: b.stats,
       completed: b.completed,
       tracking_fakes: b.tracking_fakes,
+      type: b.type,
+      confirmShipDate: b.confirmShipDate || "",
     }));
 
     return res.json({
@@ -355,6 +357,7 @@ const createUpdateBatchFromSystem = async (req, res, next) => {
     const updateBatch = await ShippingBatch.create({
       machineId: original.machineId,
       label: original.label,
+      confirmShipDate: original.createdAt,
       type: "UPDATE_FAKE",
       fileName: updateFileName,
       status: "CONFIRM_FILE_READY",

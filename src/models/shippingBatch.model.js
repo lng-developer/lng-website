@@ -1,33 +1,26 @@
 // models/shippingBatch.model.js
 const mongoose = require("mongoose");
 
-/**
- * Các đơn đang dùng tracking FAKE trong batch
- */
 const FakeItemSchema = new mongoose.Schema(
   {
-    orderId: { type: String, required: true }, // AmazonOrderId
-    tracking: { type: String, required: true }, // fake tracking
+    orderId: { type: String, required: true },
+    tracking: { type: String, required: true },
     note: { type: String },
     createdAt: { type: Date, default: Date.now },
   },
   { _id: false }
 );
 
-/**
- * Danh sách đầy đủ các đơn trong batch (cả fake lẫn real)
- * -> dùng để build file confirm ship gửi Amazon
- */
 const CompletedItemSchema = new mongoose.Schema(
   {
-    orderId: { type: String, required: true }, // AmazonOrderId
-    tracking: { type: String, required: true }, // tracking hiện dùng để confirm
+    orderId: { type: String, required: true },
+    tracking: { type: String, required: true },
 
-    isFake: { type: Boolean, default: false }, // true = tracking fake, false = tracking real
+    isFake: { type: Boolean, default: false },
     source: {
       type: String,
       enum: ["system", "fake"],
-      default: "system", // "system" = lấy từ hệ thống của bạn, "fake" = tự gen
+      default: "system",
     },
 
     createdAt: { type: Date, default: Date.now },
@@ -47,17 +40,11 @@ const StatsSchema = new mongoose.Schema(
   { _id: false }
 );
 
-/**
- * ShippingBatch:
- * - Một lần request confirm ship = 1 batch
- * - completed: tất cả tracking (fake + real)
- * - tracking_fakes: chỉ những đơn đang dùng tracking fake
- */
 const ShippingBatchSchema = new mongoose.Schema(
   {
-    // Multi-client / multi-account
-    machineId: { type: String, required: true }, // client/extension nào gửi
-    label: { type: String, required: true }, // gắn với acc Amazon nào, ví dụ "US-main-1"
+    machineId: { type: String, required: true },
+    label: { type: String, required: true },
+    confirmShipDate: { type: Date },
 
     type: {
       type: String,
@@ -73,16 +60,14 @@ const ShippingBatchSchema = new mongoose.Schema(
       default: "CREATED",
     },
 
-    // Chứa tất cả tracking (fake + real)
     completed: [CompletedItemSchema],
 
-    // Chỉ các order đang dùng fake tracking
     tracking_fakes: [FakeItemSchema],
 
     stats: { type: StatsSchema, default: () => ({}) },
   },
   {
-    timestamps: true, // createdAt, updatedAt
+    timestamps: true,
   }
 );
 
