@@ -679,7 +679,6 @@ const downloadAllUpdatedFakeFile = async (req, res, next) => {
         $match: {
           type: "CONFIRM",
           machineId,
-          ...(label ? { label } : {}),
           "completed.orderId": { $in: orderIds },
         },
       },
