@@ -267,23 +267,10 @@ const listShippingBatches = async (req, res, next) => {
 const createUpdateBatchFromSystem = async (req, res, next) => {
   try {
     const { batchId } = req.params;
-    const { machineId, label } = req.body;
 
     const original = await ShippingBatch.findById(batchId);
     if (!original) {
       return res.status(404).json({ message: "Original batch not found" });
-    }
-
-    // Optional: check đúng máy & acc
-    if (machineId && original.machineId !== machineId) {
-      return res
-        .status(400)
-        .json({ message: "machineId mismatch with original batch" });
-    }
-    if (label && original.label !== label) {
-      return res
-        .status(400)
-        .json({ message: "label mismatch with original batch" });
     }
 
     // Nếu không còn fake nào thì khỏi tạo batch update
@@ -542,12 +529,11 @@ function buildGlobalUpdateFile(rows, options = {}) {
 
 const updateAllFakeTracking = async (req, res, next) => {
   try {
-    const { machineId, label } = req.body;
+    const { machineId } = req.body;
 
     const batches = await ShippingBatch.find({
       type: "CONFIRM",
       machineId,
-      label,
       tracking_fakes: { $exists: true, $ne: [] },
     });
 
@@ -566,11 +552,7 @@ const updateAllFakeTracking = async (req, res, next) => {
       const remainingFakes = [];
 
       for (const fakeItem of batch.tracking_fakes) {
-        const realTracking = await getRealTrackingForOrder(
-          fakeItem.orderId,
-          batch.machineId,
-          batch.label
-        );
+        const realTracking = await getRealTrackingForOrder(fakeItem.orderId);
 
         if (realTracking) {
           // gom vào file update global
@@ -646,7 +628,6 @@ const downloadAllUpdatedFakeFile = async (req, res, next) => {
   try {
     const {
       machineId,
-      label,
       carrierCode = "USPS",
       shipMethod = "USPS First Class",
     } = req.query;
@@ -655,7 +636,6 @@ const downloadAllUpdatedFakeFile = async (req, res, next) => {
     const updateBatches = await ShippingBatch.find({
       type: { $in: ["UPDATE_FAKE", "UPDATE_GLOBAL"] },
       machineId,
-      label,
       completed: { $exists: true, $ne: [] },
     }).sort({ createdAt: 1 }); // sort theo thời gian để dễ trace
 
