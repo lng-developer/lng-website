@@ -628,16 +628,24 @@ const downloadAllUpdatedFakeFile = async (req, res, next) => {
   try {
     const {
       machineId,
+      label, // nên truyền label để tránh lẫn nhiều account
       carrierCode = "USPS",
       shipMethod = "USPS First Class",
     } = req.query;
 
-    // 1. Lấy tất cả batch UPDATE (fake -> real)
+    if (!machineId) {
+      return res.status(400).json({ message: "machineId is required" });
+    }
+
+    // 1) Lấy tất cả batch UPDATE (fake -> real)
     const updateBatches = await ShippingBatch.find({
       type: { $in: ["UPDATE_FAKE", "UPDATE_GLOBAL"] },
       machineId,
+      ...(label ? { label } : {}),
       completed: { $exists: true, $ne: [] },
-    }).sort({ createdAt: 1 }); // sort theo thời gian để dễ trace
+    })
+      .sort({ createdAt: 1 })
+      .lean(); // lean để xử lý nhanh
 
     if (!updateBatches.length) {
       return res.status(400).json({
@@ -645,40 +653,81 @@ const downloadAllUpdatedFakeFile = async (req, res, next) => {
       });
     }
 
+    /**
+     * 2) Gom orderId + tracking từ UPDATE batches
+     * Nếu trùng orderId nhiều lần, ưu tiên bản mới nhất (vì sort createdAt tăng dần)
+     */
+    const orderMap = new Map(); // orderId -> tracking
+    for (const batch of updateBatches) {
+      for (const item of batch.completed || []) {
+        if (!item?.orderId || !item?.tracking) continue;
+        orderMap.set(String(item.orderId).trim(), String(item.tracking).trim());
+      }
+    }
+
+    const orderIds = Array.from(orderMap.keys());
+    if (!orderIds.length) {
+      return res.status(400).json({ message: "No valid updated orders found" });
+    }
+
+    /**
+     * 3) Tìm batch CONFIRM chứa từng orderId để lấy createdAt của CONFIRM batch
+     * Dùng aggregate để tạo map orderId -> confirmCreatedAt
+     *
+     * Lưu ý: match theo completed.orderId với $in
+     */
+    const confirmMatches = await ShippingBatch.aggregate([
+      {
+        $match: {
+          type: "CONFIRM",
+          machineId,
+          ...(label ? { label } : {}),
+          "completed.orderId": { $in: orderIds },
+        },
+      },
+      { $unwind: "$completed" },
+      { $match: { "completed.orderId": { $in: orderIds } } },
+      {
+        $group: {
+          _id: "$completed.orderId",
+          // nếu orderId lỡ xuất hiện nhiều confirm batch, lấy cái sớm nhất hoặc đúng logic bạn muốn
+          confirmCreatedAt: { $min: "$createdAt" },
+        },
+      },
+    ]);
+
+    const confirmDateMap = new Map(); // orderId -> createdAt(Date)
+    for (const row of confirmMatches) {
+      if (!row?._id || !row?.confirmCreatedAt) continue;
+      confirmDateMap.set(String(row._id).trim(), row.confirmCreatedAt);
+    }
+
+    /**
+     * 4) Build file: ship-date theo confirm batch createdAt của từng order
+     * Nếu orderId không tìm thấy trong CONFIRM (hiếm), fallback về ngày tạo UPDATE mới nhất
+     */
     let content =
       "order-id\tship-date\tcarrier-code\ttracking-number\tship-method\n";
 
     let totalOrders = 0;
 
-    // 2. Gom dữ liệu theo từng batch
-    for (const batch of updateBatches) {
-      const shipDateStr = buildShipDateString(batch.createdAt);
+    for (const [orderId, tracking] of orderMap.entries()) {
+      const confirmCreatedAt = confirmDateMap.get(orderId);
 
-      for (const item of batch.completed) {
-        if (!item.orderId || !item.tracking) continue;
+      // fallback: nếu không tìm thấy confirm batch, lấy ngày hiện tại (hoặc bạn có thể bỏ qua)
+      const shipDateStr = buildShipDateString(confirmCreatedAt || new Date());
 
-        content += [
-          item.orderId,
-          shipDateStr, // ✅ ship-date = ngày batch UPDATE được tạo
-          carrierCode,
-          item.tracking,
-          shipMethod,
-        ].join("\t");
+      content += [orderId, shipDateStr, carrierCode, tracking, shipMethod].join(
+        "\t"
+      );
 
-        content += "\n";
-        totalOrders++;
-      }
-    }
-
-    if (totalOrders === 0) {
-      return res.status(400).json({
-        message: "No valid updated orders found to export",
-      });
+      content += "\n";
+      totalOrders++;
     }
 
     const filename = `update_all_fake_${Date.now()}.txt`;
 
-    res
+    return res
       .status(200)
       .set("Content-Type", "text/tab-separated-values; charset=utf-8")
       .set("Content-Disposition", `attachment; filename="${filename}"`)
