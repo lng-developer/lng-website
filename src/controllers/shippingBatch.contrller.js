@@ -628,7 +628,6 @@ const downloadAllUpdatedFakeFile = async (req, res, next) => {
   try {
     const {
       machineId,
-      label, // nên truyền label để tránh lẫn nhiều account
       carrierCode = "USPS",
       shipMethod = "USPS First Class",
     } = req.query;
@@ -641,7 +640,6 @@ const downloadAllUpdatedFakeFile = async (req, res, next) => {
     const updateBatches = await ShippingBatch.find({
       type: { $in: ["UPDATE_FAKE", "UPDATE_GLOBAL"] },
       machineId,
-      ...(label ? { label } : {}),
       completed: { $exists: true, $ne: [] },
     })
       .sort({ createdAt: 1 })
