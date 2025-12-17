@@ -24,7 +24,9 @@ const orderHistorySchema = new mongoose.Schema(
                 "UPDATE_BASE_COST",
                 "SYNC_AMAZON_FINANCE",
                 "SEND_TO_VENDOR",
-                "OTHER",
+                "OPEN_CASE",
+                "REMOVE_CASE",
+                "OTHER"
             ],
             required: true,
         },

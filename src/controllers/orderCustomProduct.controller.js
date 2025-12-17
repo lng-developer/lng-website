@@ -21,6 +21,7 @@ const SkuMappingConfig = db.SkuMappingConfig;
 const SkuMappingEntry = db.SkuMappingEntry;
 const Listing = db.listing;
 const PsdTask = db.PsdTask;
+const { logOrderHistory } = require("../service/orderHistoryLogger");
 const {
   applyRulesToSku,
   buildRulesFromConfig,
@@ -366,6 +367,241 @@ const validateAddressByOrderId = async (req, res) => {
   }
 };
 
+// Helper: xác định validation “đủ tin cậy” hay chỉ là lỗi hệ thống/billing
+function normalizeValidationResult(result) {
+  // Kỳ vọng validateAddressWithSmarty trả { isValid, smartyResponse }
+  // Nhưng trong thực tế có thể trả error object
+  const isValid = !!result?.isValid;
+
+  const errMsg =
+    result?.smartyResponse?.error ||
+    result?.smartyResponse?.errors?.[0]?.message ||
+    result?.error ||
+    null;
+
+  // Smarty lỗi billing/quota (vd 402) => không kết luận invalid address
+  // Bạn có thể mở rộng mapping theo response thực tế của Smarty.
+  const isSystemError =
+    !!errMsg &&
+    (String(errMsg).includes("402") ||
+      String(errMsg).toLowerCase().includes("payment") ||
+      String(errMsg).toLowerCase().includes("quota") ||
+      String(errMsg).toLowerCase().includes("subscription"));
+
+  return {
+    isValid,
+    isSystemError,
+    errorMessage: errMsg,
+    raw: result,
+  };
+}
+
+// Helper: concurrency pool đơn giản
+async function asyncPool(poolLimit, array, iteratorFn) {
+  const ret = [];
+  const executing = [];
+  for (const item of array) {
+    const p = Promise.resolve().then(() => iteratorFn(item));
+    ret.push(p);
+
+    if (poolLimit <= array.length) {
+      const e = p.then(() => executing.splice(executing.indexOf(e), 1));
+      executing.push(e);
+      if (executing.length >= poolLimit) {
+        await Promise.race(executing);
+      }
+    }
+  }
+  return Promise.allSettled(ret);
+}
+
+/**
+ * POST /orders/address/validate-invalid
+ * Query params:
+ *  - shopId (optional)
+ *  - from (optional ISO date)  e.g. 2025-12-01
+ *  - to   (optional ISO date)
+ *  - status (optional, default "New")
+ *  - limit (optional, default 200, max 1000)
+ *  - concurrency (optional, default 5, max 20)
+ *  - force=1 (optional)  re-validate even if already has address_validation
+ *  - dryRun=1 (optional)  không save DB, chỉ report
+ */
+const validateInvalidAddressesBatch = async (req, res) => {
+  try {
+    const {
+      shopId,
+      from,
+      to,
+      status = "New",
+      force,
+      dryRun,
+      limit = 200,
+      concurrency = 5,
+    } = req.query;
+
+    const nLimit = Math.min(Math.max(parseInt(limit, 10) || 200, 1), 1000);
+    const nConcurrency = Math.min(
+      Math.max(parseInt(concurrency, 10) || 5, 1),
+      20
+    );
+
+    const filter = {};
+
+    // Theo shop
+    if (shopId) {
+      if (!mongoose.Types.ObjectId.isValid(shopId)) {
+        return res.status(400).json({ message: "Invalid shopId" });
+      }
+      filter.shopId = new mongoose.Types.ObjectId(shopId);
+    }
+
+    // Theo status
+    if (status) filter.status = status;
+
+    // Theo ngày purchase_date
+    if (from || to) {
+      filter.purchase_date = {};
+      if (from) filter.purchase_date.$gte = new Date(from);
+      if (to) filter.purchase_date.$lte = new Date(to);
+    }
+
+    /**
+     * Điều kiện “cần check invalid”:
+     * - customer_infor tồn tại
+     * - Và (chưa có address_validation) OR (address_validation.isValid = false) OR (có smartyResponse.error)
+     * - Nếu force=1 thì bỏ qua điều kiện đã validate, cứ recheck tất cả matching filter
+     */
+    filter.customer_infor = { $exists: true, $ne: null };
+
+    if (!force) {
+      filter.$or = [
+        { address_validation: { $exists: false } },
+        { "address_validation.isValid": false },
+        { "address_validation.smartyResponse.error": { $exists: true, $ne: null } },
+      ];
+    }
+
+    // Lấy danh sách order cần check
+    const orders = await OrderCustomProduct.find(filter)
+      .select({
+        orderId: 1,
+        customer_infor: 1,
+        address_validation: 1,
+        purchase_date: 1,
+        status: 1,
+        shopId: 1,
+      })
+      .sort({ purchase_date: -1 })
+      .limit(nLimit)
+      .lean();
+
+    if (!orders.length) {
+      return res.json({
+        matched: 0,
+        checked: 0,
+        updated: 0,
+        invalid: 0,
+        valid: 0,
+        systemError: 0,
+        items: [],
+      });
+    }
+
+    // Thực thi validate theo pool
+    const results = await asyncPool(nConcurrency, orders, async (o) => {
+      const orderId = o.orderId;
+      const address = o.customer_infor;
+
+      if (!address) {
+        return {
+          orderId,
+          checked: false,
+          updated: false,
+          status: "missing_address",
+        };
+      }
+
+      const validationResult = await validateAddressWithSmarty(address);
+      const norm = normalizeValidationResult(validationResult);
+
+      // Nếu là system error (vd 402) => log lại, không đánh invalid, không overwrite nếu bạn không muốn
+      // Ở đây mình vẫn lưu để trace (trừ khi dryRun).
+      if (!dryRun) {
+        await OrderCustomProduct.updateOne(
+          { orderId },
+          {
+            $set: {
+              address_validation: validationResult,
+              address_validation_checked_at: new Date(),
+            },
+          }
+        );
+      }
+
+      return {
+        orderId,
+        checked: true,
+        updated: !dryRun,
+        addressValid: norm.isValid,
+        systemError: norm.isSystemError,
+        errorMessage: norm.errorMessage,
+      };
+    });
+
+    // Tổng hợp
+    const items = results.map((r, idx) => {
+      if (r.status === "fulfilled") return r.value;
+      return {
+        orderId: orders[idx]?.orderId,
+        checked: false,
+        updated: false,
+        status: "exception",
+        errorMessage: r.reason?.message || String(r.reason),
+      };
+    });
+
+    let checked = 0,
+      updated = 0,
+      valid = 0,
+      invalid = 0,
+      systemError = 0,
+      exception = 0;
+
+    for (const it of items) {
+      if (it.checked) checked += 1;
+      if (it.updated) updated += 1;
+
+      if (it.status === "exception") exception += 1;
+      if (it.systemError) systemError += 1;
+
+      // Chỉ đếm valid/invalid nếu không phải systemError
+      if (it.checked && !it.systemError) {
+        if (it.addressValid) valid += 1;
+        else invalid += 1;
+      }
+    }
+
+    return res.json({
+      matched: orders.length,
+      checked,
+      updated,
+      valid,
+      invalid,
+      systemError,
+      exception,
+      dryRun: !!dryRun,
+      force: !!force,
+      params: { shopId, from, to, status, limit: nLimit, concurrency: nConcurrency },
+      items,
+    });
+  } catch (err) {
+    return res.status(500).json({
+      message: "Failed to validate invalid addresses batch",
+      error: err.message,
+    });
+  }
+};
 // Helper nén ảnh
 async function compressToUnderLimit(buffer, maxBytes = MAX_CLOUDINARY_BYTES) {
   const widths = [2200, 2000, 1600];
@@ -1605,12 +1841,47 @@ const openCaseInOrder = async (req, res) => {
     if (!Array.isArray(order.case)) {
       order.case = [];
     }
-    // Lọc bỏ các case đã có trong mảng
-    const newCaseIds = caseIds.filter((id) => !order.case.includes(id));
-    // Append vào mảng
-    order.case.push(...newCaseIds);
 
+    const oldCases = [...order.case.map(id => String(id))];
+
+    // Lọc bỏ các case đã có
+    const newCaseIds = caseIds.filter(
+      (id) => !oldCases.includes(String(id))
+    );
+
+    // Không có case mới → không cần log
+    if (newCaseIds.length === 0) {
+      return res.status(200).json({
+        message: "No new case added",
+        orderId,
+        case: order.case,
+      });
+    }
+
+    // Append case mới
+    order.case.push(...newCaseIds);
     await order.save();
+
+    // ===== LOGGER =====
+    await logOrderHistory({
+      orderDoc: order,
+      action: "OPEN_CASE",
+      description: `Added ${newCaseIds.length} case(s) to order`,
+      changes: [
+        {
+          field: "case",
+          from: oldCases,
+          to: order.case.map(id => String(id)),
+        },
+      ],
+      user: req.user,
+      context: {
+        source: "PORTAL",
+        ip: req.ip,
+        userAgent: req.headers["user-agent"],
+      },
+    });
+    // ==================
 
     res.status(200).json({
       message: "Case field appended successfully",
@@ -1618,9 +1889,10 @@ const openCaseInOrder = async (req, res) => {
       case: order.case,
     });
   } catch (error) {
-    res
-      .status(500)
-      .json({ message: "Failed to append case field", error: error.message });
+    res.status(500).json({
+      message: "Failed to append case field",
+      error: error.message,
+    });
   }
 };
 
@@ -1634,30 +1906,81 @@ const removeCaseFromOrder = async (req, res) => {
         .json({ message: "Missing orderId or caseIds (should be an array)" });
     }
 
+    // Normalize + unique + validate
+    const normalizedCaseIds = [...new Set(caseIds.map(id => String(id)))];
+
+    const invalidIds = normalizedCaseIds.filter(
+      id => !mongoose.Types.ObjectId.isValid(id)
+    );
+    if (invalidIds.length > 0) {
+      return res.status(400).json({
+        message: "Invalid caseId(s)",
+        invalidIds,
+      });
+    }
+
     const order = await OrderCustomProduct.findOne({ orderId });
     if (!order) {
       return res.status(404).json({ message: "Order not found" });
     }
 
-    // Loại bỏ các case có trong caseIds
-    order.case = order.case.filter(
-      (existingCaseId) => !caseIds.includes(String(existingCaseId))
+    if (!Array.isArray(order.case)) {
+      order.case = [];
+    }
+
+    // Snapshot before
+    const oldCases = order.case.map(id => String(id));
+
+    // Remove
+    const newCases = oldCases.filter(
+      id => !normalizedCaseIds.includes(id)
     );
 
+    // Không có thay đổi → không log
+    if (newCases.length === oldCases.length) {
+      return res.status(200).json({
+        message: "No case removed",
+        orderId,
+        case: order.case,
+      });
+    }
+
+    order.case = newCases;
     await order.save();
 
-    res.status(200).json({
+    // ===== LOGGER =====
+    await logOrderHistory({
+      orderDoc: order,
+      action: "REMOVE_CASE",
+      description: `Removed ${oldCases.length - newCases.length} case(s) from order`,
+      changes: [
+        {
+          field: "case",
+          from: oldCases,
+          to: newCases,
+        },
+      ],
+      user: req.user,
+      context: {
+        source: "PORTAL",
+        ip: req.ip,
+        userAgent: req.headers["user-agent"],
+      },
+    });
+    // ==================
+
+    return res.status(200).json({
       message: "Case(s) removed successfully",
       orderId,
       case: order.case,
     });
   } catch (error) {
-    res
-      .status(500)
-      .json({ message: "Failed to remove case(s)", error: error.message });
+    return res.status(500).json({
+      message: "Failed to remove case(s)",
+      error: error.message,
+    });
   }
 };
-
 const updateBaseImageUrl = async (req, res) => {
   try {
     const { orderId, orderItemId, imageUrl } = req.body;
@@ -3235,5 +3558,6 @@ module.exports = {
   updateItemTracking,
   createReplacementOrder,
   updateScaleOrder,
-  validateAddressByOrderId
+  validateAddressByOrderId,
+  validateInvalidAddressesBatch
 };

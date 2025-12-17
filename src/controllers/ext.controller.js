@@ -385,8 +385,7 @@ async function fetchPrintway(orderId, doc) {
       method: "get",
       url: "", // baseURL đã trỏ /v3/order/detail
       params: t.body,
-      data: t.body,
-      transformResponse: [(d) => d],
+      transformResponse: [(d) => d], // giữ raw string để tự parse
     });
 
     if (DEBUG)
@@ -405,38 +404,59 @@ async function fetchPrintway(orderId, doc) {
       continue;
     }
 
-    const payload =
-      (raw && typeof raw === "object" && (raw.data || raw)) || null;
-    if (!payload) {
+    if (!raw || typeof raw !== "object") {
       lastErr = new Error("Printway v3 empty payload");
+      continue;
+    }
+
+    // Chuẩn hóa về list orders
+    let orders = [];
+    if (Array.isArray(raw.data)) {
+      orders = raw.data;
+    } else if (raw.data && typeof raw.data === "object") {
+      orders = [raw.data];
+    } else if (Array.isArray(raw)) {
+      orders = raw;
+    } else {
+      orders = [raw];
+    }
+
+    if (!orders.length) {
+      lastErr = new Error("Printway v3 empty data list");
       continue;
     }
 
     const combined = [];
 
-    if (Array.isArray(payload.trackings)) {
-      combined.push(...payload.trackings);
-    }
-    if (Array.isArray(payload.orderitems)) {
-      for (const it of payload.orderitems) {
-        if (it?.tracking) combined.push(it.tracking);
+    for (const ord of orders) {
+      if (Array.isArray(ord.trackings)) {
+        combined.push(...ord.trackings);
+      }
+      if (Array.isArray(ord.orderitems)) {
+        for (const it of ord.orderitems) {
+          if (it?.tracking) combined.push(it.tracking);
+        }
       }
     }
 
     const latest = _pwPickLatest(combined);
+    const firstOrder = orders[0];
+
     if (!latest) {
-      return { tracking: "", carrier: "", shipped: false, raw };
+      // Có order nhưng chưa có tracking
+      return { tracking: "", carrier: "", shipped: false, raw: firstOrder };
     }
 
     const tracking = latest.trackingNumber || "";
     const carrier = latest.carrierName || "";
     const shipped = Boolean(tracking);
 
-    return { tracking, carrier, shipped, raw };
+    return { tracking, carrier, shipped, raw: firstOrder };
   }
 
   throw lastErr || new Error("Printway v3 unknown error");
 }
+
 
 /**
  * MangoTee helpers
