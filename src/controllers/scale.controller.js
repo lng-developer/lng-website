@@ -13,7 +13,7 @@ const User = db.user;
 const Team = db.Team;
 const Shop = db.shop;
 const upload = multer({ storage: multer.memoryStorage() });
-
+const { logOrderHistory } = require("../service/orderHistoryLogger");
 
 // ============ Helpers (giữ nguyên) ============
 function uploadStreamToCloudinary(buffer, opts = {}) {
@@ -104,12 +104,31 @@ const uploadFulfillmentFileForItem = [
       if (!item)
         return res.status(404).json({ message: "Order item not found" });
 
+      // ===== Snapshot BEFORE =====
+      const oldFulfillmentFile = (() => {
+        try {
+          const ff = item.fulfillment_file;
+          if (!ff) return {};
+          if (ff instanceof Map) return Object.fromEntries(ff);
+          if (typeof ff === "object") return ff;
+          return {};
+        } catch {
+          return {};
+        }
+      })();
+      const oldItemScaleStatus = item.scale_status;
+      const oldOrderScaleOverallStatus = order.scale_overall_status;
+      const oldScaleId = order.scaleId ? String(order.scaleId) : null;
+      // ===========================
+
+      // Ensure Map
       const ff = item.fulfillment_file;
       if (!ff) item.fulfillment_file = new Map();
       else if (typeof ff === "string") item.fulfillment_file = new Map();
       else if (!(ff instanceof Map))
         item.fulfillment_file = new Map(Object.entries(ff));
 
+      // Upload & set map
       for (let i = 0; i < req.files.length; i++) {
         const file = req.files[i];
         const pos = String(positions[i]?.position || "")
@@ -125,16 +144,77 @@ const uploadFulfillmentFileForItem = [
         item.fulfillment_file.set(pos, up.secure_url);
       }
 
+      // Business updates
       item.scale_status = "Pending";
       order.scale_overall_status = computeOverallScaleStatus(order);
       item.markModified("fulfillment_file");
 
-      order.scaleId = user.id;
+      order.scaleId = user.id; // giữ như code hiện tại của bạn
       await order.save();
+
+      // ===== Snapshot AFTER =====
+      const newFulfillmentFile =
+        item.fulfillment_file instanceof Map
+          ? Object.fromEntries(item.fulfillment_file)
+          : item.fulfillment_file || {};
+
+      const changes = [];
+
+      // 1) fulfillment_file
+      changes.push({
+        field: "items.fulfillment_file",
+        from: oldFulfillmentFile,
+        to: newFulfillmentFile,
+      });
+
+      // 2) item.scale_status
+      if (oldItemScaleStatus !== item.scale_status) {
+        changes.push({
+          field: "items.scale_status",
+          from: oldItemScaleStatus,
+          to: item.scale_status,
+        });
+      }
+
+      // 3) order.scale_overall_status
+      if (oldOrderScaleOverallStatus !== order.scale_overall_status) {
+        changes.push({
+          field: "scale_overall_status",
+          from: oldOrderScaleOverallStatus,
+          to: order.scale_overall_status,
+        });
+      }
+
+      // 4) order.scaleId
+      const newScaleId = order.scaleId ? String(order.scaleId) : null;
+      if (oldScaleId !== newScaleId) {
+        changes.push({
+          field: "scaleId",
+          from: oldScaleId,
+          to: newScaleId,
+        });
+      }
+      // ==========================
+
+      // ===== LOGGER =====
+      await logOrderHistory({
+        orderDoc: order,
+        action: "UPLOAD_FULFILLMENT_FILES",
+        description: `Uploaded fulfillment file(s) for item ${orderItemId}`,
+        changes,
+        orderItemId,
+        user,
+        context: {
+          source: "PORTAL",
+          ip: req.ip,
+          userAgent: req.headers["user-agent"],
+        },
+      });
+      // =================
 
       return res.json({
         message: "Uploaded fulfillment files successfully",
-        fulfillment_file: Object.fromEntries(item.fulfillment_file),
+        fulfillment_file: newFulfillmentFile,
         item_scale_status: item.scale_status,
         order_scale_overall_status: order.scale_overall_status,
       });
@@ -254,10 +334,23 @@ const buildInvalidAddressMessage = (order) => {
   return `Invalid Address: address validation failed. Please correct the address before sending. Address: ${addr}`;
 };
 
+const toPlainFF = (ff) => {
+  try {
+    if (!ff) return {};
+    if (ff instanceof Map) return Object.fromEntries(ff);
+    if (typeof ff === "object" && !Array.isArray(ff)) return ff;
+    if (typeof ff === "string") return { file: ff };
+    return {};
+  } catch {
+    return {};
+  }
+};
+
 const confirmScaleForItem = async (req, res) => {
   try {
     const { orderId, orderItemId } = req.params;
     const { decision, note, provider } = req.body || {};
+    const user = req.user;
 
     const d = String(decision || "").toLowerCase();
     if (!["approve", "reject"].includes(d)) {
@@ -286,6 +379,23 @@ const confirmScaleForItem = async (req, res) => {
       if (typeof ff === "string") return !!ff;
       return false;
     };
+
+    // ===== Snapshot BEFORE =====
+    const before = {
+      item_scale_status: item.scale_status,
+      item_qc_note: item.qc_note || "",
+      item_ff: toPlainFF(item.fulfillment_file),
+      order_scale_overall_status: order.scale_overall_status,
+      order_status: order.status,
+      order_scaleId: order.scaleId ? String(order.scaleId) : null,
+      grabink_submission: order.grabink_submission || null,
+      vendor_submissions: order.vendor_submissions || null,
+    };
+    // ===========================
+
+    // ---------------------------
+    // REJECT
+    // ---------------------------
     if (d === "reject") {
       item.scale_status = "QC Rejected";
       item.fulfillment_file = new Map();
@@ -297,7 +407,6 @@ const confirmScaleForItem = async (req, res) => {
 
       // Trừ điểm người scale (idempotent theo orderId:orderItemId)
       try {
-        // Lấy asin_type để áp mức phạt phù hợp
         let asinType = "Normal";
         if (item.asin) {
           const listing = await Listing.findOne({ asin: item.asin })
@@ -316,11 +425,63 @@ const confirmScaleForItem = async (req, res) => {
           });
         }
       } catch (penErr) {
-        // Không chặn flow reject, chỉ log để theo dõi
         console.error("Penalty apply failed:", penErr);
       }
 
       await order.save();
+
+      // ===== LOGGER (REJECT) =====
+      const after = {
+        item_scale_status: item.scale_status,
+        item_qc_note: item.qc_note || "",
+        item_ff: toPlainFF(item.fulfillment_file),
+        order_scale_overall_status: order.scale_overall_status,
+      };
+
+      const changes = [];
+      if (before.item_scale_status !== after.item_scale_status) {
+        changes.push({
+          field: "items.scale_status",
+          from: before.item_scale_status,
+          to: after.item_scale_status,
+        });
+      }
+      if (before.item_qc_note !== after.item_qc_note) {
+        changes.push({
+          field: "items.qc_note",
+          from: before.item_qc_note,
+          to: after.item_qc_note,
+        });
+      }
+      // fulfillment_file thường bị reset khi reject
+      changes.push({
+        field: "items.fulfillment_file",
+        from: before.item_ff,
+        to: after.item_ff,
+      });
+      if (before.order_scale_overall_status !== after.order_scale_overall_status) {
+        changes.push({
+          field: "scale_overall_status",
+          from: before.order_scale_overall_status,
+          to: after.order_scale_overall_status,
+        });
+      }
+
+      await logOrderHistory({
+        orderDoc: order,
+        action: "SCALE_REJECT_ITEM",
+        description: `QC rejected item ${orderItemId}${note ? `: ${String(note).slice(0, 120)}` : ""}`,
+        changes,
+        orderItemId,
+        user,
+        context: {
+          source: "PORTAL",
+          ip: req.ip,
+          userAgent: req.headers["user-agent"],
+        },
+      });
+      // ===========================
+
       return res.json({
         message: "Scale rejected. Item set to QC Rejected.",
         item_scale_status: item.scale_status,
@@ -329,7 +490,11 @@ const confirmScaleForItem = async (req, res) => {
       });
     }
 
-    // Yêu cầu có ít nhất 1 nguồn in: fulfillment_file (front/back/...) hoặc svgFile (fallback)
+    // ---------------------------
+    // APPROVE
+    // ---------------------------
+
+    // Require print files
     const hasFF = hasAnyFulfillmentUrl(item.fulfillment_file);
     const hasSvg = !!item.svgFile;
     if (!hasFF && !hasSvg) {
@@ -342,48 +507,141 @@ const confirmScaleForItem = async (req, res) => {
     item.scale_status = "Complete";
     if (note) item.qc_note = note;
 
-    // Nếu fulfillment_file là Map rỗng và bạn vừa mới nạp file trước đó ở API khác,
-    // có thể cần markModified để Mongoose ghi nhận (an toàn vẫn mark):
     item.markModified("fulfillment_file");
 
-    // Tính trạng thái tổng thể (Ready nếu tất cả Complete)
     order.scale_overall_status = computeOverallScaleStatus(order);
 
-    // === Nếu order đã "Ready" ===
+    // Log approve item + (optional) change of overall status if any
+    const approveChanges = [];
+    if (before.item_scale_status !== item.scale_status) {
+      approveChanges.push({
+        field: "items.scale_status",
+        from: before.item_scale_status,
+        to: item.scale_status,
+      });
+    }
+    if ((before.item_qc_note || "") !== (item.qc_note || "")) {
+      approveChanges.push({
+        field: "items.qc_note",
+        from: before.item_qc_note,
+        to: item.qc_note || "",
+      });
+    }
+    if (before.order_scale_overall_status !== order.scale_overall_status) {
+      approveChanges.push({
+        field: "scale_overall_status",
+        from: before.order_scale_overall_status,
+        to: order.scale_overall_status,
+      });
+    }
+
+    await logOrderHistory({
+      orderDoc: order,
+      action: "SCALE_APPROVE_ITEM",
+      description: `Approved item ${orderItemId}${note ? `: ${String(note).slice(0, 120)}` : ""}`,
+      changes: approveChanges,
+      orderItemId,
+      user,
+      context: {
+        source: "PORTAL",
+        ip: req.ip,
+        userAgent: req.headers["user-agent"],
+      },
+    });
+
+    // === If order becomes READY ===
     if (order.scale_overall_status === "Ready") {
-      // Lấy asin_type để tính điểm scale
+      await logOrderHistory({
+        orderDoc: order,
+        action: "SCALE_ORDER_READY",
+        description: `All items approved. Order is Ready.`,
+        changes: [
+          {
+            field: "scale_overall_status",
+            from: before.order_scale_overall_status,
+            to: "Ready",
+          },
+        ],
+        user,
+        context: {
+          source: "PORTAL",
+          ip: req.ip,
+          userAgent: req.headers["user-agent"],
+        },
+      });
+
+      // Points
       const asin = item.asin;
       const listing = asin
         ? await Listing.findOne({ asin }).select("asin_type").lean()
         : null;
       const asinType = listing?.asin_type || "Normal";
 
-      // Cộng điểm theo số item trong đơn
       await addPointsFromTask({
         userId: order.scaleId,
-        taskId: orderId, // idempotent cho cả đơn
+        taskId: orderId,
         type: TaskType.ScaleTask,
         difficulty: asinType,
         quantity: Array.isArray(order.items) ? order.items.length : 0,
       });
 
-      // Kiểm tra địa chỉ
+      // Address invalid
       if (isAddressInvalid(order)) {
         order.scale_overall_status = "Address Invalid";
         await order.save();
+
+        await logOrderHistory({
+          orderDoc: order,
+          action: "UPDATE_SCALE_STATUS",
+          description: "Address invalid detected. Overall status set to Address Invalid.",
+          changes: [
+            {
+              field: "scale_overall_status",
+              from: "Ready",
+              to: "Address Invalid",
+            },
+          ],
+          user,
+          context: {
+            source: "SYSTEM",
+            ip: req.ip,
+            userAgent: req.headers["user-agent"],
+          },
+        });
+
         return res.status(409).json({
           message: buildInvalidAddressMessage(order),
           address_validation: order.address_validation || null,
         });
       }
 
-      // Đơn nội bộ LNG Group: tự đánh dấu Sent + Fulfilled, không gửi vendor
+      // Internal LNG
       const isLNG = await isLNGGroupOrder(order);
       if (isLNG) {
+        const prevOverall = order.scale_overall_status;
+        const prevStatus = order.status;
+
         order.scale_overall_status = "Sent";
         order.status = "Fulfilled";
         order.fulfilled_at = new Date();
         await order.save();
+
+        await logOrderHistory({
+          orderDoc: order,
+          action: "SEND_TO_VENDOR",
+          description: "Internal LNG order: marked Sent and Fulfilled (no vendor submission).",
+          changes: [
+            { field: "scale_overall_status", from: prevOverall, to: "Sent" },
+            { field: "status", from: prevStatus, to: "Fulfilled" },
+          ],
+          user,
+          context: {
+            source: "SYSTEM",
+            ip: req.ip,
+            userAgent: req.headers["user-agent"],
+          },
+        });
+
         return res.json({
           message: "Approved and marked Sent/Fulfilled for LNG Group order.",
           item_scale_status: item.scale_status,
@@ -392,14 +650,13 @@ const confirmScaleForItem = async (req, res) => {
         });
       }
 
-      // Gửi vendor
+      // Resolve provider
       let providerKey = String(provider || "").trim();
 
       try {
-        // Nếu client không chỉ định provider, tự suy ra từ VendorProduct → Vendor
         if (!providerKey) {
           const resolved = await resolveProviderFromOrder(order, VendorProduct);
-          providerKey = resolved.providerKey || providerKey; // có thể vẫn rỗng nếu không suy ra được
+          providerKey = resolved.providerKey || providerKey;
         }
       } catch (provErr) {
         const status = provErr.status || 409;
@@ -408,16 +665,38 @@ const confirmScaleForItem = async (req, res) => {
             "Unable to auto-select provider because multiple vendors were detected for this order.",
           error: provErr.message,
           providers: provErr.providers || [],
-          hint: 'Please specify "provider" in request body, e.g., {"provider":"grabink"} or {"provider":"merchfox"} or {"provider":"merchize"}.',
+          hint:
+            'Please specify "provider" in request body, e.g., {"provider":"grabink"} or {"provider":"merchfox"} or {"provider":"merchize"}.',
         });
       }
 
-      // Fallback cuối cùng
       if (!providerKey) providerKey = "grabink";
 
       try {
         const result = await FulfillmentService.send(order, providerKey);
-        console.log(providerKey);
+
+        // Log vendor submit (success or alreadySent)
+        await logOrderHistory({
+          orderDoc: order,
+          action: "SEND_TO_VENDOR",
+          description: result.alreadySent
+            ? `Order already sent to ${result.vendorKey}.`
+            : `Order sent to ${result.vendorKey}.`,
+          changes: [
+            {
+              field: "vendor",
+              from: null,
+              to: result.vendorKey,
+            },
+          ],
+          user,
+          context: {
+            source: "SYSTEM",
+            ip: req.ip,
+            userAgent: req.headers["user-agent"],
+          },
+        });
+
         return res.json({
           message: result.alreadySent
             ? `Order already sent to ${result.vendorKey}.`
@@ -428,7 +707,8 @@ const confirmScaleForItem = async (req, res) => {
           submission_response: result.response,
         });
       } catch (e) {
-        // mark Failed + lưu last_response theo providerKey (idempotent per vendor)
+        const prevOverall = order.scale_overall_status;
+
         const prev = order.vendor_submissions?.[providerKey] || {};
         const rec = {
           ...(prev || {}),
@@ -440,11 +720,29 @@ const confirmScaleForItem = async (req, res) => {
         order.vendor_submissions[providerKey] = rec;
 
         if (providerKey === "grabink") {
-          order.grabink_submission = rec; // backward-compat
+          order.grabink_submission = rec;
         }
 
         order.scale_overall_status = "Failed";
         await order.save();
+
+        await logOrderHistory({
+          orderDoc: order,
+          action: "SEND_TO_VENDOR_FAILED",
+          description: `Sending order to ${providerKey} failed. Overall status set to Failed.`,
+          changes: [
+            { field: "scale_overall_status", from: prevOverall, to: "Failed" },
+            { field: `vendor_submissions.${providerKey}.attempt_count`, from: prev?.attempt_count || 0, to: rec.attempt_count },
+            { field: `vendor_submissions.${providerKey}.last_response.error`, from: null, to: e.message },
+          ],
+          user,
+          context: {
+            source: "SYSTEM",
+            ip: req.ip,
+            userAgent: req.headers["user-agent"],
+          },
+        });
+
         return res.status(502).json({
           message: `Approved but sending order to ${providerKey} failed. Overall status set to Failed.`,
           error: e.message,
@@ -452,7 +750,7 @@ const confirmScaleForItem = async (req, res) => {
       }
     }
 
-    // Chưa đủ Complete (đơn nhiều item)
+    // Not ready yet
     await order.save();
     return res.json({
       message: "Item approved. Waiting for other items to be approved.",
@@ -463,7 +761,6 @@ const confirmScaleForItem = async (req, res) => {
     return res.status(500).json({ message: "Confirm failed", error: err.message });
   }
 };
-
 // Retry gửi đơn sang vendor cụ thể (auto-resolve nếu không truyền provider)
 const retrySendFulfillment = async (req, res) => {
   try {
