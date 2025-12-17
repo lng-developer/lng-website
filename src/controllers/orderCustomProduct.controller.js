@@ -478,7 +478,12 @@ const validateInvalidAddressesBatch = async (req, res) => {
       filter.$or = [
         { address_validation: { $exists: false } },
         { "address_validation.isValid": false },
-        { "address_validation.smartyResponse.error": { $exists: true, $ne: null } },
+        {
+          "address_validation.smartyResponse.error": {
+            $exists: true,
+            $ne: null,
+          },
+        },
       ];
     }
 
@@ -592,7 +597,14 @@ const validateInvalidAddressesBatch = async (req, res) => {
       exception,
       dryRun: !!dryRun,
       force: !!force,
-      params: { shopId, from, to, status, limit: nLimit, concurrency: nConcurrency },
+      params: {
+        shopId,
+        from,
+        to,
+        status,
+        limit: nLimit,
+        concurrency: nConcurrency,
+      },
       items,
     });
   } catch (err) {
@@ -679,6 +691,14 @@ function mapSkuIfAny(sku, activeConfigs = []) {
   return null;
 }
 
+const num = (v) => {
+  if (v == null) return 0;
+  const n = +String(v).trim().replace(/[, ]/g, "");
+  return Number.isFinite(n) ? n : 0;
+};
+
+const round2 = (v) => Number(num(v).toFixed(2));
+
 const updateOrdersFromXlsx = async (req, res) => {
   try {
     const filePath = req.file.path;
@@ -715,6 +735,7 @@ const updateOrdersFromXlsx = async (req, res) => {
       arr.push(preferred);
       orderIdToPreferredSkus.set(orderId, arr);
     }
+
     // ✅ Cache ASIN→Listing image
     const asinToListingMap = new Map();
 
@@ -815,6 +836,92 @@ const updateOrdersFromXlsx = async (req, res) => {
       );
     }
 
+    // =========================
+    // ✅ FINANCE HELPERS (NEW)
+    // =========================
+    function ensureFinance(orderDoc) {
+      if (!orderDoc.amazon_finance_total) {
+        orderDoc.amazon_finance_total = {
+          item_price: 0,
+          item_tax: 0,
+          shipping_price: 0,
+          shipping_tax: 0,
+          item_promotion_discount: 0,
+          fee: 0,
+          revenue: 0,
+          opCost: 0,
+          refund: 0,
+        };
+      }
+      return orderDoc.amazon_finance_total;
+    }
+
+    function addFinanceTotals(orderDoc, delta) {
+      const t = ensureFinance(orderDoc);
+
+      t.item_price = round2((t.item_price || 0) + delta.item_price);
+      t.item_tax = round2((t.item_tax || 0) + delta.item_tax);
+      t.shipping_price = round2((t.shipping_price || 0) + delta.shipping_price);
+      t.shipping_tax = round2((t.shipping_tax || 0) + delta.shipping_tax);
+      t.item_promotion_discount = round2(
+        (t.item_promotion_discount || 0) + delta.item_promotion_discount
+      );
+
+      // revenue = item + shipping
+      t.revenue = round2((t.revenue || 0) + delta.revenue);
+
+      // fee = 17% tổng revenue
+      t.fee = round2(0.17 * round2(t.revenue));
+    }
+
+    // ✅ Pre-aggregate finance theo orderId từ FILE (unique theo order_item_id)
+    const orderIdToFileFinance = new Map();
+    function accumulateFileFinance(row) {
+      const oid = row.order_id;
+      const oi = row.order_item_id;
+      if (!oid || !oi) return;
+
+      const itemPrice = round2(row.item_price);
+      const shippingPrice = round2(row.shipping_price);
+      const revenue = round2(itemPrice + shippingPrice);
+      const itemTax = round2(row.item_tax);
+      const shippingTax = round2(row.shipping_tax);
+      const discount = round2(row.item_promotion_discount);
+
+      let bucket = orderIdToFileFinance.get(oid);
+      if (!bucket) {
+        bucket = {
+          seen: new Set(),
+          totals: {
+            item_price: 0,
+            item_tax: 0,
+            shipping_price: 0,
+            shipping_tax: 0,
+            item_promotion_discount: 0,
+            revenue: 0,
+          },
+        };
+        orderIdToFileFinance.set(oid, bucket);
+      }
+
+      if (bucket.seen.has(oi)) return;
+      bucket.seen.add(oi);
+
+      bucket.totals.item_price = round2(bucket.totals.item_price + itemPrice);
+      bucket.totals.item_tax = round2(bucket.totals.item_tax + itemTax);
+      bucket.totals.shipping_price = round2(
+        bucket.totals.shipping_price + shippingPrice
+      );
+      bucket.totals.shipping_tax = round2(
+        bucket.totals.shipping_tax + shippingTax
+      );
+      bucket.totals.item_promotion_discount = round2(
+        bucket.totals.item_promotion_discount + discount
+      );
+      bucket.totals.revenue = round2(bucket.totals.revenue + revenue);
+    }
+    for (const r of rows) accumulateFileFinance(r);
+
     // ====== Flow cập nhật theo Latest ship date ======
     if (type === "Latest ship date") {
       for (const row of rows) {
@@ -862,7 +969,7 @@ const updateOrdersFromXlsx = async (req, res) => {
 
       try {
         fs.unlinkSync(filePath);
-      } catch (_) { }
+      } catch (_) {}
       return res.json({
         message: "Update by latest ship date completed",
         results,
@@ -892,6 +999,15 @@ const updateOrdersFromXlsx = async (req, res) => {
         asin: asin || null,
       };
 
+      // ✅ Finance per row (item)
+      const itemPrice = round2(row.item_price);
+      const shippingPrice = round2(row.shipping_price);
+      const revenue = round2(itemPrice + shippingPrice);
+      const itemTax = round2(row.item_tax);
+      const shippingTax = round2(row.shipping_tax);
+      const discount = round2(row.item_promotion_discount);
+      const fee = round2(0.17 * revenue);
+
       const basicData = {
         orderId,
         shopId: bodyShopId, // mặc định gán theo body khi tạo mới
@@ -910,6 +1026,17 @@ const updateOrdersFromXlsx = async (req, res) => {
         },
         shipping_type: row.ship_service_level,
         base_cost: 0,
+        amazon_finance_total: {
+          item_price: itemPrice,
+          item_tax: itemTax,
+          shipping_price: shippingPrice,
+          shipping_tax: shippingTax,
+          item_promotion_discount: discount,
+          fee: fee,
+          revenue: revenue,
+          opCost: 0,
+          refund: 0,
+        },
       };
 
       // sẽ truyền xuống importOrderJson
@@ -935,6 +1062,16 @@ const updateOrdersFromXlsx = async (req, res) => {
 
           // Thêm item
           existing.items.push(itemData);
+
+          // ✅ NEW: cộng dồn finance khi thêm item mới
+          addFinanceTotals(existing, {
+            item_price: itemPrice,
+            item_tax: itemTax,
+            shipping_price: shippingPrice,
+            shipping_tax: shippingTax,
+            item_promotion_discount: discount,
+            revenue: revenue,
+          });
 
           // ✅ set/override seller theo cờ overrideSeller
           if (itemData.sku) {
@@ -963,8 +1100,8 @@ const updateOrdersFromXlsx = async (req, res) => {
           currentShopIdForThisOrder = existing?.shopId
             ? String(existing.shopId)
             : bodyShopId
-              ? String(bodyShopId)
-              : null;
+            ? String(bodyShopId)
+            : null;
 
           results.push({
             orderId,
@@ -1047,8 +1184,8 @@ const updateOrdersFromXlsx = async (req, res) => {
           currentShopIdForThisOrder = existing?.shopId
             ? String(existing.shopId)
             : bodyShopId
-              ? String(bodyShopId)
-              : null;
+            ? String(bodyShopId)
+            : null;
 
           skipProcessingZip = true;
 
@@ -1092,12 +1229,13 @@ const updateOrdersFromXlsx = async (req, res) => {
         currentShopIdForThisOrder = newOrder?.shopId
           ? String(newOrder.shopId)
           : bodyShopId
-            ? String(bodyShopId)
-            : null;
+          ? String(bodyShopId)
+          : null;
 
         const validationResult = await validateAddressWithSmarty(
           basicData.customer_infor
         );
+
         newOrder.address_validation = validationResult;
         await newOrder.save();
 
@@ -1165,7 +1303,7 @@ const updateOrdersFromXlsx = async (req, res) => {
                 bufferForUpload === imageBuffer
                   ? imageName
                   : imageName.replace(/\.(png|jpg|jpeg)$/i, "") +
-                  "_compressed.jpg";
+                    "_compressed.jpg";
 
               const cloudinaryUrl = await uploadToCloudinary(
                 bufferForUpload,
@@ -1189,7 +1327,7 @@ const updateOrdersFromXlsx = async (req, res) => {
                     cloudinaryUrls.push(url);
                     continue;
                   }
-                } catch (_) { }
+                } catch (_) {}
                 skippedSnapshots.push({
                   image: imageName,
                   reason: "cloudinary: file size too large",
@@ -1249,6 +1387,35 @@ const updateOrdersFromXlsx = async (req, res) => {
         await importOrderJson(fakeReq, fakeRes);
       } catch (err) {
         results.push({ orderId, status: "failed", error: err.message });
+      }
+    }
+
+    // ✅ NEW: Rebuild finance theo file cho order đang thiếu/0 revenue (không phá order đã đúng)
+    for (const oid of ordersTouched) {
+      const bucket = orderIdToFileFinance.get(oid);
+      if (!bucket) continue;
+
+      const doc = await OrderCustomProduct.findOne({ orderId: oid }).select(
+        "_id amazon_finance_total"
+      );
+      if (!doc) continue;
+
+      const currentRevenue = round2(doc?.amazon_finance_total?.revenue || 0);
+
+      if (!doc.amazon_finance_total || currentRevenue === 0) {
+        const t = bucket.totals;
+        doc.amazon_finance_total = {
+          item_price: round2(t.item_price),
+          item_tax: round2(t.item_tax),
+          shipping_price: round2(t.shipping_price),
+          shipping_tax: round2(t.shipping_tax),
+          item_promotion_discount: round2(t.item_promotion_discount),
+          revenue: round2(t.revenue),
+          fee: round2(0.17 * round2(t.revenue)),
+          opCost: doc.amazon_finance_total?.opCost || 0,
+          refund: doc.amazon_finance_total?.refund || 0,
+        };
+        await doc.save();
       }
     }
 
@@ -1332,20 +1499,20 @@ const updateOrdersFromXlsx = async (req, res) => {
     if (pendingSkuMapLogs.length > 0 && !skuMappingDryRun) {
       try {
         await SkuMappingEntry.bulkWrite(pendingSkuMapLogs, { ordered: false });
-      } catch (_) { }
+      } catch (_) {}
     }
     if (pendingMappedSkuOps.length > 0 && !skuMappingDryRun) {
       try {
         await OrderCustomProduct.bulkWrite(pendingMappedSkuOps, {
           ordered: false,
         });
-      } catch (_) { }
+      } catch (_) {}
     }
 
     // dọn file tạm
     try {
       fs.unlinkSync(filePath);
-    } catch (_) { }
+    } catch (_) {}
 
     return res.json({
       message: "Batch import completed with ASIN-Listing base image matching",
@@ -1364,7 +1531,7 @@ const updateOrdersFromXlsx = async (req, res) => {
   } catch (error) {
     try {
       if (req?.file?.path) fs.unlinkSync(req.file.path);
-    } catch (_) { }
+    } catch (_) {}
     return res
       .status(500)
       .json({ message: "Batch import failed", error: error.message });
@@ -1538,8 +1705,16 @@ const getFrontendOrders = async (req, res) => {
 const getOrderStatistics = async (req, res) => {
   try {
     const {
-      from, to, search, platform, userNull, noPsd,
-      shippingType, shopName, teamId, openCase,
+      from,
+      to,
+      search,
+      platform,
+      userNull,
+      noPsd,
+      shippingType,
+      shopName,
+      teamId,
+      openCase,
     } = req.query;
 
     // ===== RBAC =====
@@ -1565,7 +1740,7 @@ const getOrderStatistics = async (req, res) => {
       openCase,
       from,
       to,
-      isNoCostCenter: null,       // <-- để thống kê chủ đề riêng
+      isNoCostCenter: null, // <-- để thống kê chủ đề riêng
       financialStatus: null,
       sevenDayAlert: null,
       platform,
@@ -1581,7 +1756,7 @@ const getOrderStatistics = async (req, res) => {
     if (ids.teamObjectId || team) {
       const tId = ids.teamObjectId || team._id;
       const members = await User.find({ team_id: tId }).select("_id").lean();
-      filters.push({ sellerId: { $in: members.map(u => u._id) } });
+      filters.push({ sellerId: { $in: members.map((u) => u._id) } });
     }
 
     // ===== PRODUCTION VENDOR (LNG Group) =====
@@ -1589,9 +1764,16 @@ const getOrderStatistics = async (req, res) => {
       const vendorFilter = await buildVendorFilter();
       if (!vendorFilter) {
         return res.json({
-          all: 0, new: 0, noCostCenter: 0, paymentPending: 0,
-          fulfilled: 0, shipped: 0, cancelled: 0, refund: 0,
-          openCase: 0, invalidAddress: 0,
+          all: 0,
+          new: 0,
+          noCostCenter: 0,
+          paymentPending: 0,
+          fulfilled: 0,
+          shipped: 0,
+          cancelled: 0,
+          refund: 0,
+          openCase: 0,
+          invalidAddress: 0,
         });
       }
       filters.push(vendorFilter);
@@ -1629,43 +1811,65 @@ const getOrderStatistics = async (req, res) => {
           all: [{ $count: "c" }],
           new: [{ $match: { status: "New" } }, { $count: "c" }],
           noCostCenter: [{ $match: NO_COST_CENTER }, { $count: "c" }],
-          paymentPending: [{ $match: { financialStatus: "Pending" } }, { $count: "c" }],
+          paymentPending: [
+            { $match: { financialStatus: "Pending" } },
+            { $count: "c" },
+          ],
           fulfilled: [{ $match: { status: "Fulfilled" } }, { $count: "c" }],
           shipped: [{ $match: { status: "Shipped" } }, { $count: "c" }],
           cancelled: [{ $match: { status: "Cancelled" } }, { $count: "c" }],
           refund: [{ $match: { status: "Refund" } }, { $count: "c" }],
-          openCase: [{ $match: { case: { $exists: true, $ne: [] } } }, { $count: "c" }],
-          invalidAddress: [{ $match: { "address_validation.isValid": false } }, { $count: "c" }],
+          openCase: [
+            { $match: { case: { $exists: true, $ne: [] } } },
+            { $count: "c" },
+          ],
+          invalidAddress: [
+            { $match: { "address_validation.isValid": false } },
+            { $count: "c" },
+          ],
         },
       },
       {
         $project: {
           all: { $ifNull: [{ $arrayElemAt: ["$all.c", 0] }, 0] },
           new: { $ifNull: [{ $arrayElemAt: ["$new.c", 0] }, 0] },
-          noCostCenter: { $ifNull: [{ $arrayElemAt: ["$noCostCenter.c", 0] }, 0] },
-          paymentPending: { $ifNull: [{ $arrayElemAt: ["$paymentPending.c", 0] }, 0] },
+          noCostCenter: {
+            $ifNull: [{ $arrayElemAt: ["$noCostCenter.c", 0] }, 0],
+          },
+          paymentPending: {
+            $ifNull: [{ $arrayElemAt: ["$paymentPending.c", 0] }, 0],
+          },
           fulfilled: { $ifNull: [{ $arrayElemAt: ["$fulfilled.c", 0] }, 0] },
           shipped: { $ifNull: [{ $arrayElemAt: ["$shipped.c", 0] }, 0] },
           cancelled: { $ifNull: [{ $arrayElemAt: ["$cancelled.c", 0] }, 0] },
           refund: { $ifNull: [{ $arrayElemAt: ["$refund.c", 0] }, 0] },
           openCase: { $ifNull: [{ $arrayElemAt: ["$openCase.c", 0] }, 0] },
-          invalidAddress: { $ifNull: [{ $arrayElemAt: ["$invalidAddress.c", 0] }, 0] },
+          invalidAddress: {
+            $ifNull: [{ $arrayElemAt: ["$invalidAddress.c", 0] }, 0],
+          },
         },
       },
     ]);
 
-    return res.json(stat || {
-      all: 0, new: 0, noCostCenter: 0, paymentPending: 0,
-      fulfilled: 0, shipped: 0, cancelled: 0, refund: 0,
-      openCase: 0, invalidAddress: 0,
-    });
+    return res.json(
+      stat || {
+        all: 0,
+        new: 0,
+        noCostCenter: 0,
+        paymentPending: 0,
+        fulfilled: 0,
+        shipped: 0,
+        cancelled: 0,
+        refund: 0,
+        openCase: 0,
+        invalidAddress: 0,
+      }
+    );
   } catch (err) {
     console.error("❌ getOrderStatistics error:", err);
     res.status(500).json({ message: "Internal Server Error" });
   }
 };
-
-
 
 const updateOrderStatus = async (req, res) => {
   try {
@@ -1842,12 +2046,10 @@ const openCaseInOrder = async (req, res) => {
       order.case = [];
     }
 
-    const oldCases = [...order.case.map(id => String(id))];
+    const oldCases = [...order.case.map((id) => String(id))];
 
     // Lọc bỏ các case đã có
-    const newCaseIds = caseIds.filter(
-      (id) => !oldCases.includes(String(id))
-    );
+    const newCaseIds = caseIds.filter((id) => !oldCases.includes(String(id)));
 
     // Không có case mới → không cần log
     if (newCaseIds.length === 0) {
@@ -1871,7 +2073,7 @@ const openCaseInOrder = async (req, res) => {
         {
           field: "case",
           from: oldCases,
-          to: order.case.map(id => String(id)),
+          to: order.case.map((id) => String(id)),
         },
       ],
       user: req.user,
@@ -1907,10 +2109,10 @@ const removeCaseFromOrder = async (req, res) => {
     }
 
     // Normalize + unique + validate
-    const normalizedCaseIds = [...new Set(caseIds.map(id => String(id)))];
+    const normalizedCaseIds = [...new Set(caseIds.map((id) => String(id)))];
 
     const invalidIds = normalizedCaseIds.filter(
-      id => !mongoose.Types.ObjectId.isValid(id)
+      (id) => !mongoose.Types.ObjectId.isValid(id)
     );
     if (invalidIds.length > 0) {
       return res.status(400).json({
@@ -1929,12 +2131,10 @@ const removeCaseFromOrder = async (req, res) => {
     }
 
     // Snapshot before
-    const oldCases = order.case.map(id => String(id));
+    const oldCases = order.case.map((id) => String(id));
 
     // Remove
-    const newCases = oldCases.filter(
-      id => !normalizedCaseIds.includes(id)
-    );
+    const newCases = oldCases.filter((id) => !normalizedCaseIds.includes(id));
 
     // Không có thay đổi → không log
     if (newCases.length === oldCases.length) {
@@ -1952,7 +2152,9 @@ const removeCaseFromOrder = async (req, res) => {
     await logOrderHistory({
       orderDoc: order,
       action: "REMOVE_CASE",
-      description: `Removed ${oldCases.length - newCases.length} case(s) from order`,
+      description: `Removed ${
+        oldCases.length - newCases.length
+      } case(s) from order`,
       changes: [
         {
           field: "case",
@@ -2249,9 +2451,9 @@ async function listCandidateVendors(pfItems = [], sizeValue, colorValue) {
 
     const vendorId = String(
       it?.vendor_id ||
-      it?.vendor?._id ||
-      (await getVendorIdByVendorProductId(vendorProductId)) ||
-      ""
+        it?.vendor?._id ||
+        (await getVendorIdByVendorProductId(vendorProductId)) ||
+        ""
     );
     if (vendorId) out.add(vendorId);
   }
@@ -2302,9 +2504,9 @@ async function selectBestVendorProduct(
     if (!vpId) continue;
     const vId = String(
       it?.vendor_id ||
-      it?.vendor?._id ||
-      (await getVendorIdByVendorProductId(vpId)) ||
-      ""
+        it?.vendor?._id ||
+        (await getVendorIdByVendorProductId(vpId)) ||
+        ""
     );
     resolved.push({ ...it, __vendorId: vId, __vendorProductId: vpId });
   }
@@ -2392,9 +2594,9 @@ async function buildVendorRank(preItems) {
       if (!vpId) continue;
       const vId = String(
         it?.vendor_id ||
-        it?.vendor?._id ||
-        (await getVendorIdByVendorProductId(vpId)) ||
-        ""
+          it?.vendor?._id ||
+          (await getVendorIdByVendorProductId(vpId)) ||
+          ""
       );
       if (!vId) continue;
       resolved.push({ ...it, __vendorId: vId, __vendorProductId: vpId });
@@ -2941,7 +3143,7 @@ const computeBaseCostForOrder = async (req, res) => {
           const minus =
             (out.shipping_international_economy || 0) +
             (out.shipping_international_additional_units || 0) *
-            (out.shipping_international_additional_rate || 0);
+              (out.shipping_international_additional_rate || 0);
           out.base_cost_total_for_item_including_shipping = Number(
             (out.base_cost_total_for_item_including_shipping - minus).toFixed(2)
           );
@@ -2969,8 +3171,9 @@ const computeBaseCostForOrder = async (req, res) => {
                 out.base_cost_total_for_item_including_shipping + expensive.eco
               ).toFixed(2)
             );
-            out.formula = `${out.formula || ""} | SPECIAL[${expensive.shipProfile
-              }]: eco(${expensive.eco}) for expensive product`;
+            out.formula = `${out.formula || ""} | SPECIAL[${
+              expensive.shipProfile
+            }]: eco(${expensive.eco}) for expensive product`;
           }
         }
         // additional (1) cho sp "rẻ hơn"
@@ -2986,8 +3189,9 @@ const computeBaseCostForOrder = async (req, res) => {
                 out.base_cost_total_for_item_including_shipping + cheap.add
               ).toFixed(2)
             );
-            out.formula = `${out.formula || ""} | SPECIAL[${cheap.shipProfile
-              }]: add(${cheap.add}) for cheaper product`;
+            out.formula = `${out.formula || ""} | SPECIAL[${
+              cheap.shipProfile
+            }]: add(${cheap.add}) for cheaper product`;
           }
         }
 
@@ -3071,7 +3275,7 @@ const computeBaseCostForOrder = async (req, res) => {
               return (
                 sum +
                 (out.shipping_international_additional_units || 0) *
-                (out.shipping_international_additional_rate || 0)
+                  (out.shipping_international_additional_rate || 0)
               );
             }, 0)
           ).toFixed(2)
@@ -3129,7 +3333,7 @@ const computeBaseCostForOrder = async (req, res) => {
       if (
         it.cost_breakdown &&
         typeof it.cost_breakdown.base_cost_total_for_item_including_shipping ===
-        "number"
+          "number"
       ) {
         orderTotalBaseCost +=
           it.cost_breakdown.base_cost_total_for_item_including_shipping;
@@ -3317,8 +3521,8 @@ const updateItemTracking = async (req, res) => {
       nextStatus === "Fulfilled" || nextStatus === "Shipped"
         ? "Sent"
         : nextStatus === "Cancelled"
-          ? "Cancelled"
-          : docAfterAllUpdate.scale_overall_status;
+        ? "Cancelled"
+        : docAfterAllUpdate.scale_overall_status;
 
     return res.json({
       message:
@@ -3559,5 +3763,5 @@ module.exports = {
   createReplacementOrder,
   updateScaleOrder,
   validateAddressByOrderId,
-  validateInvalidAddressesBatch
+  validateInvalidAddressesBatch,
 };

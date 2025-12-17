@@ -1,4 +1,3 @@
-// controllers/report.controller.js
 const db = require("../models");
 const OrderCustomProduct = db.orderCustomProduct;
 const AdsDailySummary = db.Ads;

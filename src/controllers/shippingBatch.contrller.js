@@ -130,11 +130,7 @@ const createBatchFromFile = async (req, res, next) => {
 
     // 3) Với mỗi orderId đã lọc: lấy tracking hoặc gen fake
     for (const orderId of orderIds) {
-      const realTracking = await getRealTrackingForOrder(
-        orderId,
-        machineId,
-        label
-      );
+      const realTracking = await getRealTrackingForOrder(orderId);
 
       if (realTracking) {
         // Đơn có tracking thật trong hệ thống
@@ -506,9 +502,217 @@ const downloadCompletedFile = async (req, res, next) => {
   }
 };
 
+function buildShipDateString(baseDate) {
+  const ref = new Date(baseDate);
+
+  const shipDate = new Date(
+    Date.UTC(
+      ref.getUTCFullYear(),
+      ref.getUTCMonth(),
+      ref.getUTCDate(),
+      0,
+      22,
+      22
+    )
+  );
+
+  return shipDate.toISOString().replace(".000Z", "+00:00");
+}
+
+function buildGlobalUpdateFile(rows, options = {}) {
+  const { carrierCode = "USPS", shipMethod = "USPS First Class" } = options;
+
+  let content =
+    "order-id\tship-date\tcarrier-code\ttracking-number\tship-method\n";
+
+  for (const row of rows) {
+    content += [
+      row.orderId,
+      row.shipDate,
+      carrierCode,
+      row.tracking,
+      shipMethod,
+    ].join("\t");
+
+    content += "\n";
+  }
+
+  return content;
+}
+
+const updateAllFakeTracking = async (req, res, next) => {
+  try {
+    const { machineId, label } = req.body;
+
+    const batches = await ShippingBatch.find({
+      type: "CONFIRM",
+      machineId,
+      label,
+      tracking_fakes: { $exists: true, $ne: [] },
+    });
+
+    if (!batches.length) {
+      return res.status(200).json({
+        message: "No batches with fake tracking found",
+      });
+    }
+
+    const resolvedRows = [];
+    let updatedOrderCount = 0;
+
+    for (const batch of batches) {
+      const shipDateStr = buildShipDateString(batch.createdAt);
+
+      const remainingFakes = [];
+
+      for (const fakeItem of batch.tracking_fakes) {
+        const realTracking = await getRealTrackingForOrder(
+          fakeItem.orderId,
+          batch.machineId,
+          batch.label
+        );
+
+        if (realTracking) {
+          // gom vào file update global
+          resolvedRows.push({
+            orderId: fakeItem.orderId,
+            tracking: realTracking,
+            shipDate: shipDateStr,
+            sourceBatchId: batch._id,
+          });
+
+          // update completed trong batch gốc
+          const comp = batch.completed.find(
+            (c) => c.orderId === fakeItem.orderId
+          );
+          if (comp) {
+            comp.tracking = realTracking;
+            comp.isFake = false;
+            comp.source = "system";
+          }
+
+          updatedOrderCount++;
+        } else {
+          remainingFakes.push(fakeItem);
+        }
+      }
+
+      batch.tracking_fakes = remainingFakes;
+      batch.stats.totalFake = remainingFakes.length;
+      batch.stats.totalReal = batch.completed.length - remainingFakes.length;
+
+      await batch.save();
+    }
+
+    if (!resolvedRows.length) {
+      return res.status(200).json({
+        message: "No real tracking found across all batches",
+      });
+    }
+
+    // tạo UPDATE_GLOBAL batch
+    const updateBatch = await ShippingBatch.create({
+      machineId,
+      label,
+      type: "UPDATE_GLOBAL",
+      status: "CONFIRM_FILE_READY",
+      completed: resolvedRows.map((r) => ({
+        orderId: r.orderId,
+        tracking: r.tracking,
+        isFake: false,
+        source: "system",
+      })),
+      tracking_fakes: [],
+      stats: {
+        totalOrders: resolvedRows.length,
+        totalFake: 0,
+        totalReal: resolvedRows.length,
+      },
+    });
+
+    const fileContent = buildGlobalUpdateFile(resolvedRows);
+
+    return res.status(201).json({
+      updateBatchId: updateBatch._id,
+      totalUpdatedOrders: updatedOrderCount,
+      fileContent,
+    });
+  } catch (err) {
+    next(err);
+  }
+};
+
+const downloadAllUpdatedFakeFile = async (req, res, next) => {
+  try {
+    const {
+      machineId,
+      label,
+      carrierCode = "USPS",
+      shipMethod = "USPS First Class",
+    } = req.query;
+
+    // 1. Lấy tất cả batch UPDATE (fake -> real)
+    const updateBatches = await ShippingBatch.find({
+      type: { $in: ["UPDATE_FAKE", "UPDATE_GLOBAL"] },
+      machineId,
+      label,
+      completed: { $exists: true, $ne: [] },
+    }).sort({ createdAt: 1 }); // sort theo thời gian để dễ trace
+
+    if (!updateBatches.length) {
+      return res.status(400).json({
+        message: "No updated tracking batches found",
+      });
+    }
+
+    let content =
+      "order-id\tship-date\tcarrier-code\ttracking-number\tship-method\n";
+
+    let totalOrders = 0;
+
+    // 2. Gom dữ liệu theo từng batch
+    for (const batch of updateBatches) {
+      const shipDateStr = buildShipDateString(batch.createdAt);
+
+      for (const item of batch.completed) {
+        if (!item.orderId || !item.tracking) continue;
+
+        content += [
+          item.orderId,
+          shipDateStr, // ✅ ship-date = ngày batch UPDATE được tạo
+          carrierCode,
+          item.tracking,
+          shipMethod,
+        ].join("\t");
+
+        content += "\n";
+        totalOrders++;
+      }
+    }
+
+    if (totalOrders === 0) {
+      return res.status(400).json({
+        message: "No valid updated orders found to export",
+      });
+    }
+
+    const filename = `update_all_fake_${Date.now()}.txt`;
+
+    res
+      .status(200)
+      .set("Content-Type", "text/tab-separated-values; charset=utf-8")
+      .set("Content-Disposition", `attachment; filename="${filename}"`)
+      .send(content);
+  } catch (err) {
+    next(err);
+  }
+};
+
 module.exports = {
   createBatchFromFile,
   listShippingBatches,
   createUpdateBatchFromSystem,
   downloadCompletedFile,
+  updateAllFakeTracking,
+  downloadAllUpdatedFakeFile,
 };

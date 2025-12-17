@@ -16,4 +16,11 @@ router.post(
 );
 router.get("/:batchId/download", shippingBatchController.downloadCompletedFile);
 
+router.post("/update-all-fake", shippingBatchController.updateAllFakeTracking);
+
+router.get(
+  "/download-all-updated",
+  shippingBatchController.downloadAllUpdatedFakeFile
+);
+
 module.exports = router;
