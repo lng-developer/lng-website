@@ -17,10 +17,10 @@ const MONGODB_URI =
     process.env.MONGODB_URI || "mongodb+srv://lngdeveloperworkspace:lannhi123@lngweb.l3xatze.mongodb.net/lng_db?retryWrites=true&w=majority&appName=LNGWeb";
 
 // Số lượng đơn cần lấy
-const LIMIT_ORDERS = 104;
+const LIMIT_ORDERS = 98;
 
 // Tỉ giá
-const EXCHANGE_RATE = 27700;
+const EXCHANGE_RATE = 27300;
 
 // Tên collection trong MongoDB
 // Sửa cho đúng nếu bạn đang dùng tên khác

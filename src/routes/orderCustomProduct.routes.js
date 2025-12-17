@@ -73,4 +73,8 @@ router.post("/:orderId/replace", authenticateToken, controller.createReplacement
 
 router.post("/:orderId/validate-address", controller.validateAddressByOrderId);
 
+// routes/order.routes.js
+router.post("/orders/address/validate-invalid", controller.validateInvalidAddressesBatch);
+
+
 module.exports = router;

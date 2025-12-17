@@ -14,6 +14,15 @@ async function logOrderHistory({
 
   const { _id: orderObjectId, orderId } = orderDoc;
 
+  const userId =
+    user?._id || user?.id || user?.userId || user?.uid || null;
+
+  const userName =
+    user?.name || user?.fullName || user?.username || user?.email || null;
+
+  const userRole =
+    user?.role || user?.userRole || user?.type || null;
+
   await OrderHistory.create({
     order: orderObjectId,
     orderId,
@@ -21,9 +30,9 @@ async function logOrderHistory({
     description,
     changes,
     orderItemId,
-    userId: user._id || null,
-    userName: user.name || null,
-    userRole: user.role || null,
+    userId,
+    userName,
+    userRole,
     source: context.source || "PORTAL",
     ip: context.ip || null,
     userAgent: context.userAgent || null,
