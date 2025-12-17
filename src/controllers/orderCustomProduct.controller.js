@@ -1889,18 +1889,52 @@ const updateOrderStatus = async (req, res) => {
       return res.status(404).json({ message: "Order not found" });
     }
 
+    const oldStatus = order.status;
+
+    // Không đổi gì → không log
+    if (oldStatus === status) {
+      return res.status(200).json({
+        message: "No change",
+        orderId,
+        newStatus: status,
+      });
+    }
+
     order.status = status;
     await order.save();
 
-    res.status(200).json({
+    // ===== LOGGER =====
+    await logOrderHistory({
+      orderDoc: order,
+      action: "UPDATE_STATUS",
+      description: `Order status changed from ${oldStatus} to ${status}`,
+      changes: [
+        {
+          field: "status",
+          from: oldStatus,
+          to: status,
+        },
+      ],
+      user: req.user,
+      context: {
+        source: "PORTAL",
+        ip: req.ip,
+        userAgent: req.headers["user-agent"],
+      },
+    });
+    // ==================
+
+    return res.status(200).json({
       message: "Order status updated successfully",
       orderId,
+      oldStatus,
       newStatus: status,
     });
   } catch (error) {
-    res
-      .status(500)
-      .json({ message: "Failed to update order status", error: error.message });
+    return res.status(500).json({
+      message: "Failed to update order status",
+      error: error.message,
+    });
   }
 };
 

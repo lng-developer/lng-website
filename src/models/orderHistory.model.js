@@ -26,6 +26,12 @@ const orderHistorySchema = new mongoose.Schema(
                 "SEND_TO_VENDOR",
                 "OPEN_CASE",
                 "REMOVE_CASE",
+                "UPLOAD_FULFILLMENT_FILES",
+                "SCALE_APPROVE_ITEM",
+                "SCALE_REJECT_ITEM",
+                "SCALE_ORDER_READY",
+                "SEND_TO_VENDOR",
+                "SEND_TO_VENDOR_FAILED",
                 "OTHER"
             ],
             required: true,
