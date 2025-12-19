@@ -1715,10 +1715,12 @@ const getFrontendOrders = async (req, res) => {
       ordersWithLogs = enrichedOrders.map((o) => {
         const key = String(o.orderId || "");
         const history = map.get(key) || [];
+        const historyDesc = map.get(key) || []; // mới -> cũ
+        const historyAsc = [...historyDesc].reverse(); // ✅ cũ -> mới
         return {
           ...o,
           latestLog: history[0] || null,
-          history, // giới hạn N log gần nhất
+          history: historyAsc, // giới hạn N log gần nhất
         };
       });
     }
