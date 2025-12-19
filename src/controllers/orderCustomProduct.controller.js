@@ -3563,9 +3563,11 @@ const updateItemTracking = async (req, res) => {
     const { orderId } = req.params;
     const user = req.user;
 
+    // an toàn khi req.body undefined
     const body = req.body || {};
     let { fulfillment, tracking, status, note } = body;
 
+    // Chuẩn hoá chuỗi
     const tFulfillment =
       fulfillment !== undefined ? String(fulfillment).trim() : undefined;
     const tTracking =
@@ -3573,12 +3575,14 @@ const updateItemTracking = async (req, res) => {
     const tNote = note !== undefined ? String(note) : undefined;
     const tStatus = status !== undefined ? String(status).trim() : undefined;
 
+    // Validate status nếu có
     if (tStatus && !ALLOWED.includes(tStatus)) {
       return res
         .status(400)
         .json({ message: "Invalid status", allowed: ALLOWED });
     }
 
+    // Nếu không có field nào để update -> trả 400 sớm
     if (
       tFulfillment === undefined &&
       tTracking === undefined &&
@@ -3591,173 +3595,117 @@ const updateItemTracking = async (req, res) => {
       });
     }
 
+    // RULE ưu tiên:
+    // 1) Nếu status = Cancelled -> ưu tiên Cancelled (bỏ qua auto-ship theo tracking)
+    // 2) Ngược lại, nếu có tracking -> ép Shipped
+    // 3) Còn lại -> dùng status được truyền (nếu có)
     let nextStatus;
     if (tStatus === "Cancelled") {
       nextStatus = "Cancelled";
     } else if (tTracking !== undefined && tTracking.length > 0) {
       nextStatus = "Shipped";
     } else {
-      nextStatus = tStatus; // can be undefined
+      nextStatus = tStatus; // có thể undefined
     }
 
-    // ===== Fetch BEFORE for logging =====
-    const docBefore = await OrderCustomProduct.findOne({ orderId }).lean();
-    if (!docBefore) {
+    // ===== Fetch BEFORE để lấy old order.status cho log =====
+    const beforeDoc = await OrderCustomProduct.findOne(
+      { orderId },
+      { orderId: 1, status: 1 }
+    ).lean();
+
+    if (!beforeDoc) {
       return res.status(404).json({ message: "Order not found" });
     }
 
-    const beforeSummary = {
-      tracking_fulfillment: summarizeItemsField(docBefore.items, (i) => i?.tracking_info?.fulfillment),
-      tracking_tracking: summarizeItemsField(docBefore.items, (i) => i?.tracking_info?.tracking),
-      tracking_status: summarizeItemsField(docBefore.items, (i) => i?.tracking_info?.status),
-      tracking_note: summarizeItemsField(docBefore.items, (i) => i?.tracking_info?.note),
-      item_scale_status: summarizeItemsField(docBefore.items, (i) => i?.scale_status),
-      order_status: docBefore.status,
-      scale_overall_status: docBefore.scale_overall_status,
-    };
-    // ===================================
+    const oldOrderStatus = beforeDoc.status;
+    // ========================================================
 
     const $set = {};
+
+    // Apply cho TẤT CẢ items
     if (tFulfillment !== undefined)
       $set["items.$[].tracking_info.fulfillment"] = tFulfillment;
     if (tTracking !== undefined)
       $set["items.$[].tracking_info.tracking"] = tTracking;
     if (tNote !== undefined) $set["items.$[].tracking_info.note"] = tNote;
 
+    // cập nhật updated_at cho tất cả items
     $set["items.$[].tracking_info.updated_at"] = new Date();
 
+    // Set status cho tất cả items nếu xác định được nextStatus
     if (nextStatus !== undefined) {
       $set["items.$[].tracking_info.status"] = nextStatus;
 
       if (nextStatus === "Fulfilled" || nextStatus === "Shipped") {
+        // Item hoàn tất scale, order coi như đã gửi
         $set["items.$[].scale_status"] = "Complete";
         $set["scale_overall_status"] = "Sent";
       } else if (nextStatus === "Cancelled") {
+        // Scale item dùng "Failed" để bám bộ trạng thái sẵn có
         $set["items.$[].scale_status"] = "Failed";
         $set["scale_overall_status"] = "Cancelled";
       }
+      // (Các trạng thái khác nếu có, ta không ép scale_overall_status)
     }
 
+    // Update & lấy document mới
     const docAfterAllUpdate = await OrderCustomProduct.findOneAndUpdate(
       { orderId },
       { $set },
       { new: true }
-    ).lean();
+    );
 
     if (!docAfterAllUpdate) {
       return res.status(404).json({ message: "Order not found" });
     }
 
-    // Sync order.status from items
+    // Đồng bộ lại order.status từ items
     const newOrderStatus = computeOrderStatusFromItems(docAfterAllUpdate.items);
-    let finalDoc = docAfterAllUpdate;
-
     if (newOrderStatus !== docAfterAllUpdate.status) {
       await OrderCustomProduct.updateOne(
         { _id: docAfterAllUpdate._id },
         { $set: { status: newOrderStatus } }
       );
-
-      // update local response doc snapshot
-      finalDoc = { ...docAfterAllUpdate, status: newOrderStatus };
+      // sync lại instance để trả response nhất quán (không bắt buộc)
+      docAfterAllUpdate.status = newOrderStatus;
     }
 
+    // ===== LOGGER: CHỈ log field status =====
+    if (oldOrderStatus !== newOrderStatus) {
+      await logOrderHistory({
+        orderDoc: docAfterAllUpdate, // có _id + orderId
+        action: "UPDATE_STATUS",
+        description: `Order status changed from ${oldOrderStatus} to ${newOrderStatus}`,
+        changes: [
+          {
+            field: "status",
+            from: oldOrderStatus,
+            to: newOrderStatus,
+          },
+        ],
+        user,
+        context: {
+          source: "PORTAL",
+          ip: req.ip,
+          userAgent: req.headers["user-agent"],
+        },
+      });
+    }
+    // =======================================
+
+    // scale_overall_status phản hồi: nếu ta vừa set thì trả về giá trị mới; nếu không, trả doc hiện tại
     const responseScaleOverall =
       nextStatus === "Fulfilled" || nextStatus === "Shipped"
         ? "Sent"
         : nextStatus === "Cancelled"
           ? "Cancelled"
-          : finalDoc.scale_overall_status;
-
-    // ===== Build changes (compact, old unique -> new applied) =====
-    const changes = [];
-
-    if (tFulfillment !== undefined) {
-      changes.push({
-        field: "items.$[].tracking_info.fulfillment",
-        from: beforeSummary.tracking_fulfillment,
-        to: tFulfillment,
-      });
-    }
-    if (tTracking !== undefined) {
-      changes.push({
-        field: "items.$[].tracking_info.tracking",
-        from: beforeSummary.tracking_tracking,
-        to: tTracking,
-      });
-    }
-    if (tNote !== undefined) {
-      changes.push({
-        field: "items.$[].tracking_info.note",
-        from: beforeSummary.tracking_note,
-        to: tNote,
-      });
-    }
-
-    // status for items
-    if (nextStatus !== undefined) {
-      changes.push({
-        field: "items.$[].tracking_info.status",
-        from: beforeSummary.tracking_status,
-        to: nextStatus,
-      });
-    }
-
-    // scale status + overall scale if this update forces them
-    if (nextStatus === "Fulfilled" || nextStatus === "Shipped") {
-      changes.push({
-        field: "items.$[].scale_status",
-        from: beforeSummary.item_scale_status,
-        to: "Complete",
-      });
-      changes.push({
-        field: "scale_overall_status",
-        from: beforeSummary.scale_overall_status,
-        to: "Sent",
-      });
-    } else if (nextStatus === "Cancelled") {
-      changes.push({
-        field: "items.$[].scale_status",
-        from: beforeSummary.item_scale_status,
-        to: "Failed",
-      });
-      changes.push({
-        field: "scale_overall_status",
-        from: beforeSummary.scale_overall_status,
-        to: "Cancelled",
-      });
-    }
-
-    // order.status sync
-    if (beforeSummary.order_status !== newOrderStatus) {
-      changes.push({
-        field: "status",
-        from: beforeSummary.order_status,
-        to: newOrderStatus,
-      });
-    }
-    // =============================================================
-
-    // ===== LOGGER =====
-    await logOrderHistory({
-      orderDoc: finalDoc, // has _id + orderId; (lean doc ok if logger only reads these)
-      action: "UPDATE_ITEM_TRACKING_BULK",
-      description:
-        "Tracking updated for ALL items (priority: Cancelled > auto-Ship on tracking). Item & order statuses synced.",
-      changes,
-      user,
-      context: {
-        source: "PORTAL",
-        ip: req.ip,
-        userAgent: req.headers["user-agent"],
-      },
-    });
-    // ==================
+          : docAfterAllUpdate.scale_overall_status;
 
     return res.json({
       message:
         "Tracking updated for ALL items (priority: Cancelled > auto-Ship on tracking). Item & order statuses synced.",
-      orderId: finalDoc.orderId,
+      orderId: docAfterAllUpdate.orderId,
       orderStatus: newOrderStatus,
       scale_overall_status: responseScaleOverall,
       applied: {
