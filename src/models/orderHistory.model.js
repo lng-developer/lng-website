@@ -32,6 +32,7 @@ const orderHistorySchema = new mongoose.Schema(
                 "SCALE_ORDER_READY",
                 "SEND_TO_VENDOR",
                 "SEND_TO_VENDOR_FAILED",
+                "UPDATE_ITEM_TRACKING_BULK",
                 "OTHER"
             ],
             required: true,
