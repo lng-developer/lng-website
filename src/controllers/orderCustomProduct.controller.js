@@ -726,17 +726,6 @@ const updateOrdersFromXlsx = async (req, res) => {
     const ordersToCompute = new Set();
     const results = [];
 
-    // ✅ Gom SKU xử lý majority
-    const orderIdToPreferredSkus = new Map();
-    const ordersTouched = new Set();
-    function pushSkuForMajority(orderId, sku) {
-      if (!orderId || !sku) return;
-      const preferred = mapSkuIfAny(sku, activeConfigs) || sku;
-      const arr = orderIdToPreferredSkus.get(orderId) || [];
-      arr.push(preferred);
-      orderIdToPreferredSkus.set(orderId, arr);
-    }
-
     // ✅ Cache ASIN→Listing image
     const asinToListingMap = new Map();
 
@@ -745,6 +734,33 @@ const updateOrdersFromXlsx = async (req, res) => {
     const pendingSkuMapLogs = [];
     const pendingMappedSkuOps = [];
     const skuMappingSamples = [];
+
+    // ✅ Resolve mapped SKU immediately (in-memory) so we can persist mapped_sku before compute
+    function resolveMappedSkuNow(sku) {
+      if (!sku || !activeConfigs || activeConfigs.length === 0) return null;
+
+      for (const cfg of activeConfigs) {
+        const rules = buildRulesFromConfig(cfg);
+        const r = applyRulesToSku(sku, rules);
+        if (r.ok && r.changed) {
+          return { mappedSku: r.next, cfg, rulesSnapshot: rules };
+        }
+      }
+      return null;
+    }
+
+    // ✅ Gom SKU xử lý majority
+    const orderIdToPreferredSkus = new Map();
+    const ordersTouched = new Set();
+    function pushSkuForMajority(orderId, sku) {
+      if (!orderId || !sku) return;
+      // prefer mapped sku for majority
+      const mapping = resolveMappedSkuNow(sku);
+      const preferred = mapping?.mappedSku || sku;
+      const arr = orderIdToPreferredSkus.get(orderId) || [];
+      arr.push(preferred);
+      orderIdToPreferredSkus.set(orderId, arr);
+    }
 
     function considerLogMapping(orderId, orderItemId, sku) {
       if (!sku || !activeConfigs || activeConfigs.length === 0) return;
@@ -782,7 +798,7 @@ const updateOrdersFromXlsx = async (req, res) => {
               upsert: true,
             },
           });
-          // update mapped_sku trên item
+          // update mapped_sku trên item (bulk fallback, even though we set immediately)
           pendingMappedSkuOps.push({
             updateOne: {
               filter: { orderId, "items.orderItemId": orderItemId },
@@ -991,9 +1007,14 @@ const updateOrdersFromXlsx = async (req, res) => {
       const baseImageFromListing =
         asin && asinToListingMap.has(asin) ? asinToListingMap.get(asin) : null;
 
+      // ✅ map sku BEFORE building itemData
+      const mapping = resolveMappedSkuNow(row.sku);
+      const mappedSku = mapping?.mappedSku || null;
+
       const itemData = {
         orderItemId: row.order_item_id,
         sku: row.sku,
+        mapped_sku: mappedSku, // ✅ set immediately
         title: row.product_name,
         customized_url: row.customized_url,
         quantity: Number(row.quantity_purchased || 1),
@@ -1061,10 +1082,10 @@ const updateOrdersFromXlsx = async (req, res) => {
             };
           }
 
-          // Thêm item
+          // Thêm item (mapped_sku already set)
           existing.items.push(itemData);
 
-          // ✅ NEW: cộng dồn finance khi thêm item mới
+          // ✅ cộng dồn finance khi thêm item mới
           addFinanceTotals(existing, {
             item_price: itemPrice,
             item_tax: itemTax,
@@ -1074,9 +1095,9 @@ const updateOrdersFromXlsx = async (req, res) => {
             revenue: revenue,
           });
 
-          // ✅ set/override seller theo cờ overrideSeller
+          // ✅ set/override seller theo mapped SKU ưu tiên
           if (itemData.sku) {
-            const preferredSku = mapSkuIfAny(itemData.sku) || itemData.sku;
+            const preferredSku = itemData.mapped_sku || itemData.sku;
             const msnv = extractMSNVFromSKU(preferredSku);
             if (msnv) {
               const parsedSellerId = await findSellerIdByEmployeeId(msnv);
@@ -1109,9 +1130,10 @@ const updateOrdersFromXlsx = async (req, res) => {
             status: "item added",
             baseImageFromListing: !!baseImageFromListing,
             asin: asin || null,
+            mapped_sku: itemData.mapped_sku || null,
           });
 
-          // SKU mapping
+          // SKU mapping logs (still queue for audit), and bulk update fallback
           considerLogMapping(orderId, itemData.orderItemId, itemData.sku);
 
           if (autoCompute) ordersToCompute.add(orderId);
@@ -1120,6 +1142,17 @@ const updateOrdersFromXlsx = async (req, res) => {
           const existingItem = existing.items.find(
             (i) => i.orderItemId === itemData.orderItemId
           );
+
+          // ✅ ensure mapped_sku exists ASAP (not waiting bulkWrite)
+          if (existingItem?.sku && !existingItem.mapped_sku) {
+            const m = resolveMappedSkuNow(existingItem.sku);
+            if (m?.mappedSku) {
+              existingItem.mapped_sku = m.mappedSku;
+              // queue audit logs too
+              considerLogMapping(orderId, existingItem.orderItemId, existingItem.sku);
+              await existing.save();
+            }
+          }
 
           if (baseImageFromListing) {
             if (
@@ -1140,19 +1173,23 @@ const updateOrdersFromXlsx = async (req, res) => {
                 status: "item exists - base image updated from listing",
                 baseImageFromListing: true,
                 asin,
+                mapped_sku: existingItem?.mapped_sku || null,
               });
 
-              considerLogMapping(
-                orderId,
-                existingItem.orderItemId,
-                existingItem.sku
-              );
+              if (existingItem?.sku) {
+                considerLogMapping(
+                  orderId,
+                  existingItem.orderItemId,
+                  existingItem.sku
+                );
+              }
             } else {
               results.push({
                 orderId,
                 status: "item exists",
                 baseImageFromListing: false,
                 asin: asin || null,
+                mapped_sku: existingItem?.mapped_sku || null,
               });
               if (existingItem?.sku) {
                 considerLogMapping(
@@ -1168,6 +1205,7 @@ const updateOrdersFromXlsx = async (req, res) => {
               status: "item exists",
               baseImageFromListing: false,
               asin: asin || null,
+              mapped_sku: existingItem?.mapped_sku || null,
             });
             if (existingItem?.sku) {
               considerLogMapping(
@@ -1190,10 +1228,7 @@ const updateOrdersFromXlsx = async (req, res) => {
 
           skipProcessingZip = true;
 
-          if (
-            autoCompute &&
-            (!existing.base_cost || existing.base_cost === 0)
-          ) {
+          if (autoCompute && (!existing.base_cost || existing.base_cost === 0)) {
             ordersToCompute.add(orderId);
           }
         }
@@ -1209,12 +1244,12 @@ const updateOrdersFromXlsx = async (req, res) => {
 
         const newOrder = new OrderCustomProduct({
           ...basicData,
-          items: [itemData],
+          items: [itemData], // mapped_sku already set
         });
 
-        // ✅ sellerId theo SKU khi tạo mới
+        // ✅ sellerId theo mapped SKU khi tạo mới
         if (itemData.sku) {
-          const preferredSku = mapSkuIfAny(itemData.sku) || itemData.sku;
+          const preferredSku = itemData.mapped_sku || itemData.sku;
           const msnv = extractMSNVFromSKU(preferredSku);
           if (msnv) {
             const parsedSellerId = await findSellerIdByEmployeeId(msnv);
@@ -1246,6 +1281,7 @@ const updateOrdersFromXlsx = async (req, res) => {
           addressValid: validationResult.isValid,
           baseImageFromListing: !!baseImageFromListing,
           asin: asin || null,
+          mapped_sku: itemData.mapped_sku || null,
         });
 
         considerLogMapping(orderId, itemData.orderItemId, itemData.sku);
@@ -1391,7 +1427,7 @@ const updateOrdersFromXlsx = async (req, res) => {
       }
     }
 
-    // ✅ NEW: Rebuild finance theo file cho order đang thiếu/0 revenue (không phá order đã đúng)
+    // ✅ Rebuild finance theo file cho order đang thiếu/0 revenue (không phá order đã đúng)
     for (const oid of ordersTouched) {
       const bucket = orderIdToFileFinance.get(oid);
       if (!bucket) continue;
@@ -1538,6 +1574,7 @@ const updateOrdersFromXlsx = async (req, res) => {
       .json({ message: "Batch import failed", error: error.message });
   }
 };
+
 
 const uploadToCloudinary = (buffer, filename) => {
   return new Promise((resolve, reject) => {
@@ -2891,18 +2928,29 @@ const computeBaseCostForOrder = async (req, res) => {
 
     const shippingTypeForOrder = order.shipping_type || "Standard";
 
+    // ✅ helper: sku audit + sku used for cost
+    function getSkuForCost(item) {
+      const originalSku = (item?.sku || "").trim() || null;
+      const mappedSku = (item?.mapped_sku || "").trim() || null;
+      const usedSku = mappedSku || originalSku;
+      return { originalSku, mappedSku, usedSku };
+    }
+
     // ============== PASS 1: Pre-scan để chọn preferredVendorId ==============
     const stagedItems = [];
     const preItems = [];
     const candidateSetsPerItem = [];
 
     for (const item of order.items) {
-      const sku = item?.mapped_sku || item?.sku;
-      const configCode = parseConfigCodeFromSKU(sku);
+      const { originalSku, mappedSku, usedSku } = getSkuForCost(item);
+
+      const configCode = parseConfigCodeFromSKU(usedSku);
       if (!configCode) {
         stagedItems.push({
           orderItemId: item.orderItemId,
-          sku,
+          sku: originalSku,
+          mapped_sku: mappedSku,
+          used_sku: usedSku,
           status: "failed",
           reason: "Cannot parse config code from SKU",
         });
@@ -2916,10 +2964,13 @@ const computeBaseCostForOrder = async (req, res) => {
         matchedBy,
         reason: cfgReason,
       } = await selectConfigByProductType(configCode, labelValueMap);
+
       if (!cfg) {
         stagedItems.push({
           orderItemId: item.orderItemId,
-          sku,
+          sku: originalSku,
+          mapped_sku: mappedSku,
+          used_sku: usedSku,
           configCode,
           status: "failed",
           reason: cfgReason || "Config cost center not found by product type",
@@ -2935,6 +2986,7 @@ const computeBaseCostForOrder = async (req, res) => {
         labelValueMap,
         cfg.customize_color_key || []
       );
+
       const sizeMap = await mapOptionValue({
         configCode,
         key: "size",
@@ -2945,6 +2997,7 @@ const computeBaseCostForOrder = async (req, res) => {
         key: "color",
         rawValue: colorRaw,
       });
+
       const sizeValue = sizeMap.value;
       const colorValue = colorMap.value;
 
@@ -2952,7 +3005,9 @@ const computeBaseCostForOrder = async (req, res) => {
       if (!pfItems.length) {
         stagedItems.push({
           orderItemId: item.orderItemId,
-          sku,
+          sku: originalSku,
+          mapped_sku: mappedSku,
+          used_sku: usedSku,
           configCode,
           sizeValue,
           colorValue,
@@ -2961,6 +3016,7 @@ const computeBaseCostForOrder = async (req, res) => {
         });
         continue;
       }
+
       // Đặc thù EBM/EBMA
       if (["EBM", "EBMA"].includes(configCode.toUpperCase())) {
         // Chỉ lấy item Active
@@ -2974,13 +3030,11 @@ const computeBaseCostForOrder = async (req, res) => {
         if (fifthByOrder) {
           pfItems = [fifthByOrder];
         } else {
-          // Fallback an toàn: sort theo order rồi lấy phần tử thứ 5 nếu có,
-          // hoặc ném lỗi để bạn biết cấu hình chưa chuẩn.
           const sorted = [...activeItems].sort(
             (a, b) => Number(a.order) - Number(b.order)
           );
           if (sorted.length >= 5) {
-            pfItems = [sorted[4]]; // 1-based: phần tử thứ 5
+            pfItems = [sorted[4]];
             console.warn(
               "[EBM/EBMA] order===5 không tồn tại, fallback dùng phần tử thứ 5 sau sort theo 'order'."
             );
@@ -2994,7 +3048,9 @@ const computeBaseCostForOrder = async (req, res) => {
 
       preItems.push({
         item,
-        sku,
+        sku: originalSku,
+        mapped_sku: mappedSku,
+        used_sku: usedSku,
         configCode,
         productTypeValue,
         matchedBy,
@@ -3020,7 +3076,6 @@ const computeBaseCostForOrder = async (req, res) => {
         choosePreferredVendorIdStable(candidateSetsPerItem, vendorRank) || null;
     }
 
-    // (khuyến nghị) log debug ngắn gọn
     console.log(
       "[BaseCost] candidates per item:",
       candidateSetsPerItem.map((s) => [...s])
@@ -3034,6 +3089,8 @@ const computeBaseCostForOrder = async (req, res) => {
       const {
         item,
         sku,
+        mapped_sku,
+        used_sku,
         configCode,
         productTypeValue,
         matchedBy,
@@ -3056,6 +3113,8 @@ const computeBaseCostForOrder = async (req, res) => {
         stagedItems.push({
           orderItemId: item.orderItemId,
           sku,
+          mapped_sku,
+          used_sku,
           configCode,
           sizeValue,
           colorValue,
@@ -3117,7 +3176,9 @@ const computeBaseCostForOrder = async (req, res) => {
 
       const rec = {
         orderItemId: item.orderItemId,
-        sku,
+        sku, // original
+        mapped_sku,
+        used_sku, // sku used for config/vendor selection
         configCode,
         productTypeValue: productTypeValue || null,
         selectedConfigBy: matchedBy || "unknown",
@@ -3168,6 +3229,8 @@ const computeBaseCostForOrder = async (req, res) => {
       perItemResults.push({
         orderItemId: rec.orderItemId,
         sku: rec.sku,
+        mapped_sku: rec.mapped_sku,
+        used_sku: rec.used_sku,
         configCode: rec.configCode,
         productTypeValue: rec.productTypeValue,
         selectedConfigBy: rec.selectedConfigBy,
@@ -3182,8 +3245,8 @@ const computeBaseCostForOrder = async (req, res) => {
         quantity: rec.qty,
         additional_costs_breakdown: rec.additionalCosts,
         total_additional_cost_per_item: additionalPart,
-        shipping_international_economy: 0, // giữ tên field cũ để tương thích schema
-        shipping_international_additional_units: 0, // (nội dung có thể là priority)
+        shipping_international_economy: 0,
+        shipping_international_additional_units: 0,
         shipping_international_additional_rate: 0,
         base_cost_total_for_item_including_shipping: basePart + additionalPart,
         status: "ok",
@@ -3204,8 +3267,7 @@ const computeBaseCostForOrder = async (req, res) => {
       const items = bucket.items;
 
       // SPECIAL CASE: đúng 2 sản phẩm khác nhau, mỗi cái qty = 1
-      const distinctProducts = new Set(items.map((x) => x.vendorProductId))
-        .size;
+      const distinctProducts = new Set(items.map((x) => x.vendorProductId)).size;
       const totalQty = items.reduce((s, it) => s + it.qty, 0);
       const allQtyAreOne = items.every((it) => Number(it.qty) === 1);
 
@@ -3243,9 +3305,7 @@ const computeBaseCostForOrder = async (req, res) => {
           if (out) {
             out.shipping_international_economy = expensive.eco;
             out.base_cost_total_for_item_including_shipping = Number(
-              (
-                out.base_cost_total_for_item_including_shipping + expensive.eco
-              ).toFixed(2)
+              (out.base_cost_total_for_item_including_shipping + expensive.eco).toFixed(2)
             );
             out.formula = `${out.formula || ""} | SPECIAL[${expensive.shipProfile
               }]: eco(${expensive.eco}) for expensive product`;
@@ -3260,9 +3320,7 @@ const computeBaseCostForOrder = async (req, res) => {
             out.shipping_international_additional_units = 1;
             out.shipping_international_additional_rate = cheap.add;
             out.base_cost_total_for_item_including_shipping = Number(
-              (
-                out.base_cost_total_for_item_including_shipping + cheap.add
-              ).toFixed(2)
+              (out.base_cost_total_for_item_including_shipping + cheap.add).toFixed(2)
             );
             out.formula = `${out.formula || ""} | SPECIAL[${cheap.shipProfile
               }]: add(${cheap.add}) for cheaper product`;
@@ -3276,12 +3334,10 @@ const computeBaseCostForOrder = async (req, res) => {
           special_case: true,
           shipping_profile: expensive.shipProfile,
           rule: "eco of more expensive + additional of cheaper",
-          shipping_total_for_group: Number(
-            (expensive.eco + cheap.add).toFixed(2)
-          ),
+          shipping_total_for_group: Number((expensive.eco + cheap.add).toFixed(2)),
         });
 
-        continue; // bỏ phân bổ profile thường cho vendor này
+        continue;
       }
 
       // ELSE: phân bổ theo từng profile
@@ -3325,8 +3381,7 @@ const computeBaseCostForOrder = async (req, res) => {
           out.shipping_international_economy =
             (out.shipping_international_economy || 0) + ecoForThisItem;
           out.shipping_international_additional_units =
-            (out.shipping_international_additional_units || 0) +
-            addUnitsForThisItem;
+            (out.shipping_international_additional_units || 0) + addUnitsForThisItem;
           out.shipping_international_additional_rate = addRate;
           out.base_cost_total_for_item_including_shipping = Number(
             (
@@ -3366,7 +3421,7 @@ const computeBaseCostForOrder = async (req, res) => {
       }
     }
 
-    // 3) Lưu breakdown vào model
+    // 3) Lưu breakdown vào model (audit sku rõ ràng)
     for (const out of perItemResults) {
       if (out.status !== "ok") continue;
       const itemRef = order.items.find(
@@ -3375,6 +3430,10 @@ const computeBaseCostForOrder = async (req, res) => {
       if (!itemRef) continue;
 
       itemRef.cost_breakdown = {
+        used_sku: out.used_sku || null,
+        original_sku: out.sku || null,
+        mapped_sku: out.mapped_sku || null,
+
         configCode: out.configCode,
         productTypeValue: out.productTypeValue || null,
         selectedConfigBy: out.selectedConfigBy || null,
@@ -3388,7 +3447,6 @@ const computeBaseCostForOrder = async (req, res) => {
         quantity: out.quantity,
         additional_costs_breakdown: out.additional_costs_breakdown,
         total_additional_cost_per_item: out.total_additional_cost_per_item,
-        // vẫn giữ tên 'international' để tương thích schema
         shipping_international_economy: out.shipping_international_economy,
         shipping_international_additional_units:
           out.shipping_international_additional_units,
@@ -3406,11 +3464,9 @@ const computeBaseCostForOrder = async (req, res) => {
     for (const it of order.items) {
       if (
         it.cost_breakdown &&
-        typeof it.cost_breakdown.base_cost_total_for_item_including_shipping ===
-        "number"
+        typeof it.cost_breakdown.base_cost_total_for_item_including_shipping === "number"
       ) {
-        orderTotalBaseCost +=
-          it.cost_breakdown.base_cost_total_for_item_including_shipping;
+        orderTotalBaseCost += it.cost_breakdown.base_cost_total_for_item_including_shipping;
       }
     }
     order.base_cost = Number(orderTotalBaseCost.toFixed(2));
@@ -3428,11 +3484,10 @@ const computeBaseCostForOrder = async (req, res) => {
       detail: perItemResults,
     });
   } catch (err) {
-    return res
-      .status(500)
-      .json({ message: "Compute failed", error: err.message });
+    return res.status(500).json({ message: "Compute failed", error: err.message });
   }
 };
+
 
 /**
  * POST body: { limit?: number }
