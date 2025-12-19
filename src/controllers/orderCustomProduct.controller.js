@@ -21,6 +21,7 @@ const SkuMappingConfig = db.SkuMappingConfig;
 const SkuMappingEntry = db.SkuMappingEntry;
 const Listing = db.listing;
 const PsdTask = db.PsdTask;
+const OrderHistory = db.OrderHistory;
 const { logOrderHistory } = require("../service/orderHistoryLogger");
 const {
   applyRulesToSku,
@@ -969,7 +970,7 @@ const updateOrdersFromXlsx = async (req, res) => {
 
       try {
         fs.unlinkSync(filePath);
-      } catch (_) {}
+      } catch (_) { }
       return res.json({
         message: "Update by latest ship date completed",
         results,
@@ -1100,8 +1101,8 @@ const updateOrdersFromXlsx = async (req, res) => {
           currentShopIdForThisOrder = existing?.shopId
             ? String(existing.shopId)
             : bodyShopId
-            ? String(bodyShopId)
-            : null;
+              ? String(bodyShopId)
+              : null;
 
           results.push({
             orderId,
@@ -1184,8 +1185,8 @@ const updateOrdersFromXlsx = async (req, res) => {
           currentShopIdForThisOrder = existing?.shopId
             ? String(existing.shopId)
             : bodyShopId
-            ? String(bodyShopId)
-            : null;
+              ? String(bodyShopId)
+              : null;
 
           skipProcessingZip = true;
 
@@ -1229,8 +1230,8 @@ const updateOrdersFromXlsx = async (req, res) => {
         currentShopIdForThisOrder = newOrder?.shopId
           ? String(newOrder.shopId)
           : bodyShopId
-          ? String(bodyShopId)
-          : null;
+            ? String(bodyShopId)
+            : null;
 
         const validationResult = await validateAddressWithSmarty(
           basicData.customer_infor
@@ -1303,7 +1304,7 @@ const updateOrdersFromXlsx = async (req, res) => {
                 bufferForUpload === imageBuffer
                   ? imageName
                   : imageName.replace(/\.(png|jpg|jpeg)$/i, "") +
-                    "_compressed.jpg";
+                  "_compressed.jpg";
 
               const cloudinaryUrl = await uploadToCloudinary(
                 bufferForUpload,
@@ -1327,7 +1328,7 @@ const updateOrdersFromXlsx = async (req, res) => {
                     cloudinaryUrls.push(url);
                     continue;
                   }
-                } catch (_) {}
+                } catch (_) { }
                 skippedSnapshots.push({
                   image: imageName,
                   reason: "cloudinary: file size too large",
@@ -1499,20 +1500,20 @@ const updateOrdersFromXlsx = async (req, res) => {
     if (pendingSkuMapLogs.length > 0 && !skuMappingDryRun) {
       try {
         await SkuMappingEntry.bulkWrite(pendingSkuMapLogs, { ordered: false });
-      } catch (_) {}
+      } catch (_) { }
     }
     if (pendingMappedSkuOps.length > 0 && !skuMappingDryRun) {
       try {
         await OrderCustomProduct.bulkWrite(pendingMappedSkuOps, {
           ordered: false,
         });
-      } catch (_) {}
+      } catch (_) { }
     }
 
     // dọn file tạm
     try {
       fs.unlinkSync(filePath);
-    } catch (_) {}
+    } catch (_) { }
 
     return res.json({
       message: "Batch import completed with ASIN-Listing base image matching",
@@ -1531,7 +1532,7 @@ const updateOrdersFromXlsx = async (req, res) => {
   } catch (error) {
     try {
       if (req?.file?.path) fs.unlinkSync(req.file.path);
-    } catch (_) {}
+    } catch (_) { }
     return res
       .status(500)
       .json({ message: "Batch import failed", error: error.message });
@@ -1593,7 +1594,7 @@ const getFrontendOrders = async (req, res) => {
       sevenDayAlert,
       platform,
       search,
-      userNull, // only admin can use
+      userNull,
       noPsd,
       shippingType,
       shopName,
@@ -1601,6 +1602,10 @@ const getFrontendOrders = async (req, res) => {
       teamId,
       sellerId,
       invalidAddress,
+
+      // ✅ NEW
+      includeLogs = "true",
+      logLimit = 10,
     } = req.query;
 
     //RBAC
@@ -1623,7 +1628,6 @@ const getFrontendOrders = async (req, res) => {
 
     const initialMatch = buildInitialMatch(ids, roles, userId, userNull);
 
-    //BUILD FILTERS =====
     const filters = buildFilters({
       statuses,
       search,
@@ -1638,7 +1642,6 @@ const getFrontendOrders = async (req, res) => {
       shippingType,
     });
 
-    // Production vendor filter LNG Group
     if (roles.isProduction) {
       const vendorFilter = await buildVendorFilter();
       if (vendorFilter === null) {
@@ -1651,15 +1654,11 @@ const getFrontendOrders = async (req, res) => {
       }
       filters.push(vendorFilter);
     }
+
     if (String(isNoCostCenter).toLowerCase() === "true") {
       filters.push({
-        $or: [
-          { base_cost: { $exists: false } },
-          { base_cost: null },
-          { base_cost: 0 },
-        ],
+        $or: [{ base_cost: { $exists: false } }, { base_cost: null }, { base_cost: 0 }],
       });
-      // Loại Cancelled
       filters.push({ status: { $ne: "Cancelled" } });
     }
 
@@ -1667,7 +1666,6 @@ const getFrontendOrders = async (req, res) => {
       filters.push({ "address_validation.isValid": false });
     }
 
-    // BUILD PIPELINE =====
     const pipeline = await buildPipeline({
       initialMatch,
       filters,
@@ -1677,24 +1675,67 @@ const getFrontendOrders = async (req, res) => {
       shopName,
     });
 
-    // EXECUTE & PAGINATE =====
     const { orders, totalCount, limitNum } = await executePipeline(
       pipeline,
       page,
       perPage
     );
 
-    // ENRICH DATA =====
     const enrichedOrders = await enrichOrdersData(orders);
+
+    // =========================
+    // ✅ NEW: attach logs
+    // =========================
+    const wantLogs = String(includeLogs).toLowerCase() === "true";
+    const limitLogs = Math.max(1, Math.min(parseInt(logLimit, 10) || 5, 50)); // clamp 1..50
+
+    let ordersWithLogs = enrichedOrders;
+
+    if (wantLogs && Array.isArray(enrichedOrders) && enrichedOrders.length) {
+      // lấy danh sách orderId string (Amazon orderId)
+      const orderIds = enrichedOrders
+        .map((o) => o.orderId)
+        .filter(Boolean);
+
+      // query tất cả logs (sort mới nhất)
+      const logs = await OrderHistory.find({ orderId: { $in: orderIds } })
+        .sort({ createdAt: -1 })
+        .select("orderId action description changes orderItemId userId userName userRole source createdAt")
+        .lean();
+
+      // group logs theo orderId, giới hạn limitLogs
+      const map = new Map();
+      for (const lg of logs) {
+        const key = String(lg.orderId);
+        if (!map.has(key)) map.set(key, []);
+        const arr = map.get(key);
+        if (arr.length < limitLogs) arr.push(lg);
+      }
+
+      ordersWithLogs = enrichedOrders.map((o) => {
+        const key = String(o.orderId || "");
+        const history = map.get(key) || [];
+        return {
+          ...o,
+          latestLog: history[0] || null,
+          history, // giới hạn N log gần nhất
+        };
+      });
+    }
+    // =========================
 
     const pageNum = parseInt(page, 10) || 1;
     const isAll = String(perPage).toLowerCase() === "all";
 
     return res.json({
-      data: enrichedOrders,
+      data: ordersWithLogs,
       totalCount,
       totalPages: isAll ? 1 : Math.ceil(totalCount / limitNum),
       currentPage: pageNum,
+
+      // optional: meta để FE biết đang bật log
+      includeLogs: wantLogs,
+      logLimit: wantLogs ? limitLogs : 0,
     });
   } catch (error) {
     console.error("Get orders error:", error);
@@ -2186,9 +2227,8 @@ const removeCaseFromOrder = async (req, res) => {
     await logOrderHistory({
       orderDoc: order,
       action: "REMOVE_CASE",
-      description: `Removed ${
-        oldCases.length - newCases.length
-      } case(s) from order`,
+      description: `Removed ${oldCases.length - newCases.length
+        } case(s) from order`,
       changes: [
         {
           field: "case",
@@ -2485,9 +2525,9 @@ async function listCandidateVendors(pfItems = [], sizeValue, colorValue) {
 
     const vendorId = String(
       it?.vendor_id ||
-        it?.vendor?._id ||
-        (await getVendorIdByVendorProductId(vendorProductId)) ||
-        ""
+      it?.vendor?._id ||
+      (await getVendorIdByVendorProductId(vendorProductId)) ||
+      ""
     );
     if (vendorId) out.add(vendorId);
   }
@@ -2538,9 +2578,9 @@ async function selectBestVendorProduct(
     if (!vpId) continue;
     const vId = String(
       it?.vendor_id ||
-        it?.vendor?._id ||
-        (await getVendorIdByVendorProductId(vpId)) ||
-        ""
+      it?.vendor?._id ||
+      (await getVendorIdByVendorProductId(vpId)) ||
+      ""
     );
     resolved.push({ ...it, __vendorId: vId, __vendorProductId: vpId });
   }
@@ -2628,9 +2668,9 @@ async function buildVendorRank(preItems) {
       if (!vpId) continue;
       const vId = String(
         it?.vendor_id ||
-          it?.vendor?._id ||
-          (await getVendorIdByVendorProductId(vpId)) ||
-          ""
+        it?.vendor?._id ||
+        (await getVendorIdByVendorProductId(vpId)) ||
+        ""
       );
       if (!vId) continue;
       resolved.push({ ...it, __vendorId: vId, __vendorProductId: vpId });
@@ -3177,7 +3217,7 @@ const computeBaseCostForOrder = async (req, res) => {
           const minus =
             (out.shipping_international_economy || 0) +
             (out.shipping_international_additional_units || 0) *
-              (out.shipping_international_additional_rate || 0);
+            (out.shipping_international_additional_rate || 0);
           out.base_cost_total_for_item_including_shipping = Number(
             (out.base_cost_total_for_item_including_shipping - minus).toFixed(2)
           );
@@ -3205,9 +3245,8 @@ const computeBaseCostForOrder = async (req, res) => {
                 out.base_cost_total_for_item_including_shipping + expensive.eco
               ).toFixed(2)
             );
-            out.formula = `${out.formula || ""} | SPECIAL[${
-              expensive.shipProfile
-            }]: eco(${expensive.eco}) for expensive product`;
+            out.formula = `${out.formula || ""} | SPECIAL[${expensive.shipProfile
+              }]: eco(${expensive.eco}) for expensive product`;
           }
         }
         // additional (1) cho sp "rẻ hơn"
@@ -3223,9 +3262,8 @@ const computeBaseCostForOrder = async (req, res) => {
                 out.base_cost_total_for_item_including_shipping + cheap.add
               ).toFixed(2)
             );
-            out.formula = `${out.formula || ""} | SPECIAL[${
-              cheap.shipProfile
-            }]: add(${cheap.add}) for cheaper product`;
+            out.formula = `${out.formula || ""} | SPECIAL[${cheap.shipProfile
+              }]: add(${cheap.add}) for cheaper product`;
           }
         }
 
@@ -3309,7 +3347,7 @@ const computeBaseCostForOrder = async (req, res) => {
               return (
                 sum +
                 (out.shipping_international_additional_units || 0) *
-                  (out.shipping_international_additional_rate || 0)
+                (out.shipping_international_additional_rate || 0)
               );
             }, 0)
           ).toFixed(2)
@@ -3367,7 +3405,7 @@ const computeBaseCostForOrder = async (req, res) => {
       if (
         it.cost_breakdown &&
         typeof it.cost_breakdown.base_cost_total_for_item_including_shipping ===
-          "number"
+        "number"
       ) {
         orderTotalBaseCost +=
           it.cost_breakdown.base_cost_total_for_item_including_shipping;
@@ -3555,8 +3593,8 @@ const updateItemTracking = async (req, res) => {
       nextStatus === "Fulfilled" || nextStatus === "Shipped"
         ? "Sent"
         : nextStatus === "Cancelled"
-        ? "Cancelled"
-        : docAfterAllUpdate.scale_overall_status;
+          ? "Cancelled"
+          : docAfterAllUpdate.scale_overall_status;
 
     return res.json({
       message:
