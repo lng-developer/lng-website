@@ -595,7 +595,6 @@ const updateAllFakeTracking = async (req, res, next) => {
     // tạo UPDATE_GLOBAL batch
     const updateBatch = await ShippingBatch.create({
       machineId,
-      label,
       type: "UPDATE_GLOBAL",
       status: "CONFIRM_FILE_READY",
       completed: resolvedRows.map((r) => ({
