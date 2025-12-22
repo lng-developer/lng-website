@@ -350,7 +350,6 @@ const confirmScaleForItem = async (req, res) => {
   try {
     const { orderId, orderItemId } = req.params;
     const { decision, note, provider } = req.body || {};
-    const user = req.user;
 
     const d = String(decision || "").toLowerCase();
     if (!["approve", "reject"].includes(d)) {
@@ -379,19 +378,6 @@ const confirmScaleForItem = async (req, res) => {
       if (typeof ff === "string") return !!ff;
       return false;
     };
-
-    // ===== Snapshot BEFORE =====
-    const before = {
-      item_scale_status: item.scale_status,
-      item_qc_note: item.qc_note || "",
-      item_ff: toPlainFF(item.fulfillment_file),
-      order_scale_overall_status: order.scale_overall_status,
-      order_status: order.status,
-      order_scaleId: order.scaleId ? String(order.scaleId) : null,
-      grabink_submission: order.grabink_submission || null,
-      vendor_submissions: order.vendor_submissions || null,
-    };
-    // ===========================
 
     // ---------------------------
     // REJECT
@@ -430,58 +416,6 @@ const confirmScaleForItem = async (req, res) => {
 
       await order.save();
 
-      // ===== LOGGER (REJECT) =====
-      const after = {
-        item_scale_status: item.scale_status,
-        item_qc_note: item.qc_note || "",
-        item_ff: toPlainFF(item.fulfillment_file),
-        order_scale_overall_status: order.scale_overall_status,
-      };
-
-      const changes = [];
-      if (before.item_scale_status !== after.item_scale_status) {
-        changes.push({
-          field: "items.scale_status",
-          from: before.item_scale_status,
-          to: after.item_scale_status,
-        });
-      }
-      if (before.item_qc_note !== after.item_qc_note) {
-        changes.push({
-          field: "items.qc_note",
-          from: before.item_qc_note,
-          to: after.item_qc_note,
-        });
-      }
-      // fulfillment_file thường bị reset khi reject
-      changes.push({
-        field: "items.fulfillment_file",
-        from: before.item_ff,
-        to: after.item_ff,
-      });
-      if (before.order_scale_overall_status !== after.order_scale_overall_status) {
-        changes.push({
-          field: "scale_overall_status",
-          from: before.order_scale_overall_status,
-          to: after.order_scale_overall_status,
-        });
-      }
-
-      await logOrderHistory({
-        orderDoc: order,
-        action: "SCALE_REJECT_ITEM",
-        description: `QC rejected item ${orderItemId}${note ? `: ${String(note).slice(0, 120)}` : ""}`,
-        changes,
-        orderItemId,
-        user,
-        context: {
-          source: "PORTAL",
-          ip: req.ip,
-          userAgent: req.headers["user-agent"],
-        },
-      });
-      // ===========================
-
       return res.json({
         message: "Scale rejected. Item set to QC Rejected.",
         item_scale_status: item.scale_status,
@@ -509,68 +443,12 @@ const confirmScaleForItem = async (req, res) => {
 
     item.markModified("fulfillment_file");
 
+    // Tính trạng thái tổng thể (Ready nếu tất cả Complete)
     order.scale_overall_status = computeOverallScaleStatus(order);
 
-    // Log approve item + (optional) change of overall status if any
-    const approveChanges = [];
-    if (before.item_scale_status !== item.scale_status) {
-      approveChanges.push({
-        field: "items.scale_status",
-        from: before.item_scale_status,
-        to: item.scale_status,
-      });
-    }
-    if ((before.item_qc_note || "") !== (item.qc_note || "")) {
-      approveChanges.push({
-        field: "items.qc_note",
-        from: before.item_qc_note,
-        to: item.qc_note || "",
-      });
-    }
-    if (before.order_scale_overall_status !== order.scale_overall_status) {
-      approveChanges.push({
-        field: "scale_overall_status",
-        from: before.order_scale_overall_status,
-        to: order.scale_overall_status,
-      });
-    }
-
-    await logOrderHistory({
-      orderDoc: order,
-      action: "SCALE_APPROVE_ITEM",
-      description: `Approved item ${orderItemId}${note ? `: ${String(note).slice(0, 120)}` : ""}`,
-      changes: approveChanges,
-      orderItemId,
-      user,
-      context: {
-        source: "PORTAL",
-        ip: req.ip,
-        userAgent: req.headers["user-agent"],
-      },
-    });
-
-    // === If order becomes READY ===
+    // === Nếu order đã "Ready" ===
     if (order.scale_overall_status === "Ready") {
-      await logOrderHistory({
-        orderDoc: order,
-        action: "SCALE_ORDER_READY",
-        description: `All items approved. Order is Ready.`,
-        changes: [
-          {
-            field: "scale_overall_status",
-            from: before.order_scale_overall_status,
-            to: "Ready",
-          },
-        ],
-        user,
-        context: {
-          source: "PORTAL",
-          ip: req.ip,
-          userAgent: req.headers["user-agent"],
-        },
-      });
-
-      // Points
+      // Cộng điểm scale
       const asin = item.asin;
       const listing = asin
         ? await Listing.findOne({ asin }).select("asin_type").lean()
@@ -585,62 +463,23 @@ const confirmScaleForItem = async (req, res) => {
         quantity: Array.isArray(order.items) ? order.items.length : 0,
       });
 
-      // Address invalid
+      // Kiểm tra địa chỉ
       if (isAddressInvalid(order)) {
         order.scale_overall_status = "Address Invalid";
         await order.save();
-
-        await logOrderHistory({
-          orderDoc: order,
-          action: "UPDATE_SCALE_STATUS",
-          description: "Address invalid detected. Overall status set to Address Invalid.",
-          changes: [
-            {
-              field: "scale_overall_status",
-              from: "Ready",
-              to: "Address Invalid",
-            },
-          ],
-          user,
-          context: {
-            source: "SYSTEM",
-            ip: req.ip,
-            userAgent: req.headers["user-agent"],
-          },
-        });
-
         return res.status(409).json({
           message: buildInvalidAddressMessage(order),
           address_validation: order.address_validation || null,
         });
       }
 
-      // Internal LNG
+      // Đơn nội bộ LNG Group
       const isLNG = await isLNGGroupOrder(order);
       if (isLNG) {
-        const prevOverall = order.scale_overall_status;
-        const prevStatus = order.status;
-
         order.scale_overall_status = "Sent";
         order.status = "Fulfilled";
         order.fulfilled_at = new Date();
         await order.save();
-
-        await logOrderHistory({
-          orderDoc: order,
-          action: "SEND_TO_VENDOR",
-          description: "Internal LNG order: marked Sent and Fulfilled (no vendor submission).",
-          changes: [
-            { field: "scale_overall_status", from: prevOverall, to: "Sent" },
-            { field: "status", from: prevStatus, to: "Fulfilled" },
-          ],
-          user,
-          context: {
-            source: "SYSTEM",
-            ip: req.ip,
-            userAgent: req.headers["user-agent"],
-          },
-        });
 
         return res.json({
           message: "Approved and marked Sent/Fulfilled for LNG Group order.",
@@ -674,29 +513,6 @@ const confirmScaleForItem = async (req, res) => {
 
       try {
         const result = await FulfillmentService.send(order, providerKey);
-
-        // Log vendor submit (success or alreadySent)
-        await logOrderHistory({
-          orderDoc: order,
-          action: "SEND_TO_VENDOR",
-          description: result.alreadySent
-            ? `Order already sent to ${result.vendorKey}.`
-            : `Order sent to ${result.vendorKey}.`,
-          changes: [
-            {
-              field: "vendor",
-              from: null,
-              to: result.vendorKey,
-            },
-          ],
-          user,
-          context: {
-            source: "SYSTEM",
-            ip: req.ip,
-            userAgent: req.headers["user-agent"],
-          },
-        });
-
         return res.json({
           message: result.alreadySent
             ? `Order already sent to ${result.vendorKey}.`
@@ -707,8 +523,6 @@ const confirmScaleForItem = async (req, res) => {
           submission_response: result.response,
         });
       } catch (e) {
-        const prevOverall = order.scale_overall_status;
-
         const prev = order.vendor_submissions?.[providerKey] || {};
         const rec = {
           ...(prev || {}),
@@ -726,23 +540,6 @@ const confirmScaleForItem = async (req, res) => {
         order.scale_overall_status = "Failed";
         await order.save();
 
-        await logOrderHistory({
-          orderDoc: order,
-          action: "SEND_TO_VENDOR_FAILED",
-          description: `Sending order to ${providerKey} failed. Overall status set to Failed.`,
-          changes: [
-            { field: "scale_overall_status", from: prevOverall, to: "Failed" },
-            { field: `vendor_submissions.${providerKey}.attempt_count`, from: prev?.attempt_count || 0, to: rec.attempt_count },
-            { field: `vendor_submissions.${providerKey}.last_response.error`, from: null, to: e.message },
-          ],
-          user,
-          context: {
-            source: "SYSTEM",
-            ip: req.ip,
-            userAgent: req.headers["user-agent"],
-          },
-        });
-
         return res.status(502).json({
           message: `Approved but sending order to ${providerKey} failed. Overall status set to Failed.`,
           error: e.message,
@@ -750,7 +547,7 @@ const confirmScaleForItem = async (req, res) => {
       }
     }
 
-    // Not ready yet
+    // Chưa đủ Complete (đơn nhiều item)
     await order.save();
     return res.json({
       message: "Item approved. Waiting for other items to be approved.",
@@ -761,6 +558,9 @@ const confirmScaleForItem = async (req, res) => {
     return res.status(500).json({ message: "Confirm failed", error: err.message });
   }
 };
+
+module.exports = { confirmScaleForItem };
+
 // Retry gửi đơn sang vendor cụ thể (auto-resolve nếu không truyền provider)
 const retrySendFulfillment = async (req, res) => {
   try {
