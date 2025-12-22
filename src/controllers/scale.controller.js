@@ -1475,12 +1475,12 @@ const getScaleListForDesign = async (req, res) => {
       // Filter shopName
       ...(shopName && shopName.trim()
         ? [
-            {
-              $match: {
-                "shop.name": { $regex: new RegExp(shopName.trim(), "i") },
-              },
+          {
+            $match: {
+              "shop.name": { $regex: new RegExp(shopName.trim(), "i") },
             },
-          ]
+          },
+        ]
         : []),
 
       // Filter search
@@ -1862,10 +1862,10 @@ const getScaleListForDesign = async (req, res) => {
           listingId: item.listingId,
           listing: ldoc
             ? {
-                asin_type: ldoc.asin_type || null,
-                product_image: ldoc.product_image || null,
-                psd: ldoc.psd || null,
-              }
+              asin_type: ldoc.asin_type || null,
+              product_image: ldoc.product_image || null,
+              psd: ldoc.psd || null,
+            }
             : null,
         };
       });
@@ -1889,17 +1889,17 @@ const getScaleListForDesign = async (req, res) => {
         scale_overall_status: order.scale_overall_status,
         seller: order.seller
           ? {
-              _id: order.seller._id,
-              full_name: order.seller.full_name,
-              email: order.seller.email,
-            }
+            _id: order.seller._id,
+            full_name: order.seller.full_name,
+            email: order.seller.email,
+          }
           : null,
         scale_by: order.scale_by
           ? {
-              _id: order.scale_by._id,
-              full_name: order.scale_by.full_name,
-              email: order.scale_by.email,
-            }
+            _id: order.scale_by._id,
+            full_name: order.scale_by.full_name,
+            email: order.scale_by.email,
+          }
           : null,
       };
     });
@@ -1970,7 +1970,6 @@ async function getScaleStatistics(req, res) {
     const isDesignLeader = hasRole(userRole, "Design Leader");
     const isDesigner = hasRole(userRole, "Designer");
 
-
     if (!(isAdmin || isSeller || isCS || isDesignLeader || isDesigner)) {
       return res
         .status(403)
@@ -1991,18 +1990,7 @@ async function getScaleStatistics(req, res) {
     }
 
     if (isCS) {
-      // const currentUser = await User.findById(userId).select('team_id').lean();
-      // if (!currentUser || !currentUser.team_id) {
-      //   return res.status(400).json({
-      //     message: "a CS must have a team"
-      //   });
-      // }
-      // const teamMemberIds = await User.find(
-      //   { team_id: currentUser.team_id },
-      //   { _id: 1 }
-      // ).lean();
-      // const memberIds = teamMemberIds.map(u => u._id);
-      // matchStage.sellerId = { $in: memberIds };
+      // Nếu cần filter theo team CS thì mở lại phần này
     } else if (isSellerOnly) {
       matchStage.sellerId = new mongoose.Types.ObjectId(userId);
     }
@@ -2018,9 +2006,6 @@ async function getScaleStatistics(req, res) {
         { "items.orderItemId": keyword },
         { "customer_infor.email": keyword },
         { "customer_infor.name": keyword },
-        // nếu cần thêm seller.* thì join users và mở comment dưới:
-        // { "seller.full_name": keyword },
-        // { "seller.email": keyword },
       ];
     }
 
@@ -2039,8 +2024,6 @@ async function getScaleStatistics(req, res) {
       },
       { $unwind: { path: "$shop", preserveNullAndEmptyArrays: true } },
 
-      // (nếu cần search theo seller.*, thêm lookup users và $unwind ở đây)
-
       ...(shopName && shopName.trim()
         ? [
           {
@@ -2054,7 +2037,7 @@ async function getScaleStatistics(req, res) {
       ...(searchOr ? [{ $match: { $or: searchOr } }] : []),
     ];
 
-    // ===== NEW: pngStatus filter theo asin_type =====
+    // ===== pngStatus filter theo asin_type =====
     const wantPngStatus = String(pngStatus || "false").toLowerCase() === "true";
     basePipeline.push(
       {
@@ -2106,6 +2089,81 @@ async function getScaleStatistics(req, res) {
         },
       },
     });
+
+    /**
+     * ===== NEW RULE (match list API) =====
+     * Need Scale chỉ tính/hiện những order mà (sau khi lọc item theo PSD available) còn item hợp lệ.
+     * - lọc items của bucket Need Scale theo listingId có psd.status Available (case-insensitive)
+     * - nếu items rỗng => loại order khỏi thống kê
+     */
+    basePipeline.push(
+      {
+        $lookup: {
+          from: "listings",
+          let: { listingIds: "$items.listingId" },
+          pipeline: [
+            {
+              $match: {
+                $expr: {
+                  $and: [
+                    { $in: ["$_id", { $ifNull: ["$$listingIds", []] }] },
+                    {
+                      $eq: [
+                        { $toLower: { $ifNull: ["$psd.status", ""] } },
+                        "available",
+                      ],
+                    },
+                  ],
+                },
+              },
+            },
+            { $project: { _id: 1 } },
+          ],
+          as: "availablePsdListings",
+        },
+      },
+      {
+        $addFields: {
+          availablePsdListingIds: {
+            $map: { input: "$availablePsdListings", as: "l", in: "$$l._id" },
+          },
+        },
+      },
+      {
+        $addFields: {
+          items: {
+            $cond: [
+              { $eq: ["$overall_status_bucket", "Need Scale"] },
+              {
+                $filter: {
+                  input: { $ifNull: ["$items", []] },
+                  as: "it",
+                  cond: {
+                    $in: [
+                      "$$it.listingId",
+                      { $ifNull: ["$availablePsdListingIds", []] },
+                    ],
+                  },
+                },
+              },
+              "$items",
+            ],
+          },
+        },
+      },
+      {
+        $match: {
+          $expr: {
+            $cond: [
+              { $eq: ["$overall_status_bucket", "Need Scale"] },
+              { $gt: [{ $size: { $ifNull: ["$items", []] } }, 0] },
+              true,
+            ],
+          },
+        },
+      },
+      { $unset: ["availablePsdListings", "availablePsdListingIds"] }
+    );
 
     // ===== Overall counts (Pending chỉ tính khi có item Pending) =====
     const overallPipeline = [
@@ -2280,7 +2338,6 @@ async function getScaleStatisticsForDesign(req, res) {
         ]
         : []),
 
-      // Filter search
       ...(searchOr ? [{ $match: { $or: searchOr } }] : []),
     ];
 
@@ -2366,7 +2423,7 @@ async function getScaleStatisticsForDesign(req, res) {
       );
     }
 
-    // ===== FIX: Thêm isUnassigned và bucket TRƯỚC =====
+    // ===== isUnassigned + bucket =====
     basePipeline.push({
       $addFields: {
         hasPendingItem: {
@@ -2395,17 +2452,90 @@ async function getScaleStatisticsForDesign(req, res) {
       },
     });
 
-    // ===== FIX: Filter unassigned nếu cần =====
-    const wantUnassignedOnly = !isDesigner && String(unassigned || "").toLowerCase() === "true";
+    /**
+     * ===== NEW RULE (match list API) =====
+     * Need Scale chỉ tính/hiện những order mà (sau khi lọc item theo PSD available) còn item hợp lệ.
+     * - lọc items của bucket Need Scale theo listingId có psd.status Available (case-insensitive)
+     * - nếu items rỗng => loại order khỏi thống kê
+     */
+    basePipeline.push(
+      {
+        $lookup: {
+          from: "listings",
+          let: { listingIds: "$items.listingId" },
+          pipeline: [
+            {
+              $match: {
+                $expr: {
+                  $and: [
+                    { $in: ["$_id", { $ifNull: ["$$listingIds", []] }] },
+                    {
+                      $eq: [
+                        { $toLower: { $ifNull: ["$psd.status", ""] } },
+                        "available",
+                      ],
+                    },
+                  ],
+                },
+              },
+            },
+            { $project: { _id: 1 } },
+          ],
+          as: "availablePsdListings",
+        },
+      },
+      {
+        $addFields: {
+          availablePsdListingIds: {
+            $map: { input: "$availablePsdListings", as: "l", in: "$$l._id" },
+          },
+        },
+      },
+      {
+        $addFields: {
+          items: {
+            $cond: [
+              { $eq: ["$overall_status_bucket", "Need Scale"] },
+              {
+                $filter: {
+                  input: { $ifNull: ["$items", []] },
+                  as: "it",
+                  cond: {
+                    $in: [
+                      "$$it.listingId",
+                      { $ifNull: ["$availablePsdListingIds", []] },
+                    ],
+                  },
+                },
+              },
+              "$items",
+            ],
+          },
+        },
+      },
+      {
+        $match: {
+          $expr: {
+            $cond: [
+              { $eq: ["$overall_status_bucket", "Need Scale"] },
+              { $gt: [{ $size: { $ifNull: ["$items", []] } }, 0] },
+              true,
+            ],
+          },
+        },
+      },
+      { $unset: ["availablePsdListings", "availablePsdListingIds"] }
+    );
+
+    // ===== Filter unassigned nếu cần =====
+    const wantUnassignedOnly =
+      !isDesigner && String(unassigned || "").toLowerCase() === "true";
 
     if (wantUnassignedOnly) {
-      basePipeline.push({
-        $match: { isUnassigned: true },
-      });
+      basePipeline.push({ $match: { isUnassigned: true } });
     }
 
-    // ===== FIX: CHỈ đếm orders có status hợp lệ (loại bỏ Cancelled, etc.) =====
-    // Giống logic default của List API
+    // ===== Match default list statuses (khi không bật unassigned-only) =====
     if (!wantUnassignedOnly) {
       basePipeline.push({
         $match: {
@@ -2502,6 +2632,7 @@ async function getScaleStatisticsForDesign(req, res) {
     });
   }
 }
+
 
 
 /**
