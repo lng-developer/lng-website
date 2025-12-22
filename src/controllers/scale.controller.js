@@ -925,7 +925,7 @@ const getScaleList = async (req, res) => {
     const isDesignLeader = hasRole(userRole, "Design Leader");
     const isDesigner = hasRole(userRole, "Designer");
 
-    // Cho phép Admin, Seller, Customer Service, Design Leader
+    // Cho phép Admin, Seller, Customer Service, Design Leader, Designer
     if (!(isAdmin || isSeller || isCS || isDesignLeader || isDesigner)) {
       return res
         .status(403)
@@ -935,7 +935,7 @@ const getScaleList = async (req, res) => {
     /**
      * CHỈ giới hạn theo seller khi là Seller "thuần"
      * (không có bất kỳ role quyền cao nào khác).
-     * Design Leader phải luôn bypass filter này, kể cả khi tài khoản có Seller.  
+     * Design Leader phải luôn bypass filter này, kể cả khi tài khoản có Seller.
      */
     const isSellerOnly = isSeller && !(isAdmin || isCS || isDesignLeader);
 
@@ -950,18 +950,7 @@ const getScaleList = async (req, res) => {
     }
 
     if (isCS) {
-      // const currentUser = await User.findById(userId).select('team_id').lean();
-      // if (!currentUser || !currentUser.team_id) {
-      //   return res.status(400).json({
-      //     message: "a CS must have a team"
-      //   });
-      // }
-      // const teamMemberIds = await User.find(
-      //   { team_id: currentUser.team_id },
-      //   { _id: 1 }
-      // ).lean();
-      // const memberIds = teamMemberIds.map(u => u._id);
-      // initialMatch.sellerId = { $in: memberIds };
+      // Nếu sau này cần filter theo team CS thì mở lại phần này
     } else if (isSellerOnly) {
       initialMatch.sellerId = new mongoose.Types.ObjectId(userId);
     }
@@ -1119,6 +1108,85 @@ const getScaleList = async (req, res) => {
     if (onlyPending) {
       pipeline.push({ $match: { hasPendingItem: true } });
     }
+
+    /**
+     * ===== NEW RULE =====
+     * Need Scale chỉ hiện những Listing có psd.status = available (case-insensitive: "Available"/"available")
+     * - Lọc lại items của các order bucket Need Scale theo listingId có PSD available
+     * - Nếu sau lọc items rỗng => loại order khỏi kết quả
+     *
+     * IMPORTANT: đặt BEFORE count/paginate để totalCount đúng
+     */
+    pipeline.push(
+      {
+        $lookup: {
+          from: "listings",
+          let: { listingIds: "$items.listingId" },
+          pipeline: [
+            {
+              $match: {
+                $expr: {
+                  $and: [
+                    { $in: ["$_id", { $ifNull: ["$$listingIds", []] }] },
+                    {
+                      $eq: [
+                        { $toLower: { $ifNull: ["$psd.status", ""] } },
+                        "available",
+                      ],
+                    },
+                  ],
+                },
+              },
+            },
+            { $project: { _id: 1 } },
+          ],
+          as: "availablePsdListings",
+        },
+      },
+      {
+        $addFields: {
+          availablePsdListingIds: {
+            $map: { input: "$availablePsdListings", as: "l", in: "$$l._id" },
+          },
+        },
+      },
+      {
+        $addFields: {
+          items: {
+            $cond: [
+              { $eq: ["$overall_status_bucket", "Need Scale"] },
+              {
+                $filter: {
+                  input: { $ifNull: ["$items", []] },
+                  as: "it",
+                  cond: {
+                    $in: [
+                      "$$it.listingId",
+                      { $ifNull: ["$availablePsdListingIds", []] },
+                    ],
+                  },
+                },
+              },
+              "$items",
+            ],
+          },
+        },
+      },
+      // Nếu là Need Scale mà items bị lọc rỗng => loại order khỏi result
+      {
+        $match: {
+          $expr: {
+            $cond: [
+              { $eq: ["$overall_status_bucket", "Need Scale"] },
+              { $gt: [{ $size: { $ifNull: ["$items", []] } }, 0] },
+              true,
+            ],
+          },
+        },
+      },
+      { $unset: ["availablePsdListings", "availablePsdListingIds"] }
+    );
+    // ===== end NEW RULE =====
 
     // 5) Join Case
     pipeline.push({
@@ -1283,6 +1351,7 @@ const getScaleList = async (req, res) => {
           : null,
       };
     });
+
     res.json({
       data: result,
       totalCount,
@@ -1364,7 +1433,7 @@ const getScaleListForDesign = async (req, res) => {
       // Designer chỉ xem order đã được assign cho chính họ
       initialMatch.scaleId = new mongoose.Types.ObjectId(userId);
     }
-    // Admin + Design Leader xem tất cả
+    // Admin + Design Leader + CS xem tất cả (tuỳ policy của bạn)
 
     // ===== Base pipeline =====
     const pipeline = [
@@ -1406,12 +1475,12 @@ const getScaleListForDesign = async (req, res) => {
       // Filter shopName
       ...(shopName && shopName.trim()
         ? [
-          {
-            $match: {
-              "shop.name": { $regex: new RegExp(shopName.trim(), "i") },
+            {
+              $match: {
+                "shop.name": { $regex: new RegExp(shopName.trim(), "i") },
+              },
             },
-          },
-        ]
+          ]
         : []),
 
       // Filter search
@@ -1590,6 +1659,85 @@ const getScaleListForDesign = async (req, res) => {
     }
     if (onlyPending) pipeline.push({ $match: { hasPendingItem: true } });
 
+    /**
+     * ===== NEW RULE (same as getScaleList) =====
+     * Need Scale chỉ hiện những Listing có psd.status = Available (case-insensitive)
+     * - Lọc lại items của các order bucket Need Scale theo listingId có PSD available
+     * - Nếu sau lọc items rỗng => loại order khỏi kết quả
+     *
+     * IMPORTANT: đặt BEFORE count/paginate để totalCount đúng
+     */
+    pipeline.push(
+      {
+        $lookup: {
+          from: "listings",
+          let: { listingIds: "$items.listingId" },
+          pipeline: [
+            {
+              $match: {
+                $expr: {
+                  $and: [
+                    { $in: ["$_id", { $ifNull: ["$$listingIds", []] }] },
+                    {
+                      $eq: [
+                        { $toLower: { $ifNull: ["$psd.status", ""] } },
+                        "available",
+                      ],
+                    },
+                  ],
+                },
+              },
+            },
+            { $project: { _id: 1 } },
+          ],
+          as: "availablePsdListings",
+        },
+      },
+      {
+        $addFields: {
+          availablePsdListingIds: {
+            $map: { input: "$availablePsdListings", as: "l", in: "$$l._id" },
+          },
+        },
+      },
+      {
+        $addFields: {
+          items: {
+            $cond: [
+              { $eq: ["$overall_status_bucket", "Need Scale"] },
+              {
+                $filter: {
+                  input: { $ifNull: ["$items", []] },
+                  as: "it",
+                  cond: {
+                    $in: [
+                      "$$it.listingId",
+                      { $ifNull: ["$availablePsdListingIds", []] },
+                    ],
+                  },
+                },
+              },
+              "$items",
+            ],
+          },
+        },
+      },
+      // Nếu là Need Scale mà items bị lọc rỗng => loại order khỏi result
+      {
+        $match: {
+          $expr: {
+            $cond: [
+              { $eq: ["$overall_status_bucket", "Need Scale"] },
+              { $gt: [{ $size: { $ifNull: ["$items", []] } }, 0] },
+              true,
+            ],
+          },
+        },
+      },
+      { $unset: ["availablePsdListings", "availablePsdListingIds"] }
+    );
+    // ===== end NEW RULE =====
+
     // Join Case
     pipeline.push({
       $lookup: {
@@ -1714,10 +1862,10 @@ const getScaleListForDesign = async (req, res) => {
           listingId: item.listingId,
           listing: ldoc
             ? {
-              asin_type: ldoc.asin_type || null,
-              product_image: ldoc.product_image || null,
-              psd: ldoc.psd || null,
-            }
+                asin_type: ldoc.asin_type || null,
+                product_image: ldoc.product_image || null,
+                psd: ldoc.psd || null,
+              }
             : null,
         };
       });
@@ -1741,17 +1889,17 @@ const getScaleListForDesign = async (req, res) => {
         scale_overall_status: order.scale_overall_status,
         seller: order.seller
           ? {
-            _id: order.seller._id,
-            full_name: order.seller.full_name,
-            email: order.seller.email,
-          }
+              _id: order.seller._id,
+              full_name: order.seller.full_name,
+              email: order.seller.email,
+            }
           : null,
         scale_by: order.scale_by
           ? {
-            _id: order.scale_by._id,
-            full_name: order.scale_by.full_name,
-            email: order.scale_by.email,
-          }
+              _id: order.scale_by._id,
+              full_name: order.scale_by.full_name,
+              email: order.scale_by.email,
+            }
           : null,
       };
     });
@@ -1769,6 +1917,7 @@ const getScaleListForDesign = async (req, res) => {
       .json({ message: "Failed to retrieve scale list", error: error.message });
   }
 };
+
 
 // === helpers: normalize & check roles ===
 function extractRoles(userRole) {
