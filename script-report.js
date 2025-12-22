@@ -17,7 +17,7 @@ const MONGODB_URI =
     process.env.MONGODB_URI || "mongodb+srv://lngdeveloperworkspace:lannhi123@lngweb.l3xatze.mongodb.net/lng_db?retryWrites=true&w=majority&appName=LNGWeb";
 
 // Số lượng đơn cần lấy
-const LIMIT_ORDERS = 63;
+const LIMIT_ORDERS = 100;
 
 // Tỉ giá
 const EXCHANGE_RATE = 27300;
