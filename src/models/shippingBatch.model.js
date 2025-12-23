@@ -43,7 +43,7 @@ const StatsSchema = new mongoose.Schema(
 const ShippingBatchSchema = new mongoose.Schema(
   {
     machineId: { type: String, required: true },
-    label: { type: String, required: true },
+    label: { type: String },
     confirmShipDate: { type: Date },
 
     type: {
