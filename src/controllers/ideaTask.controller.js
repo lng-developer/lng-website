@@ -67,11 +67,13 @@ const canView = (req, task) => {
   const isAdmin = hasRole(r, "Admin");
   const isDL = hasRole(r, "Design Leader");
   const isDesigner = hasRole(r, "Designer");
+  const isCS = hasRole(r, "Customer Service")
   const me = req.user?.userId;
 
   if (isAdmin || isDL) return true;
   if (task.createdBy?.userId === me) return true;
   if (isDesigner && task.assignedTo?.userId === me) return true;
+  if (isCS && task.assignedTo?.userId === me) return true;
   return false;
 };
 
