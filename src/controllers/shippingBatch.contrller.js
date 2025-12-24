@@ -531,54 +531,57 @@ const updateAllFakeTracking = async (req, res, next) => {
   try {
     const { machineId } = req.body;
 
-    const batches = await ShippingBatch.find({
+    if (!machineId) {
+      return res.status(400).json({ message: "machineId is required" });
+    }
+
+    // 1️⃣ Lấy tất cả CONFIRM batch còn fake
+    const confirmBatches = await ShippingBatch.find({
       type: "CONFIRM",
       machineId,
       tracking_fakes: { $exists: true, $ne: [] },
     });
 
-    if (!batches.length) {
+    if (!confirmBatches.length) {
       return res.status(200).json({
-        message: "No batches with fake tracking found",
+        message: "No fake tracking found in confirm batches",
       });
     }
 
-    const resolvedRows = [];
-    let updatedOrderCount = 0;
+    const resolvedItems = [];
 
-    for (const batch of batches) {
-      const shipDateStr = buildShipDateString(batch.createdAt);
-
+    // 2️⃣ Duyệt từng CONFIRM batch
+    for (const batch of confirmBatches) {
       const remainingFakes = [];
 
       for (const fakeItem of batch.tracking_fakes) {
-        const realTracking = await getRealTrackingForOrder(fakeItem.orderId);
+        const orderId = fakeItem.orderId;
+
+        // Pull tracking real từ hệ thống
+        const realTracking = await getRealTrackingForOrder(orderId);
 
         if (realTracking) {
-          // gom vào file update global
-          resolvedRows.push({
-            orderId: fakeItem.orderId,
+          // ✅ Đã có tracking real → đưa vào batch UPDATE_GLOBAL
+          resolvedItems.push({
+            orderId,
             tracking: realTracking,
-            shipDate: shipDateStr,
-            sourceBatchId: batch._id,
+            sourceConfirmBatchId: batch._id, // 🔥 để xác định ship-date khi download
           });
 
-          // update completed trong batch gốc
-          const comp = batch.completed.find(
-            (c) => c.orderId === fakeItem.orderId
-          );
+          // Update completed trong CONFIRM batch
+          const comp = batch.completed.find((c) => c.orderId === orderId);
           if (comp) {
             comp.tracking = realTracking;
             comp.isFake = false;
             comp.source = "system";
           }
-
-          updatedOrderCount++;
         } else {
+          // ❌ Chưa có → giữ lại fake
           remainingFakes.push(fakeItem);
         }
       }
 
+      // 3️⃣ Update lại batch CONFIRM
       batch.tracking_fakes = remainingFakes;
       batch.stats.totalFake = remainingFakes.length;
       batch.stats.totalReal = batch.completed.length - remainingFakes.length;
@@ -586,37 +589,29 @@ const updateAllFakeTracking = async (req, res, next) => {
       await batch.save();
     }
 
-    if (!resolvedRows.length) {
+    if (!resolvedItems.length) {
       return res.status(200).json({
-        message: "No real tracking found across all batches",
+        message: "No fake orders have real tracking yet",
       });
     }
 
-    // tạo UPDATE_GLOBAL batch
+    // 4️⃣ Tạo batch UPDATE_GLOBAL
     const updateBatch = await ShippingBatch.create({
       machineId,
       type: "UPDATE_GLOBAL",
       status: "CONFIRM_FILE_READY",
-      completed: resolvedRows.map((r) => ({
-        orderId: r.orderId,
-        tracking: r.tracking,
-        isFake: false,
-        source: "system",
-      })),
+      completed: resolvedItems,
       tracking_fakes: [],
       stats: {
-        totalOrders: resolvedRows.length,
+        totalOrders: resolvedItems.length,
         totalFake: 0,
-        totalReal: resolvedRows.length,
+        totalReal: resolvedItems.length,
       },
     });
 
-    const fileContent = buildGlobalUpdateFile(resolvedRows);
-
     return res.status(201).json({
       updateBatchId: updateBatch._id,
-      totalUpdatedOrders: updatedOrderCount,
-      fileContent,
+      totalUpdatedOrders: resolvedItems.length,
     });
   } catch (err) {
     next(err);
@@ -627,52 +622,30 @@ const downloadAllUpdatedFakeFile = async (req, res, next) => {
   try {
     const {
       machineId,
+      batchId,
       carrierCode = "USPS",
       shipMethod = "USPS First Class",
     } = req.query;
 
-    if (!machineId) {
-      return res.status(400).json({ message: "machineId is required" });
+    // 1. Lấy batch UPDATE_GLOBAL
+    const updateBatch = await ShippingBatch.findById(batchId).lean();
+    if (!updateBatch || updateBatch.type !== "UPDATE_GLOBAL") {
+      return res.status(404).json({ message: "UPDATE_GLOBAL batch not found" });
     }
 
-    // 1) Lấy tất cả batch UPDATE (fake -> real)
-    const updateBatches = await ShippingBatch.find({
-      type: { $in: ["UPDATE_FAKE", "UPDATE_GLOBAL"] },
-      machineId,
-      completed: { $exists: true, $ne: [] },
-    })
-      .sort({ createdAt: 1 })
-      .lean(); // lean để xử lý nhanh
-
-    if (!updateBatches.length) {
-      return res.status(400).json({
-        message: "No updated tracking batches found",
-      });
+    if (!updateBatch.completed || updateBatch.completed.length === 0) {
+      return res
+        .status(400)
+        .json({ message: "No data in UPDATE_GLOBAL batch" });
     }
 
-    /**
-     * 2) Gom orderId + tracking từ UPDATE batches
-     * Nếu trùng orderId nhiều lần, ưu tiên bản mới nhất (vì sort createdAt tăng dần)
-     */
-    const orderMap = new Map(); // orderId -> tracking
-    for (const batch of updateBatches) {
-      for (const item of batch.completed || []) {
-        if (!item?.orderId || !item?.tracking) continue;
-        orderMap.set(String(item.orderId).trim(), String(item.tracking).trim());
-      }
-    }
+    // 2. Gom tất cả orderId cần tra
+    const orderIds = [
+      ...new Set(updateBatch.completed.map((i) => String(i.orderId))),
+    ];
 
-    const orderIds = Array.from(orderMap.keys());
-    if (!orderIds.length) {
-      return res.status(400).json({ message: "No valid updated orders found" });
-    }
-
-    /**
-     * 3) Tìm batch CONFIRM chứa từng orderId để lấy createdAt của CONFIRM batch
-     * Dùng aggregate để tạo map orderId -> confirmCreatedAt
-     *
-     * Lưu ý: match theo completed.orderId với $in
-     */
+    // 3. Tra CONFIRM batch cho từng orderId
+    //    -> map orderId -> confirm.createdAt
     const confirmMatches = await ShippingBatch.aggregate([
       {
         $match: {
@@ -682,46 +655,65 @@ const downloadAllUpdatedFakeFile = async (req, res, next) => {
         },
       },
       { $unwind: "$completed" },
-      { $match: { "completed.orderId": { $in: orderIds } } },
+      {
+        $match: {
+          "completed.orderId": { $in: orderIds },
+        },
+      },
       {
         $group: {
           _id: "$completed.orderId",
-          // nếu orderId lỡ xuất hiện nhiều confirm batch, lấy cái sớm nhất hoặc đúng logic bạn muốn
-          confirmCreatedAt: { $min: "$createdAt" },
+          confirmCreatedAt: { $first: "$createdAt" },
         },
       },
     ]);
 
-    const confirmDateMap = new Map(); // orderId -> createdAt(Date)
-    for (const row of confirmMatches) {
-      if (!row?._id || !row?.confirmCreatedAt) continue;
-      confirmDateMap.set(String(row._id).trim(), row.confirmCreatedAt);
+    if (!confirmMatches.length) {
+      return res.status(400).json({
+        message: "No matching CONFIRM batch found for orders",
+      });
     }
 
-    /**
-     * 4) Build file: ship-date theo confirm batch createdAt của từng order
-     * Nếu orderId không tìm thấy trong CONFIRM (hiếm), fallback về ngày tạo UPDATE mới nhất
-     */
+    const confirmDateMap = new Map();
+    for (const row of confirmMatches) {
+      confirmDateMap.set(
+        String(row._id),
+        buildShipDateString(row.confirmCreatedAt)
+      );
+    }
+
+    // 4. Build file – ship-date theo từng order
     let content =
       "order-id\tship-date\tcarrier-code\ttracking-number\tship-method\n";
 
-    let totalOrders = 0;
+    let total = 0;
 
-    for (const [orderId, tracking] of orderMap.entries()) {
-      const confirmCreatedAt = confirmDateMap.get(orderId);
+    for (const item of updateBatch.completed) {
+      const orderId = String(item.orderId);
+      const tracking = String(item.tracking || "").trim();
 
-      // fallback: nếu không tìm thấy confirm batch, lấy ngày hiện tại (hoặc bạn có thể bỏ qua)
-      const shipDateStr = buildShipDateString(confirmCreatedAt || new Date());
+      const shipDate = confirmDateMap.get(orderId);
+      if (!shipDate || !tracking) continue;
 
-      content += [orderId, shipDateStr, carrierCode, tracking, shipMethod].join(
-        "\t"
-      );
+      content += [
+        orderId,
+        shipDate, // 🔥 ship-date ĐÚNG THEO CONFIRM BATCH
+        carrierCode,
+        tracking,
+        shipMethod,
+      ].join("\t");
 
       content += "\n";
-      totalOrders++;
+      total++;
     }
 
-    const filename = `update_all_fake_${Date.now()}.txt`;
+    if (total === 0) {
+      return res.status(400).json({
+        message: "No valid rows to export after mapping confirm dates",
+      });
+    }
+
+    const filename = `update_all_fake_${batchId}.txt`;
 
     return res
       .status(200)
