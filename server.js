@@ -52,6 +52,7 @@ const {
   adminSessionRoutes,
   PointsRoutes,
   ShippingBatchRoutes,
+  ToDoListRoutes
 } = require("./src/routes");
 
 app.use("/api/role", roleRoutes);
@@ -81,6 +82,8 @@ app.use("/api/teams", teamRoutes);
 app.use("/api/admin", adminSessionRoutes);
 app.use("/api/points", PointsRoutes);
 app.use("/api/shipping-batches", ShippingBatchRoutes);
+app.use("/api/to-do", ToDoListRoutes);
+
 
 // ===== HTTP server
 const httpServer = http.createServer(app);
