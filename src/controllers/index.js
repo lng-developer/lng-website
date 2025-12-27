@@ -24,6 +24,10 @@ const teamController = require("./team.controller");
 const extController = require("./ext.controller");
 const pointController = require("./points.controller");
 const shippingBatchController = require("./shippingBatch.contrller");
+const projectController = require("./project.controller");
+const categoryController = require("./category.controller");
+const issueController = require("./issue.controller")
+const notificationController = require("./notification.controller")
 
 module.exports = {
   roleController,
@@ -52,4 +56,8 @@ module.exports = {
   extController,
   pointController,
   shippingBatchController,
+  projectController,
+  categoryController,
+  issueController,
+  notificationController
 };
