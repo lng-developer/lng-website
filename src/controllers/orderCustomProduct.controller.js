@@ -37,6 +37,8 @@ const {
   executePipeline,
   enrichOrdersData,
   getVendorProductIdsByVendorName,
+  getListingIdsNoPsd,
+  normalizeBool
 } = require("../helper/orderHelper");
 
 const mongoose = require("mongoose");
@@ -1640,12 +1642,12 @@ const getFrontendOrders = async (req, res) => {
       sellerId,
       invalidAddress,
 
-      // ✅ NEW
+      // ✅ logs
       includeLogs = "true",
       logLimit = 10,
     } = req.query;
 
-    //RBAC
+    // ===== RBAC =====
     const { role = "", userId = "" } = req.user || {};
     const roles = {
       isAdmin: /^admin$/i.test(role),
@@ -1665,6 +1667,7 @@ const getFrontendOrders = async (req, res) => {
 
     const initialMatch = buildInitialMatch(ids, roles, userId, userNull);
 
+    // ✅ IMPORTANT: listing là populate -> KHÔNG filter noPsd bằng items.listing.psd.status trong Mongo
     const filters = buildFilters({
       statuses,
       search,
@@ -1675,10 +1678,11 @@ const getFrontendOrders = async (req, res) => {
       financialStatus,
       sevenDayAlert,
       platform,
-      noPsd,
+      noPsd: null, // ✅ disable trong buildFilters
       shippingType,
     });
 
+    // ===== Production vendor filter =====
     if (roles.isProduction) {
       const vendorFilter = await buildVendorFilter();
       if (vendorFilter === null) {
@@ -1687,22 +1691,68 @@ const getFrontendOrders = async (req, res) => {
           totalCount: 0,
           totalPages: 1,
           currentPage: 1,
+          includeLogs: normalizeBool(includeLogs),
+          logLimit: normalizeBool(includeLogs)
+            ? Math.max(1, Math.min(parseInt(logLimit, 10) || 5, 50))
+            : 0,
         });
       }
       filters.push(vendorFilter);
     }
 
-    if (String(isNoCostCenter).toLowerCase() === "true") {
+    // ===== No Cost Center (giữ rule bạn đang dùng) =====
+    if (normalizeBool(isNoCostCenter)) {
       filters.push({
         $or: [{ base_cost: { $exists: false } }, { base_cost: null }, { base_cost: 0 }],
       });
       filters.push({ status: { $ne: "Cancelled" } });
     }
 
-    if (String(invalidAddress).toLowerCase() === "true") {
+    // ===== Invalid address =====
+    if (normalizeBool(invalidAddress)) {
       filters.push({ "address_validation.isValid": false });
     }
 
+    // ✅ ===== No PSD: filter theo listingId (đúng vì listing được populate) =====
+    const wantNoPsd = normalizeBool(noPsd);
+    if (wantNoPsd) {
+      // ⚠️ Sửa đúng model Listing của bạn tại đây:
+      const ListingModel = db.listing; // <-- đổi đúng tên model listing trong project bạn
+
+      if (!ListingModel) {
+        return res.status(500).json({ message: "Listing model not found in db" });
+      }
+
+      const listingIds = await getListingIdsNoPsd(ListingModel);
+
+      // không có listing Unavailable => trả rỗng luôn
+      if (!listingIds.length) {
+        const pageNum = parseInt(page, 10) || 1;
+        return res.json({
+          data: [],
+          totalCount: 0,
+          totalPages: 1,
+          currentPage: pageNum,
+          includeLogs: normalizeBool(includeLogs),
+          logLimit: normalizeBool(includeLogs)
+            ? Math.max(1, Math.min(parseInt(logLimit, 10) || 5, 50))
+            : 0,
+        });
+      }
+
+      filters.push({
+        items: {
+          $elemMatch: {
+            listingId: { $in: listingIds },
+          },
+        },
+      });
+
+      // Optional: loại Cancelled
+      filters.push({ status: { $ne: "Cancelled" } });
+    }
+
+    // ===== Build pipeline =====
     const pipeline = await buildPipeline({
       initialMatch,
       filters,
@@ -1712,35 +1762,26 @@ const getFrontendOrders = async (req, res) => {
       shopName,
     });
 
-    const { orders, totalCount, limitNum } = await executePipeline(
-      pipeline,
-      page,
-      perPage
-    );
+    const { orders, totalCount, limitNum } = await executePipeline(pipeline, page, perPage);
 
     const enrichedOrders = await enrichOrdersData(orders);
 
     // =========================
-    // ✅ NEW: attach logs
+    // ✅ attach logs
     // =========================
-    const wantLogs = String(includeLogs).toLowerCase() === "true";
-    const limitLogs = Math.max(1, Math.min(parseInt(logLimit, 10) || 5, 50)); // clamp 1..50
+    const wantLogs = normalizeBool(includeLogs);
+    const limitLogs = Math.max(1, Math.min(parseInt(logLimit, 10) || 5, 50));
 
     let ordersWithLogs = enrichedOrders;
 
     if (wantLogs && Array.isArray(enrichedOrders) && enrichedOrders.length) {
-      // lấy danh sách orderId string (Amazon orderId)
-      const orderIds = enrichedOrders
-        .map((o) => o.orderId)
-        .filter(Boolean);
+      const orderIds = enrichedOrders.map((o) => o.orderId).filter(Boolean);
 
-      // query tất cả logs (sort mới nhất)
       const logs = await OrderHistory.find({ orderId: { $in: orderIds } })
         .sort({ createdAt: -1 })
         .select("orderId action description changes orderItemId userId userName userRole source createdAt")
         .lean();
 
-      // group logs theo orderId, giới hạn limitLogs
       const map = new Map();
       for (const lg of logs) {
         const key = String(lg.orderId);
@@ -1751,13 +1792,12 @@ const getFrontendOrders = async (req, res) => {
 
       ordersWithLogs = enrichedOrders.map((o) => {
         const key = String(o.orderId || "");
-        const history = map.get(key) || [];
         const historyDesc = map.get(key) || []; // mới -> cũ
-        const historyAsc = [...historyDesc].reverse(); // ✅ cũ -> mới
+        const historyAsc = [...historyDesc].reverse(); // cũ -> mới
         return {
           ...o,
-          latestLog: history[0] || null,
-          history: historyAsc, // giới hạn N log gần nhất
+          latestLog: historyDesc[0] || null,
+          history: historyAsc,
         };
       });
     }
@@ -1771,8 +1811,6 @@ const getFrontendOrders = async (req, res) => {
       totalCount,
       totalPages: isAll ? 1 : Math.ceil(totalCount / limitNum),
       currentPage: pageNum,
-
-      // optional: meta để FE biết đang bật log
       includeLogs: wantLogs,
       logLimit: wantLogs ? limitLogs : 0,
     });
@@ -1790,7 +1828,7 @@ const getOrderStatistics = async (req, res) => {
       search,
       platform,
       userNull,
-      noPsd,
+      noPsd, // nếu FE filter theo noPsd=true
       shippingType,
       shopName,
       teamId,
@@ -1814,25 +1852,28 @@ const getOrderStatistics = async (req, res) => {
     if (ids.error) return res.status(400).json({ message: ids.error });
 
     const baseMatch = buildInitialMatch(ids, roles, userId, userNull);
+
+    // ✅ buildFilters KHÔNG xử lý noPsd trực tiếp (vì listing là populate)
     const filters = buildFilters({
       statuses: null,
       search,
       openCase,
       from,
       to,
-      isNoCostCenter: null, // <-- để thống kê chủ đề riêng
+      isNoCostCenter: null,
       financialStatus: null,
       sevenDayAlert: null,
       platform,
-      noPsd,
+      noPsd: null, // ✅ disable
       shippingType,
     });
 
-    // ===== TEAM FILTER (nếu là leader) =====
+    // ===== TEAM FILTER (leader) =====
     const Team = db.Team;
     const User = db.user;
     const team = await Team.findOne({ leaderId: userId }).select("_id").lean();
     if (team && baseMatch.sellerId) delete baseMatch.sellerId;
+
     if (ids.teamObjectId || team) {
       const tId = ids.teamObjectId || team._id;
       const members = await User.find({ team_id: tId }).select("_id").lean();
@@ -1847,6 +1888,7 @@ const getOrderStatistics = async (req, res) => {
           all: 0,
           new: 0,
           noCostCenter: 0,
+          noPsd: 0,
           paymentPending: 0,
           fulfilled: 0,
           shipped: 0,
@@ -1865,11 +1907,41 @@ const getOrderStatistics = async (req, res) => {
       if (shop?._id) filters.push({ shopId: shop._id });
     }
 
-    // Gom tất cả filter vào $and
+    // ✅ chuẩn bị listingIds cho facet noPsd
+    const ListingModel = db.listing; // <-- đổi đúng model listing của bạn
+    if (!ListingModel) {
+      return res.status(500).json({ message: "Listing model not found in db" });
+    }
+    const listingIdsNoPsd = await getListingIdsNoPsd(ListingModel);
+
+    // ===== nếu FE đang filter noPsd=true: áp dụng filter vào dataset thống kê =====
+    const wantNoPsdFilter = normalizeBool(noPsd);
+    if (wantNoPsdFilter) {
+      if (!listingIdsNoPsd.length) {
+        return res.json({
+          all: 0,
+          new: 0,
+          noCostCenter: 0,
+          noPsd: 0,
+          paymentPending: 0,
+          fulfilled: 0,
+          shipped: 0,
+          cancelled: 0,
+          refund: 0,
+          openCase: 0,
+          invalidAddress: 0,
+        });
+      }
+      filters.push({
+        items: { $elemMatch: { listingId: { $in: listingIdsNoPsd } } },
+      });
+      filters.push({ status: { $ne: "Cancelled" } });
+    }
+
+    // ===== Gom match =====
     const match = { ...baseMatch };
     if (filters.length) match.$and = filters;
 
-    // Điều kiện “No Cost Center” PHẢI giống get orders
     const NO_COST_CENTER = {
       $and: [
         {
@@ -1879,11 +1951,23 @@ const getOrderStatistics = async (req, res) => {
             { base_cost: 0 },
           ],
         },
-        { status: { $ne: "Cancelled" } }, // <-- loại Cancelled
+        { status: { $ne: "Cancelled" } },
       ],
     };
 
-    // ===== ONE-TRIP AGGREGATION WITH FACET =====
+    // ✅ matcher cho facet "noPsd" (không phụ thuộc populate)
+    const NO_PSD_MATCH =
+      listingIdsNoPsd.length === 0
+        ? { _id: null } // luôn 0
+        : {
+          $and: [
+            {
+              items: { $elemMatch: { listingId: { $in: listingIdsNoPsd } } },
+            },
+            { status: { $ne: "Cancelled" } },
+          ],
+        };
+
     const [stat] = await OrderCustomProduct.aggregate([
       { $match: match },
       {
@@ -1891,42 +1975,33 @@ const getOrderStatistics = async (req, res) => {
           all: [{ $count: "c" }],
           new: [{ $match: { status: "New" } }, { $count: "c" }],
           noCostCenter: [{ $match: NO_COST_CENTER }, { $count: "c" }],
-          paymentPending: [
-            { $match: { financialStatus: "Pending" } },
-            { $count: "c" },
-          ],
+
+          // ✅ NEW: No PSD count
+          noPsd: [{ $match: NO_PSD_MATCH }, { $count: "c" }],
+
+          paymentPending: [{ $match: { financialStatus: "Pending" } }, { $count: "c" }],
           fulfilled: [{ $match: { status: "Fulfilled" } }, { $count: "c" }],
           shipped: [{ $match: { status: "Shipped" } }, { $count: "c" }],
           cancelled: [{ $match: { status: "Cancelled" } }, { $count: "c" }],
           refund: [{ $match: { status: "Refund" } }, { $count: "c" }],
-          openCase: [
-            { $match: { case: { $exists: true, $ne: [] } } },
-            { $count: "c" },
-          ],
-          invalidAddress: [
-            { $match: { "address_validation.isValid": false } },
-            { $count: "c" },
-          ],
+          openCase: [{ $match: { case: { $exists: true, $ne: [] } } }, { $count: "c" }],
+          invalidAddress: [{ $match: { "address_validation.isValid": false } }, { $count: "c" }],
         },
       },
       {
         $project: {
           all: { $ifNull: [{ $arrayElemAt: ["$all.c", 0] }, 0] },
           new: { $ifNull: [{ $arrayElemAt: ["$new.c", 0] }, 0] },
-          noCostCenter: {
-            $ifNull: [{ $arrayElemAt: ["$noCostCenter.c", 0] }, 0],
-          },
-          paymentPending: {
-            $ifNull: [{ $arrayElemAt: ["$paymentPending.c", 0] }, 0],
-          },
+          noCostCenter: { $ifNull: [{ $arrayElemAt: ["$noCostCenter.c", 0] }, 0] },
+          noPsd: { $ifNull: [{ $arrayElemAt: ["$noPsd.c", 0] }, 0] },
+
+          paymentPending: { $ifNull: [{ $arrayElemAt: ["$paymentPending.c", 0] }, 0] },
           fulfilled: { $ifNull: [{ $arrayElemAt: ["$fulfilled.c", 0] }, 0] },
           shipped: { $ifNull: [{ $arrayElemAt: ["$shipped.c", 0] }, 0] },
           cancelled: { $ifNull: [{ $arrayElemAt: ["$cancelled.c", 0] }, 0] },
           refund: { $ifNull: [{ $arrayElemAt: ["$refund.c", 0] }, 0] },
           openCase: { $ifNull: [{ $arrayElemAt: ["$openCase.c", 0] }, 0] },
-          invalidAddress: {
-            $ifNull: [{ $arrayElemAt: ["$invalidAddress.c", 0] }, 0],
-          },
+          invalidAddress: { $ifNull: [{ $arrayElemAt: ["$invalidAddress.c", 0] }, 0] },
         },
       },
     ]);
@@ -1936,6 +2011,7 @@ const getOrderStatistics = async (req, res) => {
         all: 0,
         new: 0,
         noCostCenter: 0,
+        noPsd: 0,
         paymentPending: 0,
         fulfilled: 0,
         shipped: 0,
@@ -1947,9 +2023,11 @@ const getOrderStatistics = async (req, res) => {
     );
   } catch (err) {
     console.error("❌ getOrderStatistics error:", err);
-    res.status(500).json({ message: "Internal Server Error" });
+    return res.status(500).json({ message: "Internal Server Error" });
   }
 };
+
+
 
 const updateOrderStatus = async (req, res) => {
   try {
