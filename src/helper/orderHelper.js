@@ -54,6 +54,21 @@ function buildInitialMatch(ids, roles, userId, userNull) {
   return match;
 }
 
+function normalizeBool(v) {
+  return String(v).toLowerCase() === "true";
+}
+
+async function getListingIdsNoPsd(ListingModel) {
+  // lấy listing có psd.status = Unavailable (tolerant spaces + case-insensitive)
+  const docs = await ListingModel.find(
+    { "psd.status": { $regex: /^\s*unavailable\s*$/i } },
+    { _id: 1 }
+  ).lean();
+
+  return docs.map((d) => d._id);
+}
+
+
 function buildFilters(params) {
   const {
     statuses,
@@ -461,4 +476,6 @@ module.exports = {
     executePipeline,
     enrichOrdersData,
     getVendorProductIdsByVendorName,
+    getListingIdsNoPsd,
+    normalizeBool
 }
