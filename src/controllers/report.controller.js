@@ -90,7 +90,7 @@ const importReportFromFile = async (req, res) => {
       acc.item_tax += itemTax;
       acc.shipping_price += shippingPrice;
       acc.shipping_tax += shippingTax;
-      acc.item_promotion_discount += discount;
+      acc.item_promotion_discount += Math.abs(discount);
       acc.fee += fee;
       acc.revenue += revenue;
 
@@ -408,9 +408,9 @@ const getReportMatrix = async (req, res) => {
       S.ads[idx] = +(r.ads || 0).toFixed(2);
 
       S.shippingTax[idx] = +(r.shipping_tax || 0).toFixed(2);
-      S.itemPromotionDiscount[idx] = +(r.item_promotion_discount || 0).toFixed(
-        2
-      );
+      S.itemPromotionDiscount[idx] = +(
+        Math.abs(r.item_promotion_discount) || 0
+      ).toFixed(2);
       S.itemTax[idx] = +(r.item_tax || 0).toFixed(2);
     }
 
@@ -450,7 +450,7 @@ const getReportMatrix = async (req, res) => {
             S.fee[i] +
             S.ads[i] +
             S.shippingTax[i] +
-            S.itemPromotionDiscount[i] +
+            Math.abs(S.itemPromotionDiscount[i]) +
             S.itemTax[i]);
         const p2 = p1 - (S.opCost[i] + S.refund[i]);
         S.profit1[i] = +p1.toFixed(2);

@@ -38,7 +38,7 @@ const {
   enrichOrdersData,
   getVendorProductIdsByVendorName,
   getListingIdsNoPsd,
-  normalizeBool
+  normalizeBool,
 } = require("../helper/orderHelper");
 
 const mongoose = require("mongoose");
@@ -883,7 +883,8 @@ const updateOrdersFromXlsx = async (req, res) => {
       t.shipping_price = round2((t.shipping_price || 0) + delta.shipping_price);
       t.shipping_tax = round2((t.shipping_tax || 0) + delta.shipping_tax);
       t.item_promotion_discount = round2(
-        (t.item_promotion_discount || 0) + delta.item_promotion_discount
+        (Math.abs(t.item_promotion_discount) || 0) +
+          Math.abs(delta.item_promotion_discount)
       );
 
       // revenue = item + shipping
@@ -935,7 +936,7 @@ const updateOrdersFromXlsx = async (req, res) => {
         bucket.totals.shipping_tax + shippingTax
       );
       bucket.totals.item_promotion_discount = round2(
-        bucket.totals.item_promotion_discount + discount
+        Math.abs(bucket.totals.item_promotion_discount) + Math.abs(discount)
       );
       bucket.totals.revenue = round2(bucket.totals.revenue + revenue);
     }
@@ -988,7 +989,7 @@ const updateOrdersFromXlsx = async (req, res) => {
 
       try {
         fs.unlinkSync(filePath);
-      } catch (_) { }
+      } catch (_) {}
       return res.json({
         message: "Update by latest ship date completed",
         results,
@@ -1055,7 +1056,7 @@ const updateOrdersFromXlsx = async (req, res) => {
           item_tax: itemTax,
           shipping_price: shippingPrice,
           shipping_tax: shippingTax,
-          item_promotion_discount: discount,
+          item_promotion_discount: Math.abs(discount),
           fee: fee,
           revenue: revenue,
           opCost: 0,
@@ -1093,7 +1094,7 @@ const updateOrdersFromXlsx = async (req, res) => {
             item_tax: itemTax,
             shipping_price: shippingPrice,
             shipping_tax: shippingTax,
-            item_promotion_discount: discount,
+            item_promotion_discount: Math.abs(discount),
             revenue: revenue,
           });
 
@@ -1124,8 +1125,8 @@ const updateOrdersFromXlsx = async (req, res) => {
           currentShopIdForThisOrder = existing?.shopId
             ? String(existing.shopId)
             : bodyShopId
-              ? String(bodyShopId)
-              : null;
+            ? String(bodyShopId)
+            : null;
 
           results.push({
             orderId,
@@ -1151,7 +1152,11 @@ const updateOrdersFromXlsx = async (req, res) => {
             if (m?.mappedSku) {
               existingItem.mapped_sku = m.mappedSku;
               // queue audit logs too
-              considerLogMapping(orderId, existingItem.orderItemId, existingItem.sku);
+              considerLogMapping(
+                orderId,
+                existingItem.orderItemId,
+                existingItem.sku
+              );
               await existing.save();
             }
           }
@@ -1225,12 +1230,15 @@ const updateOrdersFromXlsx = async (req, res) => {
           currentShopIdForThisOrder = existing?.shopId
             ? String(existing.shopId)
             : bodyShopId
-              ? String(bodyShopId)
-              : null;
+            ? String(bodyShopId)
+            : null;
 
           skipProcessingZip = true;
 
-          if (autoCompute && (!existing.base_cost || existing.base_cost === 0)) {
+          if (
+            autoCompute &&
+            (!existing.base_cost || existing.base_cost === 0)
+          ) {
             ordersToCompute.add(orderId);
           }
         }
@@ -1267,8 +1275,8 @@ const updateOrdersFromXlsx = async (req, res) => {
         currentShopIdForThisOrder = newOrder?.shopId
           ? String(newOrder.shopId)
           : bodyShopId
-            ? String(bodyShopId)
-            : null;
+          ? String(bodyShopId)
+          : null;
 
         const validationResult = await validateAddressWithSmarty(
           basicData.customer_infor
@@ -1342,7 +1350,7 @@ const updateOrdersFromXlsx = async (req, res) => {
                 bufferForUpload === imageBuffer
                   ? imageName
                   : imageName.replace(/\.(png|jpg|jpeg)$/i, "") +
-                  "_compressed.jpg";
+                    "_compressed.jpg";
 
               const cloudinaryUrl = await uploadToCloudinary(
                 bufferForUpload,
@@ -1366,7 +1374,7 @@ const updateOrdersFromXlsx = async (req, res) => {
                     cloudinaryUrls.push(url);
                     continue;
                   }
-                } catch (_) { }
+                } catch (_) {}
                 skippedSnapshots.push({
                   image: imageName,
                   reason: "cloudinary: file size too large",
@@ -1448,7 +1456,7 @@ const updateOrdersFromXlsx = async (req, res) => {
           item_tax: round2(t.item_tax),
           shipping_price: round2(t.shipping_price),
           shipping_tax: round2(t.shipping_tax),
-          item_promotion_discount: round2(t.item_promotion_discount),
+          item_promotion_discount: round2(Math.abs(t.item_promotion_discount)),
           revenue: round2(t.revenue),
           fee: round2(0.17 * round2(t.revenue)),
           opCost: doc.amazon_finance_total?.opCost || 0,
@@ -1538,20 +1546,20 @@ const updateOrdersFromXlsx = async (req, res) => {
     if (pendingSkuMapLogs.length > 0 && !skuMappingDryRun) {
       try {
         await SkuMappingEntry.bulkWrite(pendingSkuMapLogs, { ordered: false });
-      } catch (_) { }
+      } catch (_) {}
     }
     if (pendingMappedSkuOps.length > 0 && !skuMappingDryRun) {
       try {
         await OrderCustomProduct.bulkWrite(pendingMappedSkuOps, {
           ordered: false,
         });
-      } catch (_) { }
+      } catch (_) {}
     }
 
     // dọn file tạm
     try {
       fs.unlinkSync(filePath);
-    } catch (_) { }
+    } catch (_) {}
 
     return res.json({
       message: "Batch import completed with ASIN-Listing base image matching",
@@ -1570,13 +1578,12 @@ const updateOrdersFromXlsx = async (req, res) => {
   } catch (error) {
     try {
       if (req?.file?.path) fs.unlinkSync(req.file.path);
-    } catch (_) { }
+    } catch (_) {}
     return res
       .status(500)
       .json({ message: "Batch import failed", error: error.message });
   }
 };
-
 
 const uploadToCloudinary = (buffer, filename) => {
   return new Promise((resolve, reject) => {
@@ -1703,7 +1710,11 @@ const getFrontendOrders = async (req, res) => {
     // ===== No Cost Center (giữ rule bạn đang dùng) =====
     if (normalizeBool(isNoCostCenter)) {
       filters.push({
-        $or: [{ base_cost: { $exists: false } }, { base_cost: null }, { base_cost: 0 }],
+        $or: [
+          { base_cost: { $exists: false } },
+          { base_cost: null },
+          { base_cost: 0 },
+        ],
       });
       filters.push({ status: { $ne: "Cancelled" } });
     }
@@ -1720,7 +1731,9 @@ const getFrontendOrders = async (req, res) => {
       const ListingModel = db.listing; // <-- đổi đúng tên model listing trong project bạn
 
       if (!ListingModel) {
-        return res.status(500).json({ message: "Listing model not found in db" });
+        return res
+          .status(500)
+          .json({ message: "Listing model not found in db" });
       }
 
       const listingIds = await getListingIdsNoPsd(ListingModel);
@@ -1762,7 +1775,11 @@ const getFrontendOrders = async (req, res) => {
       shopName,
     });
 
-    const { orders, totalCount, limitNum } = await executePipeline(pipeline, page, perPage);
+    const { orders, totalCount, limitNum } = await executePipeline(
+      pipeline,
+      page,
+      perPage
+    );
 
     const enrichedOrders = await enrichOrdersData(orders);
 
@@ -1779,7 +1796,9 @@ const getFrontendOrders = async (req, res) => {
 
       const logs = await OrderHistory.find({ orderId: { $in: orderIds } })
         .sort({ createdAt: -1 })
-        .select("orderId action description changes orderItemId userId userName userRole source createdAt")
+        .select(
+          "orderId action description changes orderItemId userId userName userRole source createdAt"
+        )
         .lean();
 
       const map = new Map();
@@ -1960,13 +1979,13 @@ const getOrderStatistics = async (req, res) => {
       listingIdsNoPsd.length === 0
         ? { _id: null } // luôn 0
         : {
-          $and: [
-            {
-              items: { $elemMatch: { listingId: { $in: listingIdsNoPsd } } },
-            },
-            { status: { $ne: "Cancelled" } },
-          ],
-        };
+            $and: [
+              {
+                items: { $elemMatch: { listingId: { $in: listingIdsNoPsd } } },
+              },
+              { status: { $ne: "Cancelled" } },
+            ],
+          };
 
     const [stat] = await OrderCustomProduct.aggregate([
       { $match: match },
@@ -1979,29 +1998,44 @@ const getOrderStatistics = async (req, res) => {
           // ✅ NEW: No PSD count
           noPsd: [{ $match: NO_PSD_MATCH }, { $count: "c" }],
 
-          paymentPending: [{ $match: { financialStatus: "Pending" } }, { $count: "c" }],
+          paymentPending: [
+            { $match: { financialStatus: "Pending" } },
+            { $count: "c" },
+          ],
           fulfilled: [{ $match: { status: "Fulfilled" } }, { $count: "c" }],
           shipped: [{ $match: { status: "Shipped" } }, { $count: "c" }],
           cancelled: [{ $match: { status: "Cancelled" } }, { $count: "c" }],
           refund: [{ $match: { status: "Refund" } }, { $count: "c" }],
-          openCase: [{ $match: { case: { $exists: true, $ne: [] } } }, { $count: "c" }],
-          invalidAddress: [{ $match: { "address_validation.isValid": false } }, { $count: "c" }],
+          openCase: [
+            { $match: { case: { $exists: true, $ne: [] } } },
+            { $count: "c" },
+          ],
+          invalidAddress: [
+            { $match: { "address_validation.isValid": false } },
+            { $count: "c" },
+          ],
         },
       },
       {
         $project: {
           all: { $ifNull: [{ $arrayElemAt: ["$all.c", 0] }, 0] },
           new: { $ifNull: [{ $arrayElemAt: ["$new.c", 0] }, 0] },
-          noCostCenter: { $ifNull: [{ $arrayElemAt: ["$noCostCenter.c", 0] }, 0] },
+          noCostCenter: {
+            $ifNull: [{ $arrayElemAt: ["$noCostCenter.c", 0] }, 0],
+          },
           noPsd: { $ifNull: [{ $arrayElemAt: ["$noPsd.c", 0] }, 0] },
 
-          paymentPending: { $ifNull: [{ $arrayElemAt: ["$paymentPending.c", 0] }, 0] },
+          paymentPending: {
+            $ifNull: [{ $arrayElemAt: ["$paymentPending.c", 0] }, 0],
+          },
           fulfilled: { $ifNull: [{ $arrayElemAt: ["$fulfilled.c", 0] }, 0] },
           shipped: { $ifNull: [{ $arrayElemAt: ["$shipped.c", 0] }, 0] },
           cancelled: { $ifNull: [{ $arrayElemAt: ["$cancelled.c", 0] }, 0] },
           refund: { $ifNull: [{ $arrayElemAt: ["$refund.c", 0] }, 0] },
           openCase: { $ifNull: [{ $arrayElemAt: ["$openCase.c", 0] }, 0] },
-          invalidAddress: { $ifNull: [{ $arrayElemAt: ["$invalidAddress.c", 0] }, 0] },
+          invalidAddress: {
+            $ifNull: [{ $arrayElemAt: ["$invalidAddress.c", 0] }, 0],
+          },
         },
       },
     ]);
@@ -2026,8 +2060,6 @@ const getOrderStatistics = async (req, res) => {
     return res.status(500).json({ message: "Internal Server Error" });
   }
 };
-
-
 
 const updateOrderStatus = async (req, res) => {
   try {
@@ -2344,8 +2376,9 @@ const removeCaseFromOrder = async (req, res) => {
     await logOrderHistory({
       orderDoc: order,
       action: "REMOVE_CASE",
-      description: `Removed ${oldCases.length - newCases.length
-        } case(s) from order`,
+      description: `Removed ${
+        oldCases.length - newCases.length
+      } case(s) from order`,
       changes: [
         {
           field: "case",
@@ -2642,9 +2675,9 @@ async function listCandidateVendors(pfItems = [], sizeValue, colorValue) {
 
     const vendorId = String(
       it?.vendor_id ||
-      it?.vendor?._id ||
-      (await getVendorIdByVendorProductId(vendorProductId)) ||
-      ""
+        it?.vendor?._id ||
+        (await getVendorIdByVendorProductId(vendorProductId)) ||
+        ""
     );
     if (vendorId) out.add(vendorId);
   }
@@ -2695,9 +2728,9 @@ async function selectBestVendorProduct(
     if (!vpId) continue;
     const vId = String(
       it?.vendor_id ||
-      it?.vendor?._id ||
-      (await getVendorIdByVendorProductId(vpId)) ||
-      ""
+        it?.vendor?._id ||
+        (await getVendorIdByVendorProductId(vpId)) ||
+        ""
     );
     resolved.push({ ...it, __vendorId: vId, __vendorProductId: vpId });
   }
@@ -2785,9 +2818,9 @@ async function buildVendorRank(preItems) {
       if (!vpId) continue;
       const vId = String(
         it?.vendor_id ||
-        it?.vendor?._id ||
-        (await getVendorIdByVendorProductId(vpId)) ||
-        ""
+          it?.vendor?._id ||
+          (await getVendorIdByVendorProductId(vpId)) ||
+          ""
       );
       if (!vId) continue;
       resolved.push({ ...it, __vendorId: vId, __vendorProductId: vpId });
@@ -3345,7 +3378,8 @@ const computeBaseCostForOrder = async (req, res) => {
       const items = bucket.items;
 
       // SPECIAL CASE: đúng 2 sản phẩm khác nhau, mỗi cái qty = 1
-      const distinctProducts = new Set(items.map((x) => x.vendorProductId)).size;
+      const distinctProducts = new Set(items.map((x) => x.vendorProductId))
+        .size;
       const totalQty = items.reduce((s, it) => s + it.qty, 0);
       const allQtyAreOne = items.every((it) => Number(it.qty) === 1);
 
@@ -3359,7 +3393,7 @@ const computeBaseCostForOrder = async (req, res) => {
           const minus =
             (out.shipping_international_economy || 0) +
             (out.shipping_international_additional_units || 0) *
-            (out.shipping_international_additional_rate || 0);
+              (out.shipping_international_additional_rate || 0);
           out.base_cost_total_for_item_including_shipping = Number(
             (out.base_cost_total_for_item_including_shipping - minus).toFixed(2)
           );
@@ -3383,10 +3417,13 @@ const computeBaseCostForOrder = async (req, res) => {
           if (out) {
             out.shipping_international_economy = expensive.eco;
             out.base_cost_total_for_item_including_shipping = Number(
-              (out.base_cost_total_for_item_including_shipping + expensive.eco).toFixed(2)
+              (
+                out.base_cost_total_for_item_including_shipping + expensive.eco
+              ).toFixed(2)
             );
-            out.formula = `${out.formula || ""} | SPECIAL[${expensive.shipProfile
-              }]: eco(${expensive.eco}) for expensive product`;
+            out.formula = `${out.formula || ""} | SPECIAL[${
+              expensive.shipProfile
+            }]: eco(${expensive.eco}) for expensive product`;
           }
         }
         // additional (1) cho sp "rẻ hơn"
@@ -3398,10 +3435,13 @@ const computeBaseCostForOrder = async (req, res) => {
             out.shipping_international_additional_units = 1;
             out.shipping_international_additional_rate = cheap.add;
             out.base_cost_total_for_item_including_shipping = Number(
-              (out.base_cost_total_for_item_including_shipping + cheap.add).toFixed(2)
+              (
+                out.base_cost_total_for_item_including_shipping + cheap.add
+              ).toFixed(2)
             );
-            out.formula = `${out.formula || ""} | SPECIAL[${cheap.shipProfile
-              }]: add(${cheap.add}) for cheaper product`;
+            out.formula = `${out.formula || ""} | SPECIAL[${
+              cheap.shipProfile
+            }]: add(${cheap.add}) for cheaper product`;
           }
         }
 
@@ -3412,7 +3452,9 @@ const computeBaseCostForOrder = async (req, res) => {
           special_case: true,
           shipping_profile: expensive.shipProfile,
           rule: "eco of more expensive + additional of cheaper",
-          shipping_total_for_group: Number((expensive.eco + cheap.add).toFixed(2)),
+          shipping_total_for_group: Number(
+            (expensive.eco + cheap.add).toFixed(2)
+          ),
         });
 
         continue;
@@ -3459,7 +3501,8 @@ const computeBaseCostForOrder = async (req, res) => {
           out.shipping_international_economy =
             (out.shipping_international_economy || 0) + ecoForThisItem;
           out.shipping_international_additional_units =
-            (out.shipping_international_additional_units || 0) + addUnitsForThisItem;
+            (out.shipping_international_additional_units || 0) +
+            addUnitsForThisItem;
           out.shipping_international_additional_rate = addRate;
           out.base_cost_total_for_item_including_shipping = Number(
             (
@@ -3482,7 +3525,7 @@ const computeBaseCostForOrder = async (req, res) => {
               return (
                 sum +
                 (out.shipping_international_additional_units || 0) *
-                (out.shipping_international_additional_rate || 0)
+                  (out.shipping_international_additional_rate || 0)
               );
             }, 0)
           ).toFixed(2)
@@ -3542,9 +3585,11 @@ const computeBaseCostForOrder = async (req, res) => {
     for (const it of order.items) {
       if (
         it.cost_breakdown &&
-        typeof it.cost_breakdown.base_cost_total_for_item_including_shipping === "number"
+        typeof it.cost_breakdown.base_cost_total_for_item_including_shipping ===
+          "number"
       ) {
-        orderTotalBaseCost += it.cost_breakdown.base_cost_total_for_item_including_shipping;
+        orderTotalBaseCost +=
+          it.cost_breakdown.base_cost_total_for_item_including_shipping;
       }
     }
     order.base_cost = Number(orderTotalBaseCost.toFixed(2));
@@ -3562,10 +3607,11 @@ const computeBaseCostForOrder = async (req, res) => {
       detail: perItemResults,
     });
   } catch (err) {
-    return res.status(500).json({ message: "Compute failed", error: err.message });
+    return res
+      .status(500)
+      .json({ message: "Compute failed", error: err.message });
   }
 };
-
 
 /**
  * POST body: { limit?: number }
@@ -3622,13 +3668,16 @@ function computeOrderStatusFromItems(items = []) {
   return "New";
 }
 
-const unique = (arr) => [...new Set(arr.filter((v) => v !== undefined && v !== null))];
+const unique = (arr) => [
+  ...new Set(arr.filter((v) => v !== undefined && v !== null)),
+];
 
 const summarizeItemsField = (items, pickFn) => {
   if (!Array.isArray(items) || items.length === 0) return [];
-  return unique(items.map(pickFn).map((v) => (typeof v === "string" ? v.trim() : v)));
+  return unique(
+    items.map(pickFn).map((v) => (typeof v === "string" ? v.trim() : v))
+  );
 };
-
 
 /**
  * PATCH /orders/:orderId/items/:orderItemId/tracking
@@ -3777,8 +3826,8 @@ const updateItemTracking = async (req, res) => {
       nextStatus === "Fulfilled" || nextStatus === "Shipped"
         ? "Sent"
         : nextStatus === "Cancelled"
-          ? "Cancelled"
-          : docAfterAllUpdate.scale_overall_status;
+        ? "Cancelled"
+        : docAfterAllUpdate.scale_overall_status;
 
     return res.json({
       message:
