@@ -29,7 +29,7 @@ router.post(
     categoryController.createCategory
 );
 
-router.patch(
+router.put(
     "/projects/:projectId/categories/:categoryId",
     authenticateToken,
     categoryController.updateCategory

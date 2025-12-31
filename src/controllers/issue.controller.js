@@ -4,7 +4,7 @@ const Issue = db.Issue
 const Category = db.Category
 const Notification = db.Notification
 const { toObjectId, getUserId, assertProjectMember, assertCategoryInProject, reindexOrder } = require("../helper/toDoList.helper.js");
-
+const mongoose = require('mongoose');
 
 /**
  * Create card in a category
