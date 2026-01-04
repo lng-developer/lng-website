@@ -249,7 +249,7 @@ const getReportMatrix = async (req, res) => {
     }
 
     // ===== opCost cố định =====
-    const OPCOST_PER_PERSON_PER_DAY = 30;
+    const OPCOST_PER_PERSON_PER_DAY = 0;
 
     // ===== 1) chuẩn bị date list =====
     const dayList = makeDayList(from, to);
