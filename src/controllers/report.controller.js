@@ -248,6 +248,9 @@ const getReportMatrix = async (req, res) => {
       return res.status(400).json({ message: "Invalid user id in token" });
     }
 
+    // ===== opCost cố định =====
+    const OPCOST_PER_PERSON_PER_DAY = 30;
+
     // ===== 1) chuẩn bị date list =====
     const dayList = makeDayList(from, to);
     const dayIndex = new Map(dayList.map((d, i) => [iso(d), i]));
@@ -343,6 +346,7 @@ const getReportMatrix = async (req, res) => {
           },
           baseCost: { $sum: { $ifNull: ["$base_cost", 0] } },
           ads: { $sum: { $ifNull: ["$ads", 0] } },
+          // vẫn giữ field này để không phá cấu trúc cũ, nhưng sẽ bị override ở bước 6.5
           opCost: { $sum: { $ifNull: ["$op_cost", 0] } },
           refund: { $sum: { $ifNull: ["$refund", 0] } },
         },
@@ -403,7 +407,10 @@ const getReportMatrix = async (req, res) => {
       S.revenue[idx] = +(r.revenue || 0).toFixed(2);
       S.baseCost[idx] = +(r.baseCost || 0).toFixed(2);
       S.fee[idx] = +(r.fee || 0).toFixed(2);
+
+      // sẽ bị override ở bước 6.5
       S.opCost[idx] = +(r.opCost || 0).toFixed(2);
+
       S.refund[idx] = +(r.refund || 0).toFixed(2);
       S.ads[idx] = +(r.ads || 0).toFixed(2);
 
@@ -440,6 +447,15 @@ const getReportMatrix = async (req, res) => {
       result[sellerName].ads[idx] = +(val.spend || 0).toFixed(2);
     }
 
+    // ===== 6.5) Ghi đè opCost cố định: 30 / seller / day =====
+    const fixedOpCost = Number(OPCOST_PER_PERSON_PER_DAY || 0);
+    for (const sellerName of Object.keys(result)) {
+      const S = result[sellerName];
+      for (let i = 0; i < dayList.length; i++) {
+        S.opCost[i] = +fixedOpCost.toFixed(2);
+      }
+    }
+
     // ===== 7) Tính profit1/profit2 + totals =====
     for (const sellerName of Object.keys(result)) {
       const S = result[sellerName];
@@ -456,7 +472,9 @@ const getReportMatrix = async (req, res) => {
         S.profit1[i] = +p1.toFixed(2);
         S.profit2[i] = +p2.toFixed(2);
       }
+
       const sum = (a) => +a.reduce((x, y) => x + (y || 0), 0).toFixed(2);
+
       result[sellerName].totals = {
         items: S.items.reduce((x, y) => x + (y || 0), 0),
         revenue: sum(S.revenue),
@@ -479,6 +497,7 @@ const getReportMatrix = async (req, res) => {
       .json({ message: "Get report failed", error: e.message });
   }
 };
+
 
 const getOrderCostStatistics = async (req, res) => {
   try {
