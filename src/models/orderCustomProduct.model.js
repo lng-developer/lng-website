@@ -216,7 +216,7 @@ const orderCustomProductSchema = new mongoose.Schema({
 
   status: {
     type: String,
-    enum: ["New", "Fulfilled", "Shipped", "Cancelled"],
+    enum: ["New", "Fulfilled", "Shipped", "Cancelled", "Refund"],
     default: "New",
   },
 
