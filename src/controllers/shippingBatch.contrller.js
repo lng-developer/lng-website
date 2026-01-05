@@ -112,7 +112,7 @@ const createBatchFromFile = async (req, res, next) => {
     const seen = new Set();
 
     for (const row of rows) {
-      if (row.daysPastPromise !== -2 || row.daysPastPromise !== -1) continue;
+      if (row.daysPastPromise !== -2) continue;
       const id = row.orderId;
       if (!id || seen.has(id)) continue; // bỏ trùng
       seen.add(id);
@@ -121,7 +121,7 @@ const createBatchFromFile = async (req, res, next) => {
 
     if (!orderIds.length) {
       return res.status(400).json({
-        message: "No orderId with days-past-promise = -1 found in file",
+        message: "No orderId with days-past-promise = -2 found in file",
       });
     }
 
