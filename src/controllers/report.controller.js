@@ -498,7 +498,6 @@ const getReportMatrix = async (req, res) => {
   }
 };
 
-
 const getOrderCostStatistics = async (req, res) => {
   try {
     const {
@@ -799,8 +798,84 @@ const getOrderCostStatistics = async (req, res) => {
   }
 };
 
+const importAmazonRefundCSV = async (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({ message: "CSV file is required" });
+    }
+
+    // ===== 1) Parse CSV từ buffer =====
+    const records = parse(req.file.buffer, {
+      columns: true, // dùng header làm key
+      skip_empty_lines: true,
+      trim: true,
+    });
+
+    // ===== 2) Gom refund theo Order ID =====
+    // key: orderId, value: totalRefund
+    const refundMap = new Map();
+
+    for (const r of records) {
+      const transactionType = r["Transaction type"];
+      const orderId = r["Order ID"];
+      const totalUSD = Number(r["Total (USD)"] || 0);
+
+      // chỉ xử lý refund
+      if (transactionType !== "Refund") continue;
+      if (!orderId) continue;
+      if (!totalUSD) continue;
+
+      // Amazon refund là số âm → convert về số dương
+      const refundValue = Math.abs(totalUSD);
+
+      refundMap.set(orderId, (refundMap.get(orderId) || 0) + refundValue);
+    }
+
+    if (refundMap.size === 0) {
+      return res.json({
+        message: "No refund transactions found in CSV",
+        updatedOrders: 0,
+      });
+    }
+
+    // ===== 3) Bulk update DB =====
+    const bulkOps = [];
+
+    for (const [orderId, refund] of refundMap.entries()) {
+      bulkOps.push({
+        updateOne: {
+          filter: { orderId },
+          update: {
+            $set: {
+              "amazon_finance_total.refund": +refund.toFixed(2),
+            },
+          },
+        },
+      });
+    }
+
+    const bulkResult = await OrderCustomProduct.bulkWrite(bulkOps, {
+      ordered: false,
+    });
+
+    return res.json({
+      message: "Import refund success",
+      totalOrdersInFile: refundMap.size,
+      matchedOrders: bulkResult.matchedCount || 0,
+      updatedOrders: bulkResult.modifiedCount || 0,
+    });
+  } catch (error) {
+    console.error("IMPORT AMAZON REFUND ERROR:", error);
+    return res.status(500).json({
+      message: "Import refund failed",
+      error: error.message,
+    });
+  }
+};
+
 module.exports = {
   importReportFromFile,
   getReportMatrix,
   getOrderCostStatistics,
+  importAmazonRefundCSV,
 };

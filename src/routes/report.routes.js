@@ -27,4 +27,12 @@ router.get(
   reportController.getOrderCostStatistics
 );
 
+router.post(
+  "/import-refund",
+  upload.single("file"),
+  authenticateToken,
+  authorizeRoles("Admin"),
+  reportController.importAmazonRefundCSV
+);
+
 module.exports = router;
