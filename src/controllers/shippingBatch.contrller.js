@@ -112,7 +112,7 @@ const createBatchFromFile = async (req, res, next) => {
     const seen = new Set();
 
     for (const row of rows) {
-      if (row.daysPastPromise !== -1) continue;
+      if (row.daysPastPromise !== -2 || row.daysPastPromise !== -1) continue;
       const id = row.orderId;
       if (!id || seen.has(id)) continue; // bỏ trùng
       seen.add(id);
