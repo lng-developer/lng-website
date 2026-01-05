@@ -296,7 +296,8 @@ const getReportMatrix = async (req, res) => {
       }
     }
 
-    // ===== 3) Aggregation đơn hàng (có thêm 3 trường cần dùng) =====
+    // ===== 3) Aggregation đơn hàng =====
+    // CHỈ SỬA PHẦN REFUND: lấy từ amazon_finance_total.refund (không dùng $refund)
     const rows = await OrderCustomProduct.aggregate([
       { $match: matchStage },
       {
@@ -346,9 +347,12 @@ const getReportMatrix = async (req, res) => {
           },
           baseCost: { $sum: { $ifNull: ["$base_cost", 0] } },
           ads: { $sum: { $ifNull: ["$ads", 0] } },
+
           // vẫn giữ field này để không phá cấu trúc cũ, nhưng sẽ bị override ở bước 6.5
           opCost: { $sum: { $ifNull: ["$op_cost", 0] } },
-          refund: { $sum: { $ifNull: ["$refund", 0] } },
+
+          // ✅ NEW: refund lấy từ amazon_finance_total.refund
+          refund: { $sum: { $ifNull: ["$amazon_finance_total.refund", 0] } },
         },
       },
       { $sort: { "_id.day": 1 } },
@@ -393,7 +397,6 @@ const getReportMatrix = async (req, res) => {
           revenue: zeroArr(),
           baseCost: zeroArr(),
           ads: zeroArr(),
-          // 3 mảng finance
           shippingTax: zeroArr(),
           itemPromotionDiscount: zeroArr(),
           itemTax: zeroArr(),
@@ -411,7 +414,9 @@ const getReportMatrix = async (req, res) => {
       // sẽ bị override ở bước 6.5
       S.opCost[idx] = +(r.opCost || 0).toFixed(2);
 
+      // ✅ NEW: refund lấy từ amazon_finance_total.refund đã group ở trên
       S.refund[idx] = +(r.refund || 0).toFixed(2);
+
       S.ads[idx] = +(r.ads || 0).toFixed(2);
 
       S.shippingTax[idx] = +(r.shipping_tax || 0).toFixed(2);
@@ -468,7 +473,10 @@ const getReportMatrix = async (req, res) => {
             S.shippingTax[i] +
             Math.abs(S.itemPromotionDiscount[i]) +
             S.itemTax[i]);
+
+        // refund đã lấy từ data nên p2 sẽ trừ đúng revenue của đơn refund (và âm thêm baseCost nếu có)
         const p2 = p1 - (S.opCost[i] + S.refund[i]);
+
         S.profit1[i] = +p1.toFixed(2);
         S.profit2[i] = +p2.toFixed(2);
       }
@@ -804,74 +812,99 @@ const importAmazonRefundCSV = async (req, res) => {
       return res.status(400).json({ message: "CSV file is required" });
     }
 
-    // ===== 1) Convert buffer -> string và loại BOM =====
+    // ===== 1) Read + strip BOM =====
     let csvText = req.file.buffer.toString("utf8");
-    if (csvText.charCodeAt(0) === 0xfeff) {
-      csvText = csvText.slice(1); // strip UTF-8 BOM
-    }
+    if (csvText.charCodeAt(0) === 0xfeff) csvText = csvText.slice(1);
 
     // ===== 2) Parse CSV =====
     const records = parse(csvText, {
       columns: true,
       skip_empty_lines: true,
       trim: true,
-
-      // khuyến nghị để chịu được quote/escape kiểu excel
       relax_quotes: true,
       relax_column_count: true,
     });
 
-    // ===== 3) Gom refund theo Order ID =====
-    const refundMap = new Map();
-
+    // ===== 3) Collect Order IDs (unique) =====
+    const orderIdSet = new Set();
     for (const r of records) {
-      // đề phòng header có BOM dính vào "Order ID"
-      const orderId = r["Order ID"] ?? r["\ufeffOrder ID"];
-      const totalUSD = Number(r["Total (USD)"] || 0);
-
-      if (!orderId) continue;
-      if (!totalUSD) continue;
-
-      const refundValue = Math.abs(totalUSD);
-      refundMap.set(orderId, (refundMap.get(orderId) || 0) + refundValue);
+      const orderId = (r["Order ID"] ?? r["\ufeffOrder ID"] ?? "")
+        .toString()
+        .trim();
+      if (orderId) orderIdSet.add(orderId);
     }
 
-    if (refundMap.size === 0) {
+    const orderIds = Array.from(orderIdSet);
+    if (orderIds.length === 0) {
       return res.json({
-        message: "No valid refund data found in CSV",
+        message: "No Order ID found in CSV",
         updatedOrders: 0,
       });
     }
 
-    // ===== 4) Bulk update DB =====
+    // ===== 4) Fetch matching orders to get revenue =====
+    // Chỉ lấy revenue để set refund = revenue
+    const docs = await OrderCustomProduct.find(
+      { orderId: { $in: orderIds } },
+      { orderId: 1, "amazon_finance_total.revenue": 1 }
+    ).lean();
+
+    const revenueMap = new Map();
+    for (const d of docs) {
+      const rev = Number(d?.amazon_finance_total?.revenue || 0);
+      revenueMap.set(String(d.orderId), rev);
+    }
+
+    // ===== 5) Bulk update =====
+    // - refund = revenue (DB)
+    // - fee/item_tax/shipping_tax/item_promotion_discount = 0
     const bulkOps = [];
-    for (const [orderId, refund] of refundMap.entries()) {
+    const notFound = [];
+
+    for (const orderId of orderIds) {
+      if (!revenueMap.has(orderId)) {
+        notFound.push(orderId);
+        continue;
+      }
+
+      const revenue = revenueMap.get(orderId) || 0;
+
       bulkOps.push({
         updateOne: {
-          filter: { orderId: String(orderId).trim() },
+          filter: { orderId },
           update: {
             $set: {
-              "amazon_finance_total.refund": +refund.toFixed(2),
+              "amazon_finance_total.refund": +Number(revenue).toFixed(2),
+              "amazon_finance_total.fee": 0,
+              "amazon_finance_total.item_tax": 0,
+              "amazon_finance_total.shipping_tax": 0,
+              "amazon_finance_total.item_promotion_discount": 0,
             },
           },
         },
       });
     }
 
-    const bulkResult = await OrderCustomProduct.bulkWrite(bulkOps, {
-      ordered: false,
-    });
+    let bulkResult = null;
+    if (bulkOps.length) {
+      bulkResult = await OrderCustomProduct.bulkWrite(bulkOps, {
+        ordered: false,
+      });
+    }
 
     return res.json({
-      message: "Import refund success",
-      totalOrdersInFile: refundMap.size,
-      matchedOrders: bulkResult.matchedCount || 0,
-      updatedOrders: bulkResult.modifiedCount || 0,
+      message: "Import refund orders success",
+      totalOrderIdsInFile: orderIds.length,
+      matchedOrders: bulkResult?.matchedCount || 0,
+      updatedOrders: bulkResult?.modifiedCount || 0,
+      notFoundCount: notFound.length,
+      // nếu bạn không muốn trả list dài, có thể bỏ field này
+      notFoundOrderIds: notFound.slice(0, 200),
     });
   } catch (error) {
-    console.error("IMPORT REFUND ERROR:", error);
+    console.error("IMPORT REFUND ORDERS ERROR:", error);
     return res.status(500).json({
-      message: "Import refund failed",
+      message: "Import refund orders failed",
       error: error.message,
     });
   }
