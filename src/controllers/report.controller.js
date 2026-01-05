@@ -804,47 +804,51 @@ const importAmazonRefundCSV = async (req, res) => {
       return res.status(400).json({ message: "CSV file is required" });
     }
 
-    // ===== 1) Parse CSV từ buffer =====
-    const records = parse(req.file.buffer, {
-      columns: true, // dùng header làm key
+    // ===== 1) Convert buffer -> string và loại BOM =====
+    let csvText = req.file.buffer.toString("utf8");
+    if (csvText.charCodeAt(0) === 0xfeff) {
+      csvText = csvText.slice(1); // strip UTF-8 BOM
+    }
+
+    // ===== 2) Parse CSV =====
+    const records = parse(csvText, {
+      columns: true,
       skip_empty_lines: true,
       trim: true,
+
+      // khuyến nghị để chịu được quote/escape kiểu excel
+      relax_quotes: true,
+      relax_column_count: true,
     });
 
-    // ===== 2) Gom refund theo Order ID =====
-    // key: orderId, value: totalRefund
+    // ===== 3) Gom refund theo Order ID =====
     const refundMap = new Map();
 
     for (const r of records) {
-      const transactionType = r["Transaction type"];
-      const orderId = r["Order ID"];
+      // đề phòng header có BOM dính vào "Order ID"
+      const orderId = r["Order ID"] ?? r["\ufeffOrder ID"];
       const totalUSD = Number(r["Total (USD)"] || 0);
 
-      // chỉ xử lý refund
-      if (transactionType !== "Refund") continue;
       if (!orderId) continue;
       if (!totalUSD) continue;
 
-      // Amazon refund là số âm → convert về số dương
       const refundValue = Math.abs(totalUSD);
-
       refundMap.set(orderId, (refundMap.get(orderId) || 0) + refundValue);
     }
 
     if (refundMap.size === 0) {
       return res.json({
-        message: "No refund transactions found in CSV",
+        message: "No valid refund data found in CSV",
         updatedOrders: 0,
       });
     }
 
-    // ===== 3) Bulk update DB =====
+    // ===== 4) Bulk update DB =====
     const bulkOps = [];
-
     for (const [orderId, refund] of refundMap.entries()) {
       bulkOps.push({
         updateOne: {
-          filter: { orderId },
+          filter: { orderId: String(orderId).trim() },
           update: {
             $set: {
               "amazon_finance_total.refund": +refund.toFixed(2),
@@ -865,7 +869,7 @@ const importAmazonRefundCSV = async (req, res) => {
       updatedOrders: bulkResult.modifiedCount || 0,
     });
   } catch (error) {
-    console.error("IMPORT AMAZON REFUND ERROR:", error);
+    console.error("IMPORT REFUND ERROR:", error);
     return res.status(500).json({
       message: "Import refund failed",
       error: error.message,
