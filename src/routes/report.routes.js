@@ -27,12 +27,26 @@ router.get(
   reportController.getOrderCostStatistics
 );
 
+router.get(
+  "/order_cost/export",
+  authenticateToken,
+  authorizeRoles("Admin", "Seller"),
+  reportController.exportOrdersCostExcel
+);
+
 router.post(
   "/import-refund",
   upload.single("file"),
   authenticateToken,
   authorizeRoles("Admin"),
   reportController.importAmazonRefundCSV
+);
+
+router.get(
+  "/ads/export",
+  authenticateToken,
+  authorizeRoles("Admin", "Seller"),
+  reportController.exportAmazonAdsSpendBySellerExcel
 );
 
 module.exports = router;

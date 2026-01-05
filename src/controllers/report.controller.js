@@ -3,6 +3,9 @@ const OrderCustomProduct = db.orderCustomProduct;
 const AdsDailySummary = db.Ads;
 const { parse } = require("csv-parse/sync");
 const mongoose = require("mongoose");
+const ExcelJS = require("exceljs");
+const User = db.user;
+const Shop = db.shop;
 
 // ép số an toàn
 const num = (v) => {
@@ -910,9 +913,403 @@ const importAmazonRefundCSV = async (req, res) => {
   }
 };
 
+const n2 = (v) => {
+  const num = Number(v);
+  if (!Number.isFinite(num)) return 0;
+  return Number(num.toFixed(2));
+};
+
+const exportOrdersCostExcel = async (req, res) => {
+  try {
+    const { from, to } = req.query;
+    if (!from || !to) {
+      return res
+        .status(400)
+        .json({ message: "from & to are required (ISO UTC)" });
+    }
+
+    const fromDate = new Date(from);
+    const toDate = new Date(to);
+
+    if (Number.isNaN(fromDate.getTime()) || Number.isNaN(toDate.getTime())) {
+      return res
+        .status(400)
+        .json({ message: "from/to must be valid ISO date" });
+    }
+
+    // ===== 1) Query DB + populate =====
+    // purchase_date theo ảnh bạn gửi
+    const orders = await OrderCustomProduct.find({
+      purchase_date: { $gte: fromDate, $lte: toDate },
+    })
+      .populate({ path: "shopId", select: "name" }) // shop.name
+      .populate({ path: "sellerId", select: "full_name" }) // user.full_name
+      .lean();
+
+    // ===== 2) Create workbook =====
+    const wb = new ExcelJS.Workbook();
+    wb.creator = "LNG";
+    wb.created = new Date();
+
+    const ws = wb.addWorksheet("Orders Cost");
+    ws.views = [{ state: "frozen", ySplit: 1 }];
+
+    ws.columns = [
+      { header: "OrderId", key: "orderId", width: 22 },
+      { header: "Purchase Date", key: "purchase_date", width: 22 },
+      { header: "Shop", key: "shop", width: 18 },
+      { header: "Seller", key: "seller", width: 22 },
+      { header: "Status", key: "status", width: 14 },
+
+      { header: "Revenue", key: "revenue", width: 12 },
+      { header: "Tax", key: "tax", width: 10 },
+      { header: "Shipping Tax", key: "sTax", width: 10 },
+      { header: "Fee", key: "fee", width: 10 },
+      { header: "Refund", key: "refund", width: 12 },
+      { header: "Cost", key: "cost", width: 12 },
+      { header: "Discount", key: "discount", width: 12 },
+      { header: "Profit", key: "profit", width: 12 },
+    ];
+
+    ws.getRow(1).font = { bold: true };
+
+    // ===== 3) Fill data =====
+    for (const o of orders) {
+      const f = o.amazon_finance_total || {};
+
+      // Theo ảnh bạn gửi:
+      // revenue, item_tax, shipping_tax, fee, item_promotion_discount, refund
+      const revenue = Number(f.revenue) || 0;
+      const tax = Number(f.item_tax) || 0;
+      const sTax = Number(f.shipping_tax) || 0;
+      const fee = Number(f.fee) || 0;
+      const discount = Number(f.item_promotion_discount) || 0;
+      const refund = Number(f.refund) || 0;
+
+      // Cost: theo ảnh là base_cost
+      const cost = Number(o.base_cost) || 0;
+
+      // Profit: revenue trừ tất cả phần còn lại
+      const profit = revenue - (tax + sTax + fee + refund + discount + cost);
+
+      ws.addRow({
+        orderId: o.orderId || "",
+        purchase_date: o.purchase_date
+          ? new Date(o.purchase_date).toISOString()
+          : "",
+        shop: o.shopId?.name || "",
+        seller: o.sellerId?.full_name || "",
+        status: o.status || "",
+
+        revenue: n2(revenue),
+        tax: n2(tax),
+        sTax: n2(sTax),
+        fee: n2(fee),
+        refund: n2(refund),
+        cost: n2(cost),
+        discount: n2(discount),
+        profit: n2(profit),
+      });
+    }
+
+    // ===== 4) Format money columns (Revenue..Profit) =====
+    // Cột tiền: F -> M
+    const moneyCols = ["F", "G", "H", "I", "J", "K", "L", "M"];
+    for (let r = 2; r <= ws.rowCount; r++) {
+      for (const c of moneyCols) {
+        ws.getCell(`${c}${r}`).numFmt = '"$"#,##0.00;-"$"#,##0.00';
+      }
+    }
+
+    // ===== 5) Download response =====
+    const fileName = `Report_cost.xlsx`;
+
+    res.setHeader(
+      "Content-Type",
+      "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    );
+    res.setHeader("Content-Disposition", `attachment; filename="${fileName}"`);
+
+    await wb.xlsx.write(res);
+    res.end();
+  } catch (err) {
+    console.error(err);
+    return res
+      .status(500)
+      .json({ message: "Export failed", error: err?.message });
+  }
+};
+
+const fmtDateKey = (d) => {
+  // key cột dạng DD-MM (giống ảnh #2), bạn có thể đổi sang YYYY-MM-DD nếu muốn
+  const dd = String(d.getUTCDate()).padStart(2, "0");
+  const mm = String(d.getUTCMonth() + 1).padStart(2, "0");
+  return `${dd}-${mm}`;
+};
+
+const toUTCStartOfDay = (date) => {
+  const d = new Date(date);
+  return new Date(
+    Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate(), 0, 0, 0)
+  );
+};
+
+const buildDateRangeUTC = (from, to) => {
+  const start = toUTCStartOfDay(from);
+  const end = toUTCStartOfDay(to);
+
+  const dates = [];
+  let cur = new Date(start);
+  while (cur.getTime() <= end.getTime()) {
+    dates.push(new Date(cur));
+    cur = new Date(cur.getTime() + 24 * 60 * 60 * 1000);
+  }
+  return dates;
+};
+
+const getIdString = (x) => {
+  if (!x) return "";
+  if (typeof x === "string") return x;
+  if (x._id) return String(x._id);
+  return String(x);
+};
+
+const moneyFmt = '"$"#,##0.00;-"$"#,##0.00';
+
+// ===== Controller =====
+/**
+ * GET /api/ads/report/export?from=...&to=...
+ */
+const exportAmazonAdsSpendBySellerExcel = async (req, res) => {
+  try {
+    const { from, to } = req.query;
+    if (!from || !to) {
+      return res
+        .status(400)
+        .json({ message: "from & to are required (ISO UTC)" });
+    }
+
+    const fromDate = new Date(from);
+    const toDate = new Date(to);
+    if (Number.isNaN(fromDate.getTime()) || Number.isNaN(toDate.getTime())) {
+      return res
+        .status(400)
+        .json({ message: "from/to must be valid ISO date" });
+    }
+
+    // Tạo list ngày để render cột (giống UI)
+    const dateList = buildDateRangeUTC(fromDate, toDate);
+    const dateKeys = dateList.map(fmtDateKey);
+
+    // ===== 1) Load dữ liệu theo ngày từ DB =====
+    // field 'day' trong ảnh #3 là Date (00:00:00Z)
+    const docs = await AdsDailySummary.find({
+      day: { $gte: toUTCStartOfDay(fromDate), $lte: toUTCStartOfDay(toDate) },
+    }).lean();
+
+    // ===== 2) Collect sellerIds + shopIds để map name =====
+    const sellerIdSet = new Set();
+    const shopIdSet = new Set();
+
+    for (const doc of docs) {
+      const arr = Array.isArray(doc.by_seller) ? doc.by_seller : [];
+      for (const s of arr) {
+        const sellerId = getIdString(s.seller);
+        if (sellerId) sellerIdSet.add(sellerId);
+
+        const byShop = Array.isArray(s.by_shop) ? s.by_shop : [];
+        for (const sh of byShop) {
+          const shopId = getIdString(sh.shop_id);
+          if (shopId) shopIdSet.add(shopId);
+        }
+      }
+    }
+
+    const sellerIds = Array.from(sellerIdSet).filter((id) =>
+      mongoose.Types.ObjectId.isValid(id)
+    );
+    const shopIds = Array.from(shopIdSet).filter((id) =>
+      mongoose.Types.ObjectId.isValid(id)
+    );
+
+    const [users, shops] = await Promise.all([
+      User.find({ _id: { $in: sellerIds } }, { full_name: 1 }).lean(),
+      Shop.find({ _id: { $in: shopIds } }, { name: 1 }).lean(),
+    ]);
+
+    const userMap = new Map(
+      users.map((u) => [String(u._id), u.full_name || ""])
+    );
+    const shopMap = new Map(shops.map((s) => [String(s._id), s.name || ""]));
+
+    // ===== 3) Build matrix =====
+    // A) By Seller (All shops)
+    // sellerMatrix[sellerId] = { sellerId, sellerName, days: {dateKey: spend}, total }
+    const sellerMatrix = new Map();
+
+    // B) By Seller x Shop
+    // sellerShopMatrix[`${sellerId}__${shopId}`] = { sellerId, shopId, sellerName, shopName, days, total }
+    const sellerShopMatrix = new Map();
+
+    // Index docs by dayKey để merge đúng cột ngày
+    const docByDayKey = new Map();
+    for (const doc of docs) {
+      const dk = fmtDateKey(new Date(doc.day));
+      docByDayKey.set(dk, doc);
+    }
+
+    for (const dk of dateKeys) {
+      const doc = docByDayKey.get(dk);
+      if (!doc) continue;
+
+      const arr = Array.isArray(doc.by_seller) ? doc.by_seller : [];
+      for (const s of arr) {
+        const sellerId = getIdString(s.seller);
+        if (!sellerId) continue;
+
+        const sellerName = userMap.get(sellerId) || sellerId;
+
+        // --- seller total spend (tất cả shop) ---
+        const spend = n2(s.spend || 0);
+
+        if (!sellerMatrix.has(sellerId)) {
+          sellerMatrix.set(sellerId, {
+            sellerId,
+            sellerName,
+            days: {},
+            total: 0,
+          });
+        }
+        const sm = sellerMatrix.get(sellerId);
+        sm.days[dk] = (sm.days[dk] || 0) + spend;
+        sm.total = n2(sm.total + spend);
+
+        // --- breakdown by shop ---
+        const byShop = Array.isArray(s.by_shop) ? s.by_shop : [];
+        for (const sh of byShop) {
+          const shopId = getIdString(sh.shop_id);
+          if (!shopId) continue;
+
+          const shopName = shopMap.get(shopId) || shopId;
+          const shopSpend = n2(sh.spend || 0);
+
+          const key = `${sellerId}__${shopId}`;
+          if (!sellerShopMatrix.has(key)) {
+            sellerShopMatrix.set(key, {
+              sellerId,
+              shopId,
+              sellerName,
+              shopName,
+              days: {},
+              total: 0,
+            });
+          }
+          const ssm = sellerShopMatrix.get(key);
+          ssm.days[dk] = (ssm.days[dk] || 0) + shopSpend;
+          ssm.total = n2(ssm.total + shopSpend);
+        }
+      }
+    }
+
+    // Sort rows theo Total desc (giống báo cáo)
+    const sellerRows = Array.from(sellerMatrix.values()).sort(
+      (a, b) => (b.total || 0) - (a.total || 0)
+    );
+    const sellerShopRows = Array.from(sellerShopMatrix.values()).sort(
+      (a, b) => (b.total || 0) - (a.total || 0)
+    );
+
+    // ===== 4) Create Excel =====
+    const wb = new ExcelJS.Workbook();
+    wb.creator = "LNG";
+    wb.created = new Date();
+
+    // ---------- Sheet 1: By Seller ----------
+    const ws1 = wb.addWorksheet("By Seller (All Shops)");
+    ws1.views = [{ state: "frozen", xSplit: 2, ySplit: 1 }];
+
+    // Columns: Seller | Total | (date columns...)
+    ws1.columns = [
+      { header: "Seller", key: "seller", width: 28 },
+      { header: "Total", key: "total", width: 14 },
+      ...dateKeys.map((k) => ({ header: k, key: k, width: 12 })),
+    ];
+    ws1.getRow(1).font = { bold: true };
+
+    for (const r of sellerRows) {
+      const row = {
+        seller: r.sellerName,
+        total: n2(r.total),
+      };
+      for (const dk of dateKeys) row[dk] = n2(r.days[dk] || 0);
+      ws1.addRow(row);
+    }
+
+    // Format money for Total + date cols
+    for (let i = 2; i <= ws1.rowCount; i++) {
+      ws1.getCell(i, 2).numFmt = moneyFmt;
+      for (let c = 3; c <= ws1.columnCount; c++)
+        ws1.getCell(i, c).numFmt = moneyFmt;
+    }
+
+    // ---------- Sheet 2: By Seller x Shop ----------
+    const ws2 = wb.addWorksheet("By Seller x Shop");
+    ws2.views = [{ state: "frozen", xSplit: 3, ySplit: 1 }];
+
+    // Columns: Seller | Shop | Total | (date columns...)
+    ws2.columns = [
+      { header: "Seller", key: "seller", width: 28 },
+      { header: "Shop", key: "shop", width: 22 },
+      { header: "Total", key: "total", width: 14 },
+      ...dateKeys.map((k) => ({ header: k, key: k, width: 12 })),
+    ];
+    ws2.getRow(1).font = { bold: true };
+
+    for (const r of sellerShopRows) {
+      const row = {
+        seller: r.sellerName,
+        shop: r.shopName,
+        total: n2(r.total),
+      };
+      for (const dk of dateKeys) row[dk] = n2(r.days[dk] || 0);
+      ws2.addRow(row);
+    }
+
+    // Format money for Total + date cols
+    for (let i = 2; i <= ws2.rowCount; i++) {
+      ws2.getCell(i, 3).numFmt = moneyFmt;
+      for (let c = 4; c <= ws2.columnCount; c++)
+        ws2.getCell(i, c).numFmt = moneyFmt;
+    }
+
+    // ===== 5) Response download =====
+    const fileName = `amazon_ads_spend_${toUTCStartOfDay(fromDate)
+      .toISOString()
+      .slice(0, 10)}_to_${toUTCStartOfDay(toDate)
+      .toISOString()
+      .slice(0, 10)}.xlsx`;
+
+    res.setHeader(
+      "Content-Type",
+      "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    );
+    res.setHeader("Content-Disposition", `attachment; filename="${fileName}"`);
+
+    await wb.xlsx.write(res);
+    res.end();
+  } catch (err) {
+    console.error(err);
+    return res
+      .status(500)
+      .json({ message: "Export failed", error: err?.message });
+  }
+};
+
 module.exports = {
   importReportFromFile,
   getReportMatrix,
   getOrderCostStatistics,
   importAmazonRefundCSV,
+  exportOrdersCostExcel,
+  exportAmazonAdsSpendBySellerExcel,
 };
