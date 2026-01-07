@@ -94,13 +94,51 @@ async function getBoard(req, res) {
         const issueQuery = { projectId: pid, archived: false };
 
         if (String(includeArchived) === "true") {
-            // if you want archived categories/issues in board
             catQuery.archived = { $in: [false, true] };
             issueQuery.archived = { $in: [false, true] };
         }
 
-        const categories = await Category.find(catQuery).sort({ order: 1, createdAt: 1 }).lean();
-        const issues = await Issue.find(issueQuery).sort({ categoryId: 1, order: 1, updatedAt: -1 }).lean();
+        const categories = await Category.find(catQuery)
+            .sort({ order: 1, createdAt: 1 })
+            .lean();
+
+        const issues = await Issue.find(issueQuery)
+            .sort({ categoryId: 1, order: 1, updatedAt: -1 })
+            .lean();
+
+        // ====== populate assigneeIds -> full_name (manual) ======
+        // 1) collect unique assigneeIds
+        const assigneeIdSet = new Set();
+        for (const it of issues) {
+            if (Array.isArray(it.assigneeIds)) {
+                for (const id of it.assigneeIds) assigneeIdSet.add(String(id));
+            }
+        }
+        const assigneeIds = Array.from(assigneeIdSet).map(toObjectId);
+
+        // 2) query users
+        // đổi "User" + field "full_name" theo schema của bạn
+        const users = assigneeIds.length
+            ? await User.find({ _id: { $in: assigneeIds } })
+                .select({ full_name: 1 }) // hoặc { fullName: 1 } tùy field
+                .lean()
+            : [];
+
+        // 3) map users by id
+        const userMap = new Map(users.map(u => [String(u._id), u]));
+
+        // 4) attach assignees
+        for (const it of issues) {
+            const ids = Array.isArray(it.assigneeIds) ? it.assigneeIds : [];
+            it.assignees = ids
+                .map(id => {
+                    const u = userMap.get(String(id));
+                    return u ? { _id: u._id, full_name: u.full_name } : { _id: id, full_name: null };
+                });
+            // nếu bạn muốn giữ response gọn thì có thể xoá assigneeIds:
+            // delete it.assigneeIds;
+        }
+        // ====== end manual populate ======
 
         const map = new Map(categories.map((c) => [String(c._id), { ...c, issues: [] }]));
         for (const it of issues) {
@@ -114,6 +152,7 @@ async function getBoard(req, res) {
         return res.status(e.status || 500).json({ message: e.message || "Server error" });
     }
 }
+
 
 /**
  * Update issue fields (title/desc/status/priority/dueAt/assignees)
