@@ -9,7 +9,7 @@ const CategorySchema = new Schema(
 
         type: {
             type: String,
-            enum: ["inprocess", "todo", "doing", "review", "done", "custom"],
+            enum: ["inprocess", "todo", "canceled", "review", "done", "custom"],
             default: "custom",
         },
 

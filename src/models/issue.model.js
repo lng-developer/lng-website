@@ -18,6 +18,17 @@ const IssueCommentSchema = new Schema(
     { timestamps: true }
 );
 
+const AttachmentSchema = new Schema(
+    {
+        name: { type: String, default: "" },
+        url: { type: String, required: true },
+        mime: { type: String, default: "" },
+        size: { type: Number, default: 0 },
+        public_id: { type: String, default: "" }, // NEW: để quản lý xoá/overwrite
+    },
+    { _id: false }
+);
+
 const IssueActivitySchema = new Schema(
     {
         at: { type: Date, default: Date.now, index: true },
@@ -48,6 +59,7 @@ const IssueSchema = new Schema(
         doneAt: { type: Date, default: null },
         // ordering inside a column for drag/drop cards
         order: { type: Number, default: 0, index: true },
+        attachments: { type: [AttachmentSchema], default: [] },
 
         // collaboration
         comments: { type: [IssueCommentSchema], default: [] },

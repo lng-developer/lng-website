@@ -1,4 +1,5 @@
 // controllers/trello/issue.controller.js
+const multer = require("multer");
 const db = require("../models");
 const Issue = db.Issue
 const Category = db.Category
@@ -6,6 +7,18 @@ const Notification = db.Notification
 const { toObjectId, getUserId, assertProjectMember, assertCategoryInProject, reindexOrder } = require("../helper/toDoList.helper.js");
 const mongoose = require('mongoose');
 const User = db.user;
+const cloudinary = require("../utils/cloudinary");
+const upload = multer({ storage: multer.memoryStorage() });
+
+function uploadStreamToCloudinary(buffer, opts = {}) {
+    return new Promise((resolve, reject) => {
+        const stream = cloudinary.uploader.upload_stream(
+            { resource_type: "image", overwrite: true, ...opts },
+            (err, result) => (err ? reject(err) : resolve(result))
+        );
+        stream.end(buffer);
+    });
+}
 /**
  * Create card in a category
  */
@@ -14,21 +27,79 @@ async function createIssue(req, res) {
     try {
         const userId = getUserId(req);
         const { projectId } = req.params;
-        const { categoryId, title, description = "", assigneeIds = [], priority = "medium", dueAt = null } = req.body || {};
+
+        const {
+            categoryId,
+            title,
+            description = "",
+            assigneeIds = [],
+            priority = "medium",
+            startAt = null,
+            dueAt = null,
+        } = req.body || {};
 
         if (!categoryId) return res.status(400).json({ message: "Missing categoryId" });
         if (!title || !String(title).trim()) return res.status(400).json({ message: "Missing title" });
+
+        if (startAt && dueAt && new Date(startAt) > new Date(dueAt)) {
+            return res.status(400).json({ message: "startAt must be before dueAt" });
+        }
 
         await assertProjectMember({ projectId, userId });
         await assertCategoryInProject({ categoryId, projectId });
 
         session.startTransaction();
 
-        const last = await Issue.findOne({ projectId: toObjectId(projectId), categoryId: toObjectId(categoryId), archived: false })
+        const last = await Issue.findOne({
+            projectId: toObjectId(projectId),
+            categoryId: toObjectId(categoryId),
+            archived: false,
+        })
             .sort({ order: -1 })
             .session(session);
 
         const nextOrder = (last?.order ?? 0) + 1000;
+
+        // ===== NEW: parse assigneeIds when multipart/form-data =====
+        let parsedAssigneeIds = assigneeIds;
+        if (typeof assigneeIds === "string") {
+            try {
+                const json = JSON.parse(assigneeIds);
+                parsedAssigneeIds = Array.isArray(json) ? json : [];
+            } catch {
+                parsedAssigneeIds = String(assigneeIds)
+                    .split(",")
+                    .map((s) => s.trim())
+                    .filter(Boolean);
+            }
+        }
+        // ==========================================================
+
+        // ===== NEW: Upload issue images to Cloudinary =====
+        const files = req.files || []; // field name: "files"
+        const attachments = [];
+        const uploadedPublicIds = [];
+
+        for (let i = 0; i < files.length; i++) {
+            const file = files[i];
+
+            // public_id theo format dễ quản trị (overwrite được)
+            // ví dụ: issues/<projectId>/<categoryId>/<timestamp>-<i>
+            const public_id = `issues/${projectId}/${categoryId}/${Date.now()}-${i}`;
+
+            const up = await uploadStreamToCloudinary(file.buffer, { public_id });
+
+            uploadedPublicIds.push(up.public_id);
+
+            attachments.push({
+                name: file.originalname || "",
+                url: up.secure_url,
+                mime: file.mimetype || "",
+                size: file.size || 0,
+                public_id: up.public_id || public_id,
+            });
+        }
+        // ================================================
 
         const issue = await Issue.create(
             [
@@ -37,15 +108,22 @@ async function createIssue(req, res) {
                     categoryId: toObjectId(categoryId),
                     title: String(title).trim(),
                     description: String(description || ""),
-                    assigneeIds: (Array.isArray(assigneeIds) ? assigneeIds : []).map(toObjectId),
+                    assigneeIds: (Array.isArray(parsedAssigneeIds) ? parsedAssigneeIds : []).map(toObjectId),
                     priority,
+
+                    startAt: startAt ? new Date(startAt) : null,
                     dueAt: dueAt ? new Date(dueAt) : null,
+
                     order: nextOrder,
+
+                    // NEW
+                    attachments,
+
                     activity: [
                         {
                             type: "created",
                             userId: toObjectId(userId),
-                            meta: { categoryId: String(categoryId) },
+                            meta: { categoryId: String(categoryId), attachmentsCount: attachments.length },
                         },
                     ],
                 },
@@ -54,7 +132,7 @@ async function createIssue(req, res) {
         );
 
         // Notify assignees
-        const assignees = (Array.isArray(assigneeIds) ? assigneeIds : []).map((x) => String(x));
+        const assignees = (Array.isArray(parsedAssigneeIds) ? parsedAssigneeIds : []).map(String);
         if (assignees.length) {
             const notis = assignees.map((aid) => ({
                 userId: toObjectId(aid),
@@ -72,11 +150,18 @@ async function createIssue(req, res) {
         return res.json({ data: issue[0] });
     } catch (e) {
         await session.abortTransaction();
+
+        // OPTIONAL (khuyến nghị): nếu DB fail sau khi upload, dọn Cloudinary (best-effort)
+        // yêu cầu: bạn phải có `cloudinary` instance trong scope
+        // try { await Promise.all(uploadedPublicIds.map(pid => cloudinary.uploader.destroy(pid))); } catch {}
+
         return res.status(e.status || 500).json({ message: e.message || "Server error" });
     } finally {
         session.endSession();
     }
 }
+
+
 
 /**
  * Board view: list categories + issues grouped
