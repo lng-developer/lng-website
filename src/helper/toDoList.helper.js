@@ -3,7 +3,8 @@ const db = require("../models");
 const mongoose = require("mongoose");
 const Project = db.Project
 const Category = db.Category
-
+const User = db.user;
+const Role = db.role;
 function toObjectId(id) {
     if (!id) return null;
     if (id instanceof mongoose.Types.ObjectId) return id;
@@ -17,23 +18,36 @@ function getUserId(req) {
 async function assertProjectMember({ projectId, userId }) {
     const pid = toObjectId(projectId);
     const uid = toObjectId(userId);
+
+    // 1) load project
     const project = await Project.findById(pid).lean();
     if (!project) {
         const err = new Error("Project not found");
         err.status = 404;
         throw err;
     }
+
+    // 2) check admin via role_id -> Role.name
+    const me = await User.findById(uid).select({ role_id: 1 }).lean();
+    const role = me?.role_id ? await Role.findById(me.role_id).select({ name: 1 }).lean() : null;
+    const isAdmin = String(role?.name || "").toLowerCase() === "admin";
+
+    if (isAdmin) return project;
+
+    // 3) fallback: member check
     const isMember =
         String(project.ownerId) === String(uid) ||
-        (Array.isArray(project.memberIds) && project.memberIds.some((m) => String(m) === String(uid)));
+        (Array.isArray(project.memberIds) && project.memberIds.some(m => String(m) === String(uid)));
 
     if (!isMember) {
         const err = new Error("Access denied: not a project member");
         err.status = 403;
         throw err;
     }
+
     return project;
 }
+
 
 async function assertCategoryInProject({ categoryId, projectId }) {
     const cat = await Category.findOne({

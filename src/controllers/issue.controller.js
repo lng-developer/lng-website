@@ -191,41 +191,57 @@ async function getBoard(req, res) {
             .sort({ categoryId: 1, order: 1, updatedAt: -1 })
             .lean();
 
-        // ====== populate assigneeIds -> full_name (manual) ======
-        // 1) collect unique assigneeIds
-        const assigneeIdSet = new Set();
+        // ===================== collect userIds (assignees + activity) =====================
+        const userIdSet = new Set();
+
         for (const it of issues) {
+            // assigneeIds
             if (Array.isArray(it.assigneeIds)) {
-                for (const id of it.assigneeIds) assigneeIdSet.add(String(id));
+                for (const id of it.assigneeIds) userIdSet.add(String(id));
+            }
+
+            // activity.userId
+            if (Array.isArray(it.activity)) {
+                for (const a of it.activity) {
+                    if (a?.userId) userIdSet.add(String(a.userId));
+                }
             }
         }
-        const assigneeIds = Array.from(assigneeIdSet).map(toObjectId);
 
-        // 2) query users
-        // đổi "User" + field "full_name" theo schema của bạn
-        const users = assigneeIds.length
-            ? await User.find({ _id: { $in: assigneeIds } })
-                .select({ full_name: 1 }) // hoặc { fullName: 1 } tùy field
+        const userIds = Array.from(userIdSet).map(toObjectId);
+
+        // query users once
+        const users = userIds.length
+            ? await User.find({ _id: { $in: userIds } })
+                .select({ full_name: 1 }) // đổi theo schema của bạn nếu khác
                 .lean()
             : [];
 
-        // 3) map users by id
         const userMap = new Map(users.map(u => [String(u._id), u]));
 
-        // 4) attach assignees
+        // ===================== attach assignees + activity user =====================
         for (const it of issues) {
+            // assignees
             const ids = Array.isArray(it.assigneeIds) ? it.assigneeIds : [];
-            it.assignees = ids
-                .map(id => {
-                    const u = userMap.get(String(id));
-                    return u ? { _id: u._id, full_name: u.full_name } : { _id: id, full_name: null };
-                });
-            // nếu bạn muốn giữ response gọn thì có thể xoá assigneeIds:
-            // delete it.assigneeIds;
-        }
-        // ====== end manual populate ======
+            it.assignees = ids.map(id => {
+                const u = userMap.get(String(id));
+                return u ? { _id: u._id, full_name: u.full_name } : { _id: id, full_name: null };
+            });
 
-        const map = new Map(categories.map((c) => [String(c._id), { ...c, issues: [] }]));
+            // activity user
+            if (Array.isArray(it.activity)) {
+                it.activity = it.activity.map(a => {
+                    const u = a?.userId ? userMap.get(String(a.userId)) : null;
+                    return {
+                        ...a,
+                        user: u ? { _id: u._id, full_name: u.full_name } : { _id: a?.userId, full_name: null },
+                    };
+                });
+            }
+        }
+        // ===================== end manual populate =====================
+
+        const map = new Map(categories.map(c => [String(c._id), { ...c, issues: [] }]));
         for (const it of issues) {
             const key = String(it.categoryId);
             if (!map.has(key)) continue;
@@ -237,6 +253,7 @@ async function getBoard(req, res) {
         return res.status(e.status || 500).json({ message: e.message || "Server error" });
     }
 }
+
 
 
 /**

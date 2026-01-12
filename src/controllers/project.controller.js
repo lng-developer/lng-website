@@ -1,6 +1,8 @@
 // controllers/trello/project.controller.js
 const db = require("../models");
 const Project = db.Project
+const User = db.user;
+const Role = db.role;
 const { toObjectId, getUserId, assertProjectMember } = require("../helper/toDoList.helper.js");
 
 async function createProject(req, res) {
@@ -28,11 +30,27 @@ async function listProjects(req, res) {
     const userId = toObjectId(getUserId(req));
     const { status = "active", search = "" } = req.query || {};
 
+    // ===== check admin via role_id -> Role.name =====
+    const me = await User.findById(userId).select({ role_id: 1 }).lean();
+    if (!me) return res.status(401).json({ message: "Unauthorized" });
+
+    const role = me.role_id
+      ? await Role.findById(me.role_id).select({ name: 1 }).lean()
+      : null;
+
+    const isAdmin = String(role?.name || "").toLowerCase() === "admin";
+    // ==============================================
+
+    // base query: status + search
     const q = {
       status: status === "all" ? { $in: ["active", "archived"] } : String(status),
-      $or: [{ ownerId: userId }, { memberIds: userId }],
     };
     if (search) q.name = { $regex: String(search).trim(), $options: "i" };
+
+    // non-admin mới giới hạn theo owner/member
+    if (!isAdmin) {
+      q.$or = [{ ownerId: userId }, { memberIds: userId }];
+    }
 
     const projects = await Project.find(q).sort({ updatedAt: -1 }).lean();
     return res.json({ data: projects });
@@ -40,6 +58,8 @@ async function listProjects(req, res) {
     return res.status(500).json({ message: e.message || "Server error" });
   }
 }
+
+
 
 async function getProjectDetail(req, res) {
   try {
