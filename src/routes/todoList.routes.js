@@ -1,6 +1,10 @@
-// routes/todoList.routes.js (or routes/trello.routes.js)
+// routes/todoList.routes.js
 const express = require("express");
 const router = express.Router();
+const multer = require("multer"); // Import multer
+
+// Cấu hình upload memory storage để xử lý file buffer
+const upload = multer({ storage: multer.memoryStorage() });
 
 const projectController = require("../controllers/project.controller");
 const categoryController = require("../controllers/category.controller");
@@ -12,101 +16,123 @@ const { authenticateToken } = require("../middlewares/auth.middleware");
 // ======================= Project =======================
 router.post("/projects", authenticateToken, projectController.createProject);
 router.get("/projects", authenticateToken, projectController.listProjects);
-router.get("/projects/:projectId", authenticateToken, projectController.getProjectDetail);
-router.patch("/projects/:projectId", authenticateToken, projectController.updateProject);
-router.post("/projects/:projectId/archive", authenticateToken, projectController.archiveProject);
+router.get(
+  "/projects/:projectId",
+  authenticateToken,
+  projectController.getProjectDetail
+);
+router.patch(
+  "/projects/:projectId",
+  authenticateToken,
+  projectController.updateProject
+);
+router.post(
+  "/projects/:projectId/archive",
+  authenticateToken,
+  projectController.archiveProject
+);
 
 // ======================= Category (Columns) =======================
 router.get(
-    "/projects/:projectId/categories",
-    authenticateToken,
-    categoryController.listCategories
-);  
+  "/projects/:projectId/categories",
+  authenticateToken,
+  categoryController.listCategories
+);
 
 router.post(
-    "/projects/:projectId/categories",
-    authenticateToken,
-    categoryController.createCategory
+  "/projects/:projectId/categories",
+  authenticateToken,
+  categoryController.createCategory
 );
 
 router.put(
-    "/projects/:projectId/categories/:categoryId",
-    authenticateToken,
-    categoryController.updateCategory
+  "/projects/:projectId/categories/:categoryId",
+  authenticateToken,
+  categoryController.updateCategory
 );
 
 router.post(
-    "/projects/:projectId/categories/reorder",
-    authenticateToken,
-    categoryController.reorderCategories
+  "/projects/:projectId/categories/reorder",
+  authenticateToken,
+  categoryController.reorderCategories
 );
 
 router.post(
-    "/projects/:projectId/categories/:categoryId/archive",
-    authenticateToken,
-    categoryController.archiveCategory
+  "/projects/:projectId/categories/:categoryId/archive",
+  authenticateToken,
+  categoryController.archiveCategory
 );
 
 // ======================= Issue (Cards) =======================
 router.get(
-    "/projects/:projectId/board",
-    authenticateToken,
-    issueController.getBoard
+  "/projects/:projectId/board",
+  authenticateToken,
+  issueController.getBoard
 );
 
+// Route tạo issue mới (có thể có file đính kèm)
 router.post(
-    "/projects/:projectId/issues",
-    authenticateToken,
-    issueController.createIssue
+  "/projects/:projectId/issues",
+  authenticateToken,
+  upload.array("files"), // Middleware multer xử lý file
+  issueController.createIssue
 );
 
 router.patch(
-    "/projects/:projectId/issues/:issueId",
-    authenticateToken,
-    issueController.updateIssue
+  "/projects/:projectId/issues/:issueId",
+  authenticateToken,
+  issueController.updateIssue
+);
+
+// [NEW] Route upload thêm attachment cho issue đã có
+router.post(
+  "/projects/:projectId/issues/:issueId/attachments",
+  authenticateToken,
+  upload.array("files"), // Middleware multer xử lý file
+  issueController.addAttachmentFile
 );
 
 router.post(
-    "/projects/:projectId/issues/:issueId/comments",
-    authenticateToken,
-    issueController.addComment
+  "/projects/:projectId/issues/:issueId/comments",
+  authenticateToken,
+  issueController.addComment
 );
 
 router.post(
-    "/projects/:projectId/issues/:issueId/move",
-    authenticateToken,
-    issueController.moveIssue
+  "/projects/:projectId/issues/:issueId/move",
+  authenticateToken,
+  issueController.moveIssue
 );
 
 router.post(
-    "/projects/:projectId/issues/:issueId/archive",
-    authenticateToken,
-    issueController.archiveIssue
+  "/projects/:projectId/issues/:issueId/archive",
+  authenticateToken,
+  issueController.archiveIssue
 );
 
 // ======================= Notification =======================
 router.get(
-    "/notifications",
-    authenticateToken,
-    notificationController.listNotifications
+  "/notifications",
+  authenticateToken,
+  notificationController.listNotifications
 );
 
 router.post(
-    "/notifications/:notificationId/read",
-    authenticateToken,
-    notificationController.markRead
+  "/notifications/:notificationId/read",
+  authenticateToken,
+  notificationController.markRead
 );
 
 router.post(
-    "/notifications/read-all",
-    authenticateToken,
-    notificationController.markAllRead
+  "/notifications/read-all",
+  authenticateToken,
+  notificationController.markAllRead
 );
 
 router.post(
-    "/notifications/:notificationId/archive",
-    authenticateToken,
-    notificationController.archiveNotification
+  "/notifications/:notificationId/archive",
+  authenticateToken,
+  notificationController.archiveNotification
 );
 
 module.exports = router;
