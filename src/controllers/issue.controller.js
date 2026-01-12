@@ -321,7 +321,7 @@ async function updateIssue(req, res) {
   try {
     const userId = getUserId(req);
     const { projectId, issueId } = req.params;
-    // Thêm newLinkAttachment vào đây
+    // Thêm attachments vào destructuring
     const {
       title,
       description,
@@ -331,6 +331,7 @@ async function updateIssue(req, res) {
       startAt,
       assigneeIds,
       newLinkAttachment,
+      attachments,
     } = req.body || {};
 
     await assertProjectMember({ projectId, userId });
@@ -344,8 +345,6 @@ async function updateIssue(req, res) {
 
     if (!issue) return res.status(404).json({ message: "Issue not found" });
 
-    // ===== [NEW] LOGIC THÊM LINK ATTACHMENT =====
-    // Nếu có newLinkAttachment thì chỉ thực hiện thêm link rồi trả về luôn
     if (newLinkAttachment && typeof newLinkAttachment === "object") {
       const linkObj = {
         name: newLinkAttachment.name || "Link",
@@ -372,7 +371,6 @@ async function updateIssue(req, res) {
       await session.commitTransaction();
       return res.json({ data: updatedIssue });
     }
-    // ============================================
 
     const update = {};
     if (typeof title === "string") update.title = String(title).trim();
@@ -392,6 +390,11 @@ async function updateIssue(req, res) {
     if (Array.isArray(assigneeIds))
       update.assigneeIds = assigneeIds.map(toObjectId);
 
+    if (Array.isArray(attachments)) {
+      update.attachments = attachments;
+    }
+
+    // Activity log cho update chung
     issue.activity = issue.activity || [];
     issue.activity.push({
       type: "updated",
