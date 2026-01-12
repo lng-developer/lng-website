@@ -254,6 +254,11 @@ const getReportMatrix = async (req, res) => {
     // ===== opCost cố định =====
     const OPCOST_PER_PERSON_PER_DAY = 30;
 
+    // ===== EXCLUDE user khỏi opCost =====
+    const OP_COST_EXCLUDE_USER_IDS = new Set([
+      "68b93ed3f02eed8dec002ee3", // boss
+    ]);
+
     // ===== 1) chuẩn bị date list =====
     const dayList = makeDayList(from, to);
     const dayIndex = new Map(dayList.map((d, i) => [iso(d), i]));
@@ -300,7 +305,6 @@ const getReportMatrix = async (req, res) => {
     }
 
     // ===== 3) Aggregation đơn hàng =====
-    // CHỈ SỬA PHẦN REFUND: lấy từ amazon_finance_total.refund (không dùng $refund)
     const rows = await OrderCustomProduct.aggregate([
       { $match: matchStage },
       {
@@ -350,11 +354,7 @@ const getReportMatrix = async (req, res) => {
           },
           baseCost: { $sum: { $ifNull: ["$base_cost", 0] } },
           ads: { $sum: { $ifNull: ["$ads", 0] } },
-
-          // vẫn giữ field này để không phá cấu trúc cũ, nhưng sẽ bị override ở bước 6.5
           opCost: { $sum: { $ifNull: ["$op_cost", 0] } },
-
-          // ✅ NEW: refund lấy từ amazon_finance_total.refund
           refund: { $sum: { $ifNull: ["$amazon_finance_total.refund", 0] } },
         },
       },
@@ -386,10 +386,17 @@ const getReportMatrix = async (req, res) => {
     const result = {};
     const zeroArr = () => Array(dayList.length).fill(0);
 
+    // map sellerName -> sellerId (để tính opCost theo start/end)
+    const sellerNameToId = new Map();
+
     for (const r of rows) {
       const sellerName = r._id.sellerName || "Unknown";
       const idx = dayIndex.get(iso(r._id.day));
       if (idx == null) continue;
+
+      if (!sellerNameToId.has(sellerName) && r?._id?.sellerId) {
+        sellerNameToId.set(sellerName, String(r._id.sellerId));
+      }
 
       if (!result[sellerName]) {
         result[sellerName] = {
@@ -413,15 +420,9 @@ const getReportMatrix = async (req, res) => {
       S.revenue[idx] = +(r.revenue || 0).toFixed(2);
       S.baseCost[idx] = +(r.baseCost || 0).toFixed(2);
       S.fee[idx] = +(r.fee || 0).toFixed(2);
-
-      // sẽ bị override ở bước 6.5
       S.opCost[idx] = +(r.opCost || 0).toFixed(2);
-
-      // ✅ NEW: refund lấy từ amazon_finance_total.refund đã group ở trên
       S.refund[idx] = +(r.refund || 0).toFixed(2);
-
       S.ads[idx] = +(r.ads || 0).toFixed(2);
-
       S.shippingTax[idx] = +(r.shipping_tax || 0).toFixed(2);
       S.itemPromotionDiscount[idx] = +(
         Math.abs(r.item_promotion_discount) || 0
@@ -431,11 +432,15 @@ const getReportMatrix = async (req, res) => {
 
     // ===== 6) Ghi đè ADS từ AdsDailySummary =====
     for (const [key, val] of adsMap.entries()) {
-      const [_, dayIso] = key.split("|");
+      const [sid, dayIso] = key.split("|");
       const idx = dayIndex.get(dayIso);
       if (idx == null) continue;
 
       const sellerName = val.sellerName || "Unknown";
+      if (!sellerNameToId.has(sellerName) && sid) {
+        sellerNameToId.set(sellerName, String(sid));
+      }
+
       if (!result[sellerName]) {
         result[sellerName] = {
           fee: zeroArr(),
@@ -455,12 +460,79 @@ const getReportMatrix = async (req, res) => {
       result[sellerName].ads[idx] = +(val.spend || 0).toFixed(2);
     }
 
-    // ===== 6.5) Ghi đè opCost cố định: 30 / seller / day =====
+    // ===== 6.5) Tính opCost theo start_seller / end_seller + loại trừ user boss =====
     const fixedOpCost = Number(OPCOST_PER_PERSON_PER_DAY || 0);
+
+    // helper: đưa Date về đầu ngày UTC (00:00:00.000Z)
+    const toUtcDayStart = (dt) => {
+      if (!dt) return null;
+      const d = new Date(dt);
+      return new Date(
+        Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate())
+      );
+    };
+
+    const sellerIdsForOp = Array.from(sellerNameToId.values())
+      .filter((id) => mongoose.Types.ObjectId.isValid(id))
+      .map((id) => String(id));
+
+    const sellerObjectIdsForOp = sellerIdsForOp
+      .filter((id) => !OP_COST_EXCLUDE_USER_IDS.has(id))
+      .map((id) => new mongoose.Types.ObjectId(id));
+
+    // Map sellerId -> { startDay, endDay }
+    const sellerWorkMap = new Map();
+    if (sellerObjectIdsForOp.length) {
+      const userDocs = await User.find(
+        { _id: { $in: sellerObjectIdsForOp } },
+        { _id: 1, start_seller: 1, end_seller: 1 }
+      ).lean();
+
+      for (const u of userDocs) {
+        // ✅ truncate về đầu ngày UTC để tính luôn ngày start
+        const startDay = toUtcDayStart(u.start_seller);
+        const endDay = toUtcDayStart(u.end_seller);
+
+        sellerWorkMap.set(String(u._id), {
+          startDay,
+          endDay, // có thể null
+        });
+      }
+    }
+
+    // nếu chưa có end_seller => tính tới min(toDate, hôm nay) (đưa về đầu ngày UTC)
+    const today = new Date();
+    const effectiveNow = today < toDate ? today : toDate;
+    const effectiveEndDay = toUtcDayStart(effectiveNow);
+
+    // Set opCost theo từng ngày trong range làm việc (inclusive)
     for (const sellerName of Object.keys(result)) {
       const S = result[sellerName];
+      const sellerIdStr = sellerNameToId.get(sellerName);
+
+      // ✅ boss => opCost = 0 toàn bộ
+      if (sellerIdStr && OP_COST_EXCLUDE_USER_IDS.has(String(sellerIdStr))) {
+        for (let i = 0; i < dayList.length; i++) S.opCost[i] = 0;
+        continue;
+      }
+
+      if (!sellerIdStr || !sellerWorkMap.has(String(sellerIdStr))) {
+        for (let i = 0; i < dayList.length; i++) S.opCost[i] = 0;
+        continue;
+      }
+
+      const { startDay, endDay } = sellerWorkMap.get(String(sellerIdStr));
+      // ✅ nếu không có end_seller -> dùng effectiveEndDay
+      const endInclusive = endDay || effectiveEndDay;
+
       for (let i = 0; i < dayList.length; i++) {
-        S.opCost[i] = +fixedOpCost.toFixed(2);
+        // dayList[i] là Date (đầu ngày) => so inclusive theo ngày
+        const d = toUtcDayStart(dayList[i]);
+
+        const inRange =
+          (!startDay || d >= startDay) && (!endInclusive || d <= endInclusive);
+
+        S.opCost[i] = inRange ? +fixedOpCost.toFixed(2) : 0;
       }
     }
 
@@ -477,7 +549,6 @@ const getReportMatrix = async (req, res) => {
             Math.abs(S.itemPromotionDiscount[i]) +
             S.itemTax[i]);
 
-        // refund đã lấy từ data nên p2 sẽ trừ đúng revenue của đơn refund (và âm thêm baseCost nếu có)
         const p2 = p1 - (S.opCost[i] + S.refund[i]);
 
         S.profit1[i] = +p1.toFixed(2);
