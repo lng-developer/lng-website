@@ -8,6 +8,8 @@ const userSchema = new mongoose.Schema({
     revokeAllBefore: { type: Date, default: new Date(0), index: true },
     employee_id: { type: String, required: true, unique: true },
     team_id: { type: mongoose.Schema.Types.ObjectId, ref: 'Team' },
+    start_seller: {type: Date},
+    end_seller: {type: Date},
     wallet: {
         balance: { type: Number, default: 0 } // tổng điểm tích lũy
     }
