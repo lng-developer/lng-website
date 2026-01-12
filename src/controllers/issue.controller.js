@@ -260,62 +260,74 @@ async function getBoard(req, res) {
  * Update issue fields (title/desc/status/priority/dueAt/assignees)
  */
 async function updateIssue(req, res) {
-    const session = await mongoose.startSession();
-    try {
-        const userId = getUserId(req);
-        const { projectId, issueId } = req.params;
-        const { title, description, status, priority, dueAt, assigneeIds } = req.body || {};
+  const session = await mongoose.startSession();
+  try {
+    const userId = getUserId(req);
+    const { projectId, issueId } = req.params;
+    const { title, description, status, priority, dueAt, startAt, assigneeIds } = req.body || {};
 
-        await assertProjectMember({ projectId, userId });
+    await assertProjectMember({ projectId, userId });
 
-        session.startTransaction();
+    session.startTransaction();
 
-        const issue = await Issue.findOne({ _id: toObjectId(issueId), projectId: toObjectId(projectId) }).session(session);
-        if (!issue) return res.status(404).json({ message: "Issue not found" });
+    const issue = await Issue.findOne({
+      _id: toObjectId(issueId),
+      projectId: toObjectId(projectId),
+    }).session(session);
 
-        const update = {};
-        if (typeof title === "string") update.title = String(title).trim();
-        if (typeof description === "string") update.description = String(description);
-        if (typeof status === "string") update.status = status;
-        if (typeof priority === "string") update.priority = priority;
-        if (dueAt === null) update.dueAt = null;
-        if (typeof dueAt === "string" || dueAt instanceof Date) update.dueAt = new Date(dueAt);
-        if (Array.isArray(assigneeIds)) update.assigneeIds = assigneeIds.map(toObjectId);
+    if (!issue) return res.status(404).json({ message: "Issue not found" });
 
-        // activity log
-        issue.activity = issue.activity || [];
-        issue.activity.push({
-            type: "updated",
-            userId: toObjectId(userId),
-            meta: { fields: Object.keys(update) },
-        });
+    const update = {};
+    if (typeof title === "string") update.title = String(title).trim();
+    if (typeof description === "string") update.description = String(description);
+    if (typeof status === "string") update.status = status;
+    if (typeof priority === "string") update.priority = priority;
 
-        Object.assign(issue, update);
-        await issue.save({ session });
+    // dueAt
+    if (dueAt === null) update.dueAt = null;
+    if (typeof dueAt === "string" || dueAt instanceof Date) update.dueAt = new Date(dueAt);
 
-        // notify new assignees if assigneeIds provided
-        if (Array.isArray(assigneeIds) && assigneeIds.length) {
-            const notis = assigneeIds.map((aid) => ({
-                userId: toObjectId(aid),
-                projectId: toObjectId(projectId),
-                issueId: issue._id,
-                type: "issue_assigned",
-                title: "You were assigned a task",
-                message: issue.title,
-                meta: { issueId: String(issue._id) },
-            }));
-            await Notification.insertMany(notis, { session });
-        }
+    // startAt (NEW)
+    if (startAt === null) update.startAt = null;
+    if (typeof startAt === "string" || startAt instanceof Date) update.startAt = new Date(startAt);
 
-        await session.commitTransaction();
-        return res.json({ data: issue.toObject() });
-    } catch (e) {
-        await session.abortTransaction();
-        return res.status(e.status || 500).json({ message: e.message || "Server error" });
-    } finally {
-        session.endSession();
+    if (Array.isArray(assigneeIds)) update.assigneeIds = assigneeIds.map(toObjectId);
+
+    // activity log
+    issue.activity = issue.activity || [];
+    issue.activity.push({
+      type: "updated",
+      userId: toObjectId(userId),
+      meta: { fields: Object.keys(update) },
+    });
+
+    Object.assign(issue, update);
+    await issue.save({ session });
+
+    // notify new assignees if assigneeIds provided
+    if (Array.isArray(assigneeIds) && assigneeIds.length) {
+      const notis = assigneeIds.map((aid) => ({
+        userId: toObjectId(aid),
+        projectId: toObjectId(projectId),
+        issueId: issue._id,
+        type: "issue_assigned",
+        title: "You were assigned a task",
+        message: issue.title,
+        meta: { issueId: String(issue._id) },
+      }));
+      await Notification.insertMany(notis, { session });
     }
+
+    await session.commitTransaction();
+    return res.json({ data: issue.toObject() });
+  } catch (e) {
+    await session.abortTransaction();
+    return res.status(e.status || 500).json({ message: e.message || "Server error" });
+  } finally {
+    session.endSession();
+  }
 }
+
 
 /**
  * Add comment
