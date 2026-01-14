@@ -41,18 +41,53 @@ async function listProjects(req, res) {
     const isAdmin = String(role?.name || "").toLowerCase() === "admin";
     // ==============================================
 
-    // base query: status + search
+    // ===== base query =====
     const q = {
       status: status === "all" ? { $in: ["active", "archived"] } : String(status),
     };
     if (search) q.name = { $regex: String(search).trim(), $options: "i" };
 
-    // non-admin mới giới hạn theo owner/member
     if (!isAdmin) {
       q.$or = [{ ownerId: userId }, { memberIds: userId }];
     }
 
-    const projects = await Project.find(q).sort({ updatedAt: -1 }).lean();
+    const projects = await Project.find(q)
+      .sort({ updatedAt: -1 })
+      .lean();
+
+    // ===================== populate memberIds -> full_name =====================
+    const memberIdSet = new Set();
+
+    for (const p of projects) {
+      if (Array.isArray(p.memberIds)) {
+        for (const id of p.memberIds) memberIdSet.add(String(id));
+      }
+    }
+
+    const memberIds = Array.from(memberIdSet).map(toObjectId);
+
+    const users = memberIds.length
+      ? await User.find({ _id: { $in: memberIds } })
+          .select({ full_name: 1 })
+          .lean()
+      : [];
+
+    const userMap = new Map(users.map(u => [String(u._id), u]));
+
+    for (const p of projects) {
+      const ids = Array.isArray(p.memberIds) ? p.memberIds : [];
+      p.members = ids.map(id => {
+        const u = userMap.get(String(id));
+        return u
+          ? { _id: u._id, full_name: u.full_name }
+          : { _id: id, full_name: null };
+      });
+
+      // optional: nếu không muốn FE dùng memberIds nữa
+      // delete p.memberIds;
+    }
+    // ===================== end populate =====================
+
     return res.json({ data: projects });
   } catch (e) {
     return res.status(500).json({ message: e.message || "Server error" });
