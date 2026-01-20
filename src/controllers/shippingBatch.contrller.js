@@ -52,10 +52,10 @@ function parseOrdersWithDaysFromTxt(fileBuffer) {
     .map((h) => h.trim().toLowerCase());
 
   const orderIdIndex = headers.findIndex(
-    (h) => h === "order-id" || h === '"order-id"'
+    (h) => h === "order-id" || h === '"order-id"',
   );
   const daysPastPromiseIndex = headers.findIndex(
-    (h) => h === "days-past-promise" || h === '"days-past-promise"'
+    (h) => h === "days-past-promise" || h === '"days-past-promise"',
   );
 
   if (orderIdIndex === -1) {
@@ -326,10 +326,10 @@ const createUpdateBatchFromSystem = async (req, res, next) => {
     original.tracking_fakes = remainingFakes;
     original.stats.totalOrders = original.completed.length;
     original.stats.totalFake = original.completed.filter(
-      (c) => c.isFake
+      (c) => c.isFake,
     ).length;
     original.stats.totalReal = original.completed.filter(
-      (c) => !c.isFake
+      (c) => !c.isFake,
     ).length;
 
     await original.save();
@@ -388,8 +388,8 @@ function buildShipDateString(baseDate) {
       ref.getUTCDate(),
       0,
       22,
-      22
-    )
+      22,
+    ),
   );
 
   return shipDate.toISOString().replace(".000Z", "+00:00");
@@ -408,7 +408,7 @@ function buildCompletedShippingFile(completed, options = {}) {
   const {
     carrierCode = "USPS",
     shipMethod = "USPS First Class",
-    shipDate, // đã build sẵn ở ngoài, không tự build nữa
+    shipDate, // đã build sẵn ở ngoài
   } = options;
 
   let content =
@@ -422,9 +422,21 @@ function buildCompletedShippingFile(completed, options = {}) {
 
     if (!orderId || !tracking) continue;
 
-    content += [orderId, shipDate, carrierCode, tracking, shipMethod].join(
-      "\t"
-    );
+    let finalCarrierCode = carrierCode;
+    let finalShipMethod = shipMethod;
+
+    if (tracking.startsWith("UK")) {
+      finalCarrierCode = "Yanwen";
+      finalShipMethod = "Yanwen Air Economy Mail General";
+    }
+
+    content += [
+      orderId,
+      shipDate,
+      finalCarrierCode,
+      tracking,
+      finalShipMethod,
+    ].join("\t");
 
     content += "\n";
   }
@@ -499,8 +511,8 @@ function buildShipDateString(baseDate) {
       ref.getUTCDate(),
       0,
       22,
-      22
-    )
+      22,
+    ),
   );
 
   return shipDate.toISOString().replace(".000Z", "+00:00");
@@ -644,8 +656,7 @@ const downloadAllUpdatedFakeFile = async (req, res, next) => {
       ...new Set(updateBatch.completed.map((i) => String(i.orderId))),
     ];
 
-    // 3. Tra CONFIRM batch cho từng orderId
-    //    -> map orderId -> confirm.createdAt
+    // 3. Tra CONFIRM batch cho từng orderId → lấy createdAt
     const confirmMatches = await ShippingBatch.aggregate([
       {
         $match: {
@@ -678,29 +689,37 @@ const downloadAllUpdatedFakeFile = async (req, res, next) => {
     for (const row of confirmMatches) {
       confirmDateMap.set(
         String(row._id),
-        buildShipDateString(row.confirmCreatedAt)
+        buildShipDateString(row.confirmCreatedAt),
       );
     }
 
-    // 4. Build file – ship-date theo từng order
+    // 4. Build file – carrier theo tracking prefix
     let content =
       "order-id\tship-date\tcarrier-code\ttracking-number\tship-method\n";
 
     let total = 0;
 
     for (const item of updateBatch.completed) {
-      const orderId = String(item.orderId);
+      const orderId = String(item.orderId).trim();
       const tracking = String(item.tracking || "").trim();
 
       const shipDate = confirmDateMap.get(orderId);
       if (!shipDate || !tracking) continue;
 
+      let finalCarrierCode = carrierCode;
+      let finalShipMethod = shipMethod;
+
+      if (tracking.startsWith("UK")) {
+        finalCarrierCode = "Yanwen";
+        finalShipMethod = "Yanwen Air Economy Mail General";
+      }
+
       content += [
         orderId,
-        shipDate, // 🔥 ship-date ĐÚNG THEO CONFIRM BATCH
-        carrierCode,
+        shipDate,
+        finalCarrierCode,
         tracking,
-        shipMethod,
+        finalShipMethod,
       ].join("\t");
 
       content += "\n";
