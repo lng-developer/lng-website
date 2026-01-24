@@ -19,7 +19,7 @@ const skuMappingConfigSchema = new mongoose.Schema({
     },
 
     // Quản trị
-    is_active: { type: Boolean, default: false },
+    is_active: { type: Boolean, default: true },
     priority: { type: Number, default: 100 },           // số nhỏ = ưu tiên cao
     valid_from: { type: Date, default: null },
     valid_to: { type: Date, default: null },
