@@ -6,6 +6,7 @@ const mongoose = require("mongoose");
 const ExcelJS = require("exceljs");
 const User = db.user;
 const Shop = db.shop;
+const Team = db.Team;
 
 // ép số an toàn
 const num = (v) => {
@@ -19,7 +20,7 @@ const norm = (row) =>
     Object.entries(row).map(([k, v]) => [
       k.trim(),
       typeof v === "string" ? v.trim() : v,
-    ])
+    ]),
   );
 
 const importReportFromFile = async (req, res) => {
@@ -229,7 +230,8 @@ const labelDDMM = (d) => `${pad2(d.getUTCDate())}-${pad2(d.getUTCMonth() + 1)}`;
 
 const getReportMatrix = async (req, res) => {
   try {
-    const { from, to, seller, userNull } = req.query;
+    const { from, to, seller, userNull, team } = req.query;
+
     if (!from || !to) {
       return res
         .status(400)
@@ -269,27 +271,85 @@ const getReportMatrix = async (req, res) => {
     const matchStage = {
       purchase_date: { $gte: fromDate, $lte: toDate },
       amazon_finance_total: { $exists: true, $ne: null },
-
-      // NEW: loại bỏ đơn hủy khỏi report
       status: { $nin: ["Cancelled", "Canceled"] },
     };
 
     let sellerIdSet = null;
+
+    // ✅ NEW: team filter (chỉ áp dụng khi admin; seller vẫn chỉ xem chính họ)
+    let teamUserObjectIds = null;
+    if (isAdmin && team) {
+      if (!mongoose.Types.ObjectId.isValid(team)) {
+        return res.status(400).json({ message: "Invalid team id" });
+      }
+
+      const teamDoc = await Team.findById(team, {
+        userIds: 1,
+        leaderId: 1,
+      }).lean();
+
+      if (!teamDoc) {
+        return res.status(404).json({ message: "Team not found" });
+      }
+
+      const rawIds = [
+        ...(teamDoc.userIds || []),
+        ...(teamDoc.leaderId ? [teamDoc.leaderId] : []), // phòng khi leaderId không nằm trong userIds
+      ];
+
+      // unique + valid
+      const uniq = new Map();
+      for (const id of rawIds) {
+        const sid = String(id || "");
+        if (!mongoose.Types.ObjectId.isValid(sid)) continue;
+        uniq.set(sid, new mongoose.Types.ObjectId(sid));
+      }
+
+      teamUserObjectIds = Array.from(uniq.values());
+      sellerIdSet = new Set(Array.from(uniq.keys())); // dùng cho ADS filter
+    }
+
     if (isSeller) {
       matchStage.sellerId = new mongoose.Types.ObjectId(userId);
       sellerIdSet = new Set([String(userId)]);
     } else {
+      // Admin flow: ưu tiên lọc theo team nếu có
+      if (teamUserObjectIds && teamUserObjectIds.length) {
+        matchStage.sellerId = { $in: teamUserObjectIds };
+      }
+
+      // seller filter vẫn giữ, nhưng nếu đã có team thì sẽ INTERSECT để an toàn
       if (seller) {
         const ids = seller
           .split(",")
           .map((s) => s.trim())
           .filter(Boolean)
+          .filter((id) => mongoose.Types.ObjectId.isValid(id))
           .map((id) => new mongoose.Types.ObjectId(id));
-        if (ids.length === 1) matchStage.sellerId = ids[0];
-        else if (ids.length > 1) matchStage.sellerId = { $in: ids };
-        sellerIdSet = new Set(ids.map(String));
+
+        if (ids.length) {
+          if (matchStage.sellerId && matchStage.sellerId.$in) {
+            // intersect teamIds & sellerIds
+            const sellerIdStrSet = new Set(ids.map(String));
+            const intersect = matchStage.sellerId.$in.filter((x) =>
+              sellerIdStrSet.has(String(x)),
+            );
+            matchStage.sellerId = { $in: intersect };
+            sellerIdSet = new Set(intersect.map(String));
+          } else {
+            if (ids.length === 1) matchStage.sellerId = ids[0];
+            else matchStage.sellerId = { $in: ids };
+            sellerIdSet = new Set(ids.map(String));
+          }
+        }
       }
-      if (userNull === "true") {
+
+      // userNull: nếu đang lọc theo team thì mặc định KHÔNG include null/undefined
+      // vì yêu cầu là "chỉ render thành viên trong team"
+      if (
+        userNull === "true" &&
+        !(teamUserObjectIds && teamUserObjectIds.length)
+      ) {
         if (matchStage.sellerId) {
           if (matchStage.sellerId.$in) {
             matchStage.sellerId.$in.push(null, undefined);
@@ -364,7 +424,7 @@ const getReportMatrix = async (req, res) => {
     // ===== 4) Lấy dữ liệu ADS từ AdsDailySummary =====
     const adsDocs = await AdsDailySummary.find(
       { day: { $gte: dayList[0], $lte: dayList[dayList.length - 1] } },
-      { day: 1, by_seller: 1 }
+      { day: 1, by_seller: 1 },
     ).lean();
 
     const adsMap = new Map(); // key = `${sellerId}|${iso(day)}`
@@ -373,7 +433,10 @@ const getReportMatrix = async (req, res) => {
       for (const row of doc.by_seller || []) {
         const sid = row?.seller?._id;
         if (!sid) continue;
+
+        // ✅ vẫn giữ logic filter ads theo sellerIdSet (đã set theo team/seller ở trên)
         if (sellerIdSet && !sellerIdSet.has(String(sid))) continue;
+
         const key = `${String(sid)}|${dayIso}`;
         adsMap.set(key, {
           spend: Number(row.spend || 0),
@@ -386,7 +449,6 @@ const getReportMatrix = async (req, res) => {
     const result = {};
     const zeroArr = () => Array(dayList.length).fill(0);
 
-    // map sellerName -> sellerId (để tính opCost theo start/end)
     const sellerNameToId = new Map();
 
     for (const r of rows) {
@@ -460,15 +522,14 @@ const getReportMatrix = async (req, res) => {
       result[sellerName].ads[idx] = +(val.spend || 0).toFixed(2);
     }
 
-    // ===== 6.5) Tính opCost theo start_seller / end_seller + loại trừ user boss =====
+    // ===== 6.5) Tính opCost theo start_seller / end_seller + loại trừ boss + inclusive start day =====
     const fixedOpCost = Number(OPCOST_PER_PERSON_PER_DAY || 0);
 
-    // helper: đưa Date về đầu ngày UTC (00:00:00.000Z)
     const toUtcDayStart = (dt) => {
       if (!dt) return null;
       const d = new Date(dt);
       return new Date(
-        Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate())
+        Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()),
       );
     };
 
@@ -480,37 +541,29 @@ const getReportMatrix = async (req, res) => {
       .filter((id) => !OP_COST_EXCLUDE_USER_IDS.has(id))
       .map((id) => new mongoose.Types.ObjectId(id));
 
-    // Map sellerId -> { startDay, endDay }
     const sellerWorkMap = new Map();
     if (sellerObjectIdsForOp.length) {
       const userDocs = await User.find(
         { _id: { $in: sellerObjectIdsForOp } },
-        { _id: 1, start_seller: 1, end_seller: 1 }
+        { _id: 1, start_seller: 1, end_seller: 1 },
       ).lean();
 
       for (const u of userDocs) {
-        // ✅ truncate về đầu ngày UTC để tính luôn ngày start
-        const startDay = toUtcDayStart(u.start_seller);
-        const endDay = toUtcDayStart(u.end_seller);
-
         sellerWorkMap.set(String(u._id), {
-          startDay,
-          endDay, // có thể null
+          startDay: toUtcDayStart(u.start_seller),
+          endDay: toUtcDayStart(u.end_seller),
         });
       }
     }
 
-    // nếu chưa có end_seller => tính tới min(toDate, hôm nay) (đưa về đầu ngày UTC)
     const today = new Date();
     const effectiveNow = today < toDate ? today : toDate;
     const effectiveEndDay = toUtcDayStart(effectiveNow);
 
-    // Set opCost theo từng ngày trong range làm việc (inclusive)
     for (const sellerName of Object.keys(result)) {
       const S = result[sellerName];
       const sellerIdStr = sellerNameToId.get(sellerName);
 
-      // ✅ boss => opCost = 0 toàn bộ
       if (sellerIdStr && OP_COST_EXCLUDE_USER_IDS.has(String(sellerIdStr))) {
         for (let i = 0; i < dayList.length; i++) S.opCost[i] = 0;
         continue;
@@ -522,16 +575,12 @@ const getReportMatrix = async (req, res) => {
       }
 
       const { startDay, endDay } = sellerWorkMap.get(String(sellerIdStr));
-      // ✅ nếu không có end_seller -> dùng effectiveEndDay
       const endInclusive = endDay || effectiveEndDay;
 
       for (let i = 0; i < dayList.length; i++) {
-        // dayList[i] là Date (đầu ngày) => so inclusive theo ngày
         const d = toUtcDayStart(dayList[i]);
-
         const inRange =
           (!startDay || d >= startDay) && (!endInclusive || d <= endInclusive);
-
         S.opCost[i] = inRange ? +fixedOpCost.toFixed(2) : 0;
       }
     }
@@ -920,7 +969,7 @@ const importAmazonRefundCSV = async (req, res) => {
     // Chỉ lấy revenue để set refund = revenue
     const docs = await OrderCustomProduct.find(
       { orderId: { $in: orderIds } },
-      { orderId: 1, "amazon_finance_total.revenue": 1 }
+      { orderId: 1, "amazon_finance_total.revenue": 1 },
     ).lean();
 
     const revenueMap = new Map();
@@ -1097,7 +1146,7 @@ const exportOrdersCostExcel = async (req, res) => {
 
     res.setHeader(
       "Content-Type",
-      "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+      "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     );
     res.setHeader("Content-Disposition", `attachment; filename="${fileName}"`);
 
@@ -1121,7 +1170,7 @@ const fmtDateKey = (d) => {
 const toUTCStartOfDay = (date) => {
   const d = new Date(date);
   return new Date(
-    Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate(), 0, 0, 0)
+    Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate(), 0, 0, 0),
   );
 };
 
@@ -1197,10 +1246,10 @@ const exportAmazonAdsSpendBySellerExcel = async (req, res) => {
     }
 
     const sellerIds = Array.from(sellerIdSet).filter((id) =>
-      mongoose.Types.ObjectId.isValid(id)
+      mongoose.Types.ObjectId.isValid(id),
     );
     const shopIds = Array.from(shopIdSet).filter((id) =>
-      mongoose.Types.ObjectId.isValid(id)
+      mongoose.Types.ObjectId.isValid(id),
     );
 
     const [users, shops] = await Promise.all([
@@ -1209,7 +1258,7 @@ const exportAmazonAdsSpendBySellerExcel = async (req, res) => {
     ]);
 
     const userMap = new Map(
-      users.map((u) => [String(u._id), u.full_name || ""])
+      users.map((u) => [String(u._id), u.full_name || ""]),
     );
     const shopMap = new Map(shops.map((s) => [String(s._id), s.name || ""]));
 
@@ -1284,10 +1333,10 @@ const exportAmazonAdsSpendBySellerExcel = async (req, res) => {
 
     // Sort rows theo Total desc (giống báo cáo)
     const sellerRows = Array.from(sellerMatrix.values()).sort(
-      (a, b) => (b.total || 0) - (a.total || 0)
+      (a, b) => (b.total || 0) - (a.total || 0),
     );
     const sellerShopRows = Array.from(sellerShopMatrix.values()).sort(
-      (a, b) => (b.total || 0) - (a.total || 0)
+      (a, b) => (b.total || 0) - (a.total || 0),
     );
 
     // ===== 4) Create Excel =====
@@ -1362,7 +1411,7 @@ const exportAmazonAdsSpendBySellerExcel = async (req, res) => {
 
     res.setHeader(
       "Content-Type",
-      "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+      "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     );
     res.setHeader("Content-Disposition", `attachment; filename="${fileName}"`);
 
