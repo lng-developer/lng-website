@@ -74,6 +74,14 @@ router.delete(
  */
 router.get("/:id", authenticateToken, userController.getUserById);
 
-
+/**
+ * @desc Revoke token của toàn bộ user (set revokeAllBefore = now)
+ */
+router.post(
+  "/revoke-all",
+  authenticateToken,
+  authorizeRoles("Admin"),
+  userController.revokeAllUsersNow
+);
 
 module.exports = router;

@@ -85,6 +85,28 @@ const getAllEmployeeCodes = async (req, res) => {
   }
 };
 
+const revokeAllUsersNow = async (req, res) => {
+  try {
+    const now = new Date();
+
+    const result = await User.updateMany(
+      {},
+      { $set: { revokeAllBefore: now } }
+    );
+
+    return res.json({
+      message: "Revoke all users success",
+      revokeAllBefore: now,
+      matched: result.matchedCount ?? result.n,
+      modified: result.modifiedCount ?? result.nModified,
+    });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ message: "Revoke all users failed", error: err.message });
+  }
+};
+
+
 module.exports = {
   getAllUsers,
   getUserById,
@@ -93,5 +115,6 @@ module.exports = {
   deleteUser,
   getAllSeller,
   getAllDesigner,
-  getAllEmployeeCodes
+  getAllEmployeeCodes,
+  revokeAllUsersNow
 };
