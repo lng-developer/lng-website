@@ -10,7 +10,7 @@ function mapMethodShip(shipping_type = 'Standard') {
     }
     if (t.includes('overnight')) return 3;
     if (t.includes('expedited')) return 2;
-    if (t.includes('economy')) return 4;
+    if (t.includes('freeeconomy')) return 1;
     return 1; // Standard
 }
 

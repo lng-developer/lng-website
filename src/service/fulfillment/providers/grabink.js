@@ -9,7 +9,8 @@ function mapShippingMethod(shipping_type = 'Standard') {
     if (t.includes('overnight')) return 'overnight';
     if (t.includes('second')) return 'second_day';
     if (t.includes('expedited')) return 'Priority';
-    if (t.includes('economy')) return 'economy';
+    if (t.includes('freeeconomy')) return 'Standard';
+    
     return 'standard';
 }
 

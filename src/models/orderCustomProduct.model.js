@@ -243,6 +243,7 @@ const orderCustomProductSchema = new mongoose.Schema({
       "Economy",
       "Standard",
       "Expedited",
+      "FreeEconomy"
     ],
     default: "Standard",
   },

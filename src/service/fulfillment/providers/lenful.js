@@ -288,7 +288,7 @@ function buildShippings(orderObj = {}, item = {}) {
     if (/^(express|expedited|priority|2d|two)/.test(s)) return [2, 1, 0];
     if (/^(ground)/.test(s)) return [1, 0, 2];
     if (/^(3\s*day|three)/.test(s)) return [3, 2, 1, 0];
-    if (/^(standard|economy)/.test(s)) return [0, 1, 2];
+    if (/^(standard|freeeconomy)/.test(s)) return [0, 1, 2];
 
     return [0, 1, 2];
 }
