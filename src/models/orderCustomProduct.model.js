@@ -237,7 +237,7 @@ const orderCustomProductSchema = new mongoose.Schema({
   shipping_type: {
     type: String,
     enum: [
-      "Second Day",
+      "SecondDay",
       "Ground",
       "Overnight",
       "Economy",

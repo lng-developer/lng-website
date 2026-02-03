@@ -296,7 +296,7 @@ function buildShippings(orderObj = {}, item = {}) {
 /* -------------------- Item builder (match your order schema) -------------------- */
 function buildLenfulItem(item = {}, orderObj = {}) {
     // design_sku: your internal SKU (item.sku)
-    const designSku = safeStr(item.design_sku || item.designSku || item.sku || "");
+    const designSku = safeStr(item.design_sku || item.orderItemId || "");
 
     // product_sku: Lenful variant sku
     const productSku = safeStr(
