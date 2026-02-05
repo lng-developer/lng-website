@@ -660,44 +660,27 @@ const confirmScaleForItem = async (req, res) => {
           submission_vendor: "internal",
         });
       }
-
       // Resolve provider
       let providerKey = String(provider || "").trim().toLowerCase();
 
-      const AVAILABLE_PROVIDERS = (FulfillmentService.PROVIDERS || []).map(p => p.key);
-      const providersHint = AVAILABLE_PROVIDERS.length
-        ? AVAILABLE_PROVIDERS.join(" | ")
-        : "grabink | merchfox | merchize | printway | lenful";
-
-      if (!providerKey) {
-        try {
+      try {
+        if (!providerKey) {
           const resolved = await resolveProviderFromOrder(order, VendorProduct);
-          providerKey = String(resolved.providerKey || "").trim().toLowerCase();
-        } catch (provErr) {
-          const status = provErr.status || 409;
-          return res.status(status).json({
-            message: "Unable to auto-select provider because multiple vendors were detected for this order.",
-            error: provErr.message,
-            providers: provErr.providers || [],
-            hint: `Please specify "provider" in request body, e.g. {"provider":"lenful"} (${providersHint})`,
-          });
+          providerKey = resolved.providerKey || providerKey;
         }
-      }
-
-      if (!providerKey) {
-        return res.status(409).json({
-          message: "Unable to determine provider automatically.",
-          hint: `Please specify "provider" in request body, e.g. {"provider":"lenful"} (${providersHint})`,
+      } catch (provErr) {
+        const status = provErr.status || 409;
+        return res.status(status).json({
+          message:
+            "Unable to auto-select provider because multiple vendors were detected for this order.",
+          error: provErr.message,
+          providers: provErr.providers || [],
+          hint:
+            'Please specify "provider" in request body, e.g., {"provider":"grabink"} or {"provider":"merchfox"} or {"provider":"merchize"}.',
         });
       }
 
-      if (AVAILABLE_PROVIDERS.length && !AVAILABLE_PROVIDERS.includes(providerKey)) {
-        return res.status(400).json({
-          message: `Unknown provider: ${providerKey}`,
-          hint: `Valid providers: ${providersHint}`,
-        });
-      }
-      
+      if (!providerKey) providerKey = "grabink";
       try {
         const result = await FulfillmentService.send(order, providerKey);
 
