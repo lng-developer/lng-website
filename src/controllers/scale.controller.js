@@ -625,41 +625,6 @@ const confirmScaleForItem = async (req, res) => {
         });
       }
 
-      // Internal LNG
-      const isLNG = await isLNGGroupOrder(order);
-      if (isLNG) {
-        const prevOverall = order.scale_overall_status;
-        const prevStatus = order.status;
-
-        order.scale_overall_status = "Sent";
-        order.status = "Fulfilled";
-        order.fulfilled_at = new Date();
-        await order.save();
-
-        await logOrderHistory({
-          orderDoc: order,
-          action: "SEND_TO_VENDOR",
-          description:
-            "Internal LNG order: marked Sent and Fulfilled (no vendor submission).",
-          changes: [
-            { field: "scale_overall_status", from: prevOverall, to: "Sent" },
-            { field: "status", from: prevStatus, to: "Fulfilled" },
-          ],
-          user,
-          context: {
-            source: "SYSTEM",
-            ip: req.ip,
-            userAgent: req.headers["user-agent"],
-          },
-        });
-
-        return res.json({
-          message: "Approved and marked Sent/Fulfilled for LNG Group order.",
-          item_scale_status: item.scale_status,
-          order_scale_overall_status: order.scale_overall_status,
-          submission_vendor: "internal",
-        });
-      }
       // Resolve provider
       let providerKey = String(provider || "").trim().toLowerCase();
 
