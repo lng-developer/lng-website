@@ -3,8 +3,8 @@ const router = express.Router();
 const controller = require("../controllers/orderCustomProduct.controller");
 const { authenticateToken } = require("../middlewares/auth.middleware");
 
-// API list orders (trả về full dữ liệu)
-router.get("/", authenticateToken, controller.getAllOrders);
+// // API list orders (trả về full dữ liệu)
+// router.get("/", authenticateToken, controller.getAllOrders);
 
 // API dành riêng FE (tối ưu chỉ dữ liệu cần hiển thị)
 router.get("/fe", authenticateToken, controller.getFrontendOrders);

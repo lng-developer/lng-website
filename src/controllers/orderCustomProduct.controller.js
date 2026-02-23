@@ -884,7 +884,7 @@ const updateOrdersFromXlsx = async (req, res) => {
       t.shipping_tax = round2((t.shipping_tax || 0) + delta.shipping_tax);
       t.item_promotion_discount = round2(
         (Math.abs(t.item_promotion_discount) || 0) +
-          Math.abs(delta.item_promotion_discount)
+        Math.abs(delta.item_promotion_discount)
       );
 
       // revenue = item + shipping
@@ -989,7 +989,7 @@ const updateOrdersFromXlsx = async (req, res) => {
 
       try {
         fs.unlinkSync(filePath);
-      } catch (_) {}
+      } catch (_) { }
       return res.json({
         message: "Update by latest ship date completed",
         results,
@@ -1125,8 +1125,8 @@ const updateOrdersFromXlsx = async (req, res) => {
           currentShopIdForThisOrder = existing?.shopId
             ? String(existing.shopId)
             : bodyShopId
-            ? String(bodyShopId)
-            : null;
+              ? String(bodyShopId)
+              : null;
 
           results.push({
             orderId,
@@ -1230,8 +1230,8 @@ const updateOrdersFromXlsx = async (req, res) => {
           currentShopIdForThisOrder = existing?.shopId
             ? String(existing.shopId)
             : bodyShopId
-            ? String(bodyShopId)
-            : null;
+              ? String(bodyShopId)
+              : null;
 
           skipProcessingZip = true;
 
@@ -1275,8 +1275,8 @@ const updateOrdersFromXlsx = async (req, res) => {
         currentShopIdForThisOrder = newOrder?.shopId
           ? String(newOrder.shopId)
           : bodyShopId
-          ? String(bodyShopId)
-          : null;
+            ? String(bodyShopId)
+            : null;
 
         const validationResult = await validateAddressWithSmarty(
           basicData.customer_infor
@@ -1350,7 +1350,7 @@ const updateOrdersFromXlsx = async (req, res) => {
                 bufferForUpload === imageBuffer
                   ? imageName
                   : imageName.replace(/\.(png|jpg|jpeg)$/i, "") +
-                    "_compressed.jpg";
+                  "_compressed.jpg";
 
               const cloudinaryUrl = await uploadToCloudinary(
                 bufferForUpload,
@@ -1374,7 +1374,7 @@ const updateOrdersFromXlsx = async (req, res) => {
                     cloudinaryUrls.push(url);
                     continue;
                   }
-                } catch (_) {}
+                } catch (_) { }
                 skippedSnapshots.push({
                   image: imageName,
                   reason: "cloudinary: file size too large",
@@ -1546,20 +1546,20 @@ const updateOrdersFromXlsx = async (req, res) => {
     if (pendingSkuMapLogs.length > 0 && !skuMappingDryRun) {
       try {
         await SkuMappingEntry.bulkWrite(pendingSkuMapLogs, { ordered: false });
-      } catch (_) {}
+      } catch (_) { }
     }
     if (pendingMappedSkuOps.length > 0 && !skuMappingDryRun) {
       try {
         await OrderCustomProduct.bulkWrite(pendingMappedSkuOps, {
           ordered: false,
         });
-      } catch (_) {}
+      } catch (_) { }
     }
 
     // dọn file tạm
     try {
       fs.unlinkSync(filePath);
-    } catch (_) {}
+    } catch (_) { }
 
     return res.json({
       message: "Batch import completed with ASIN-Listing base image matching",
@@ -1578,7 +1578,7 @@ const updateOrdersFromXlsx = async (req, res) => {
   } catch (error) {
     try {
       if (req?.file?.path) fs.unlinkSync(req.file.path);
-    } catch (_) {}
+    } catch (_) { }
     return res
       .status(500)
       .json({ message: "Batch import failed", error: error.message });
@@ -1602,16 +1602,16 @@ const uploadToCloudinary = (buffer, filename) => {
   });
 };
 
-const getAllOrders = async (req, res) => {
-  try {
-    const orders = await OrderCustomProduct.find().sort({ purchase_date: -1 });
-    res.json(orders);
-  } catch (error) {
-    res
-      .status(500)
-      .json({ message: "Failed to retrieve orders", error: error.message });
-  }
-};
+// const getAllOrders = async (req, res) => {
+//   try {
+//     const orders = await OrderCustomProduct.find().sort({ purchase_date: -1 });
+//     res.json(orders);
+//   } catch (error) {
+//     res
+//       .status(500)
+//       .json({ message: "Failed to retrieve orders", error: error.message });
+//   }
+// };
 
 const getOrderById = async (req, res) => {
   try {
@@ -1979,13 +1979,13 @@ const getOrderStatistics = async (req, res) => {
       listingIdsNoPsd.length === 0
         ? { _id: null } // luôn 0
         : {
-            $and: [
-              {
-                items: { $elemMatch: { listingId: { $in: listingIdsNoPsd } } },
-              },
-              { status: { $ne: "Cancelled" } },
-            ],
-          };
+          $and: [
+            {
+              items: { $elemMatch: { listingId: { $in: listingIdsNoPsd } } },
+            },
+            { status: { $ne: "Cancelled" } },
+          ],
+        };
 
     const [stat] = await OrderCustomProduct.aggregate([
       { $match: match },
@@ -2376,9 +2376,8 @@ const removeCaseFromOrder = async (req, res) => {
     await logOrderHistory({
       orderDoc: order,
       action: "REMOVE_CASE",
-      description: `Removed ${
-        oldCases.length - newCases.length
-      } case(s) from order`,
+      description: `Removed ${oldCases.length - newCases.length
+        } case(s) from order`,
       changes: [
         {
           field: "case",
@@ -2675,9 +2674,9 @@ async function listCandidateVendors(pfItems = [], sizeValue, colorValue) {
 
     const vendorId = String(
       it?.vendor_id ||
-        it?.vendor?._id ||
-        (await getVendorIdByVendorProductId(vendorProductId)) ||
-        ""
+      it?.vendor?._id ||
+      (await getVendorIdByVendorProductId(vendorProductId)) ||
+      ""
     );
     if (vendorId) out.add(vendorId);
   }
@@ -2728,9 +2727,9 @@ async function selectBestVendorProduct(
     if (!vpId) continue;
     const vId = String(
       it?.vendor_id ||
-        it?.vendor?._id ||
-        (await getVendorIdByVendorProductId(vpId)) ||
-        ""
+      it?.vendor?._id ||
+      (await getVendorIdByVendorProductId(vpId)) ||
+      ""
     );
     resolved.push({ ...it, __vendorId: vId, __vendorProductId: vpId });
   }
@@ -2818,9 +2817,9 @@ async function buildVendorRank(preItems) {
       if (!vpId) continue;
       const vId = String(
         it?.vendor_id ||
-          it?.vendor?._id ||
-          (await getVendorIdByVendorProductId(vpId)) ||
-          ""
+        it?.vendor?._id ||
+        (await getVendorIdByVendorProductId(vpId)) ||
+        ""
       );
       if (!vId) continue;
       resolved.push({ ...it, __vendorId: vId, __vendorProductId: vpId });
@@ -3047,6 +3046,52 @@ const computeBaseCostForOrder = async (req, res) => {
       return { originalSku, mappedSku, usedSku };
     }
 
+    // ===== QUERY CACHE (chỉ sống trong 1 lần gọi, tránh re-query DB) =====
+    const _cfgCache = new Map();       // configCode → kết quả selectConfigByProductType
+    const _optRulesCache = new Map();  // "configCode::key::rawValue" → kết quả mapOptionValue
+    const _vpIdCache = new Map();      // vendorProductId → vendorId (string)
+    const _vccCache = new Map();       // vendorProductId → VendorCostCenter[] (lean docs)
+
+    // ===== CACHED WRAPPERS =====
+    async function cachedSelectConfig(configCode, labelValueMap) {
+      if (_cfgCache.has(configCode)) return _cfgCache.get(configCode);
+      const result = await selectConfigByProductType(configCode, labelValueMap);
+      _cfgCache.set(configCode, result);
+      return result;
+    }
+
+    async function cachedMapOptionValue({ configCode, key, rawValue }) {
+      const cacheKey = `${configCode}::${key}::${rawValue}`;
+      if (_optRulesCache.has(cacheKey)) return _optRulesCache.get(cacheKey);
+      const result = await mapOptionValue({ configCode, key, rawValue });
+      _optRulesCache.set(cacheKey, result);
+      return result;
+    }
+
+    async function cachedGetVendorId(vpId) {
+      const k = String(vpId);
+      if (_vpIdCache.has(k)) return _vpIdCache.get(k);
+      const result = await getVendorIdByVendorProductId(vpId);
+      _vpIdCache.set(k, result);
+      return result;
+    }
+
+    async function cachedVendorCostCenters(vendorProductId) {
+      const k = String(vendorProductId);
+      if (_vccCache.has(k)) return _vccCache.get(k);
+      const docs = await VendorCostCenter.find({
+        vendor_product: vendorProductId,
+        status: { $in: ["Active", "active", null] },
+      })
+        .select(
+          "vendor_size vendor_color standard_size standard_color base_cost sku " +
+          "international priority additional_costs"
+        )
+        .lean();
+      _vccCache.set(k, docs);
+      return docs;
+    }
+
     // ============== PASS 1: Pre-scan để chọn preferredVendorId ==============
     const stagedItems = [];
     const preItems = [];
@@ -3074,7 +3119,7 @@ const computeBaseCostForOrder = async (req, res) => {
         productTypeValue,
         matchedBy,
         reason: cfgReason,
-      } = await selectConfigByProductType(configCode, labelValueMap);
+      } = await cachedSelectConfig(configCode, labelValueMap);
 
       if (!cfg) {
         stagedItems.push({
@@ -3098,12 +3143,12 @@ const computeBaseCostForOrder = async (req, res) => {
         cfg.customize_color_key || []
       );
 
-      const sizeMap = await mapOptionValue({
+      const sizeMap = await cachedMapOptionValue({
         configCode,
         key: "size",
         rawValue: sizeRaw,
       });
-      const colorMap = await mapOptionValue({
+      const colorMap = await cachedMapOptionValue({
         configCode,
         key: "color",
         rawValue: colorRaw,
@@ -3170,11 +3215,19 @@ const computeBaseCostForOrder = async (req, res) => {
         pfItems,
       });
 
-      const vendorSet = await listCandidateVendors(
-        pfItems,
-        sizeValue,
-        colorValue
-      );
+      // inline listCandidateVendors (cached)
+      const vendorSet = new Set();
+      for (const pf of pfItems) {
+        const vpId = pf?.vendor_product;
+        if (!vpId) continue;
+        const candidates = await cachedVendorCostCenters(vpId);
+        const hit = findBestCostCenter(candidates, sizeValue, colorValue, { strict: true });
+        if (!hit) continue;
+        const vId = String(
+          pf?.vendor_id || pf?.vendor?._id || (await cachedGetVendorId(vpId)) || ""
+        );
+        if (vId) vendorSet.add(vId);
+      }
       candidateSetsPerItem.push(vendorSet);
     }
 
@@ -3182,7 +3235,20 @@ const computeBaseCostForOrder = async (req, res) => {
     // Nếu có từ 2 item trở lên: giao vendor và chọn theo vendor-rank (pfItems.order)
     let preferredVendorId = null;
     if (preItems.length >= 2) {
-      const vendorRank = await buildVendorRank(preItems);
+      // inline buildVendorRank (cached)
+      const vendorRank = new Map();
+      for (const pre of preItems) {
+        for (const it of toArray(pre.pfItems)) {
+          const vpId = it?.vendor_product;
+          if (!vpId) continue;
+          const vId = String(
+            it?.vendor_id || it?.vendor?._id || (await cachedGetVendorId(vpId)) || ""
+          );
+          if (!vId) continue;
+          const o = it.order ?? 999;
+          vendorRank.set(vId, Math.min(vendorRank.get(vId) ?? 999, o));
+        }
+      }
       preferredVendorId =
         choosePreferredVendorIdStable(candidateSetsPerItem, vendorRank) || null;
     }
@@ -3210,15 +3276,58 @@ const computeBaseCostForOrder = async (req, res) => {
       } = pre;
       let { pfItems } = pre;
 
-      // ép vendor nếu có preferredVendorId
-      const vendorSelection = await selectBestVendorProduct(
-        pfItems,
-        sizeValue,
-        colorValue,
-        preferredVendorId
-          ? { forcedVendorId: preferredVendorId, strictForcedVendor: true }
-          : {}
-      );
+      // ===== inline selectBestVendorProduct (cached) =====
+      const vendorSelection = await (async () => {
+        const byOrder = (a, b) => (a.order || 999) - (b.order || 999);
+        const actives = pfItems
+          .filter((it) => String(it.status || "").toLowerCase() === "active")
+          .sort(byOrder);
+        let itemsToCheck = actives.length ? actives : [...pfItems].sort(byOrder);
+
+        const resolved = [];
+        for (const it of itemsToCheck) {
+          const vpId = it?.vendor_product;
+          if (!vpId) continue;
+          const vId = String(
+            it?.vendor_id || it?.vendor?._id || (await cachedGetVendorId(vpId)) || ""
+          );
+          resolved.push({ ...it, __vendorId: vId, __vendorProductId: vpId });
+        }
+
+        const filtered = preferredVendorId
+          ? resolved.filter((x) => x.__vendorId && String(x.__vendorId) === String(preferredVendorId))
+          : resolved;
+        if (preferredVendorId && filtered.length === 0) {
+          return { success: false, reason: `No pfItems under forced vendor ${preferredVendorId}`, forcedVendorId: preferredVendorId };
+        }
+
+        const checkList = filtered.length ? filtered : resolved;
+        for (const cItem of checkList) {
+          const candidates = await cachedVendorCostCenters(cItem.__vendorProductId);
+          if (!candidates?.length) continue;
+          let hit = findBestCostCenter(candidates, sizeValue, colorValue, { strict: true });
+          if (!hit) hit = findBestCostCenter(candidates, sizeValue, colorValue, { strict: false });
+          if (hit && Number(hit?.base_cost || 0) > 0) {
+            return {
+              success: true, vendorProductId: cItem.__vendorProductId, matched: hit,
+              selectedOrder: cItem.order || 999, itemDisplayName: cItem.display_name || "Unknown",
+              vendorId: cItem.__vendorId,
+            };
+          }
+        }
+
+        return {
+          success: false,
+          reason: preferredVendorId
+            ? `No matching cost center under forced vendor ${preferredVendorId}`
+            : "No matching vendor product with valid cost center found",
+          forcedVendorId: preferredVendorId || undefined,
+          checkedItems: checkList.map((it) => ({
+            order: it.order, display_name: it.display_name,
+            vendor_product: String(it.__vendorProductId || ""), vendor_id: String(it.__vendorId || ""),
+          })),
+        };
+      })();
 
       if (!vendorSelection.success) {
         stagedItems.push({
@@ -3247,14 +3356,57 @@ const computeBaseCostForOrder = async (req, res) => {
       const baseEach = Number(matched?.base_cost || 0);
       const qty = Math.max(1, Number(item.quantity || 1));
 
-      // Lấy phí ship
-      const rate = await resolveShippingRates({
-        matched,
-        shippingType: shippingTypeForOrder,
-        vendorProductId,
-        sizeValue,
-        colorValue,
-      });
+      // ===== inline resolveShippingRates (cached) =====
+      const rate = await (async () => {
+        const shipType = String(shippingTypeForOrder || "").toLowerCase();
+        const pickFromDoc = (doc, preferProfile) => {
+          if (!doc) return null;
+          const hasPriority = doc.priority && (doc.priority.economy != null || doc.priority.additional != null);
+          const hasIntl = doc.international && (doc.international.economy != null || doc.international.additional != null);
+          if (preferProfile === "priority" && hasPriority) return { eco: Number(doc.priority.economy ?? 0), add: Number(doc.priority.additional ?? 0), profile: "priority", source: "doc" };
+          if (hasIntl) return { eco: Number(doc.international.economy ?? 0), add: Number(doc.international.additional ?? 0), profile: "international", source: "doc" };
+          return null;
+        };
+
+        async function lookupFromCache(preferProfile) {
+          if (!vendorProductId) return null;
+          const allDocs = await cachedVendorCostCenters(vendorProductId);
+          const normS = String(sizeValue || "").trim().toLowerCase();
+          const normC = String(colorValue || "").trim().toLowerCase();
+          // vendor_size/color
+          for (const doc of allDocs) {
+            if (normS && String(doc.vendor_size || "").trim().toLowerCase() === normS &&
+              normC && String(doc.vendor_color || "").trim().toLowerCase() === normC) {
+              const p = pickFromDoc(doc, preferProfile); if (p) return p;
+            }
+          }
+          // standard_size/color
+          for (const doc of allDocs) {
+            if (normS && String(doc.standard_size || "").trim().toLowerCase() === normS &&
+              normC && String(doc.standard_color || "").trim().toLowerCase() === normC) {
+              const p = pickFromDoc(doc, preferProfile); if (p) return p;
+            }
+          }
+          // fallback: any doc
+          for (const doc of allDocs) {
+            const p = pickFromDoc(doc, preferProfile); if (p) return p;
+          }
+          return null;
+        }
+
+        if (shipType === "expedited") {
+          if (matched?.priority && (matched.priority.economy != null || matched.priority.additional != null))
+            return { eco: Number(matched.priority.economy ?? 0), add: Number(matched.priority.additional ?? 0), profile: "priority", source: "matched" };
+          const dbPick = await lookupFromCache("priority"); if (dbPick) return dbPick;
+          if (matched?.international && (matched.international.economy != null || matched.international.additional != null))
+            return { eco: Number(matched.international.economy ?? 0), add: Number(matched.international.additional ?? 0), profile: "international", source: "matched-fallback" };
+          return { eco: 0, add: 0, profile: "priority", source: "zero" };
+        }
+        if (matched?.international && (matched.international.economy != null || matched.international.additional != null))
+          return { eco: Number(matched.international.economy ?? 0), add: Number(matched.international.additional ?? 0), profile: "international", source: "matched" };
+        const dbPick = await lookupFromCache("international"); if (dbPick) return dbPick;
+        return { eco: 0, add: 0, profile: "international", source: "zero" };
+      })();
       const eco = Number(rate.eco || 0);
       const add = Number(rate.add || 0);
       const shipProfile = rate.profile;
@@ -3393,7 +3545,7 @@ const computeBaseCostForOrder = async (req, res) => {
           const minus =
             (out.shipping_international_economy || 0) +
             (out.shipping_international_additional_units || 0) *
-              (out.shipping_international_additional_rate || 0);
+            (out.shipping_international_additional_rate || 0);
           out.base_cost_total_for_item_including_shipping = Number(
             (out.base_cost_total_for_item_including_shipping - minus).toFixed(2)
           );
@@ -3421,9 +3573,8 @@ const computeBaseCostForOrder = async (req, res) => {
                 out.base_cost_total_for_item_including_shipping + expensive.eco
               ).toFixed(2)
             );
-            out.formula = `${out.formula || ""} | SPECIAL[${
-              expensive.shipProfile
-            }]: eco(${expensive.eco}) for expensive product`;
+            out.formula = `${out.formula || ""} | SPECIAL[${expensive.shipProfile
+              }]: eco(${expensive.eco}) for expensive product`;
           }
         }
         // additional (1) cho sp "rẻ hơn"
@@ -3439,9 +3590,8 @@ const computeBaseCostForOrder = async (req, res) => {
                 out.base_cost_total_for_item_including_shipping + cheap.add
               ).toFixed(2)
             );
-            out.formula = `${out.formula || ""} | SPECIAL[${
-              cheap.shipProfile
-            }]: add(${cheap.add}) for cheaper product`;
+            out.formula = `${out.formula || ""} | SPECIAL[${cheap.shipProfile
+              }]: add(${cheap.add}) for cheaper product`;
           }
         }
 
@@ -3525,7 +3675,7 @@ const computeBaseCostForOrder = async (req, res) => {
               return (
                 sum +
                 (out.shipping_international_additional_units || 0) *
-                  (out.shipping_international_additional_rate || 0)
+                (out.shipping_international_additional_rate || 0)
               );
             }, 0)
           ).toFixed(2)
@@ -3586,7 +3736,7 @@ const computeBaseCostForOrder = async (req, res) => {
       if (
         it.cost_breakdown &&
         typeof it.cost_breakdown.base_cost_total_for_item_including_shipping ===
-          "number"
+        "number"
       ) {
         orderTotalBaseCost +=
           it.cost_breakdown.base_cost_total_for_item_including_shipping;
@@ -3826,8 +3976,8 @@ const updateItemTracking = async (req, res) => {
       nextStatus === "Fulfilled" || nextStatus === "Shipped"
         ? "Sent"
         : nextStatus === "Cancelled"
-        ? "Cancelled"
-        : docAfterAllUpdate.scale_overall_status;
+          ? "Cancelled"
+          : docAfterAllUpdate.scale_overall_status;
 
     return res.json({
       message:
@@ -4049,7 +4199,7 @@ const updateScaleOrder = async (req, res) => {
 };
 
 module.exports = {
-  getAllOrders,
+  // getAllOrders,
   getOrderById,
   getFrontendOrders,
   upload,
