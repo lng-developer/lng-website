@@ -52,7 +52,8 @@ const {
   adminSessionRoutes,
   PointsRoutes,
   ShippingBatchRoutes,
-  ToDoListRoutes
+  ToDoListRoutes,
+  EtsyOrderRoutes
 } = require("./src/routes");
 
 app.use("/api/role", roleRoutes);
@@ -83,6 +84,7 @@ app.use("/api/admin", adminSessionRoutes);
 app.use("/api/points", PointsRoutes);
 app.use("/api/shipping-batches", ShippingBatchRoutes);
 app.use("/api/to-do", ToDoListRoutes);
+app.use("/api/etsy", EtsyOrderRoutes);
 
 
 // ===== HTTP server
