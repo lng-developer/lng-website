@@ -28,6 +28,8 @@ const Project = require("./project.model")
 const Category = require("./category.model")
 const Notification = require("./notification.model")
 const Issue = require("./issue.model")
+const EtsyOrder = require("./etsyOrder.model")
+
 // Cau hinh mongoose dang global
 mongoose.Promise = global.Promise;
 // Dinh nghia doi tuong DB
@@ -63,6 +65,7 @@ db.Project = Project
 db.Category = Category
 db.Notification = Notification
 db.Issue = Issue
+db.EtsyOrder = EtsyOrder
 db.connectDB = async () => {
   await mongoose
     .connect(process.env.MONGO_URI, {
