@@ -14,14 +14,14 @@ router.use(authenticateToken);
 // ===== STATISTICS =====
 router.get(
     '/stats',
-    authorizeRoles('Admin', 'Design Leader', 'Designer', 'User', 'Seller'),
+    authorizeRoles('Admin', 'Design Leader', 'Designer', 'User', 'Seller', "Customer Service"),
     ideaTaskController.getIdeaTaskStatistics
 );
 
 // ===== LIST (PHÂN TRANG + METADATA) =====
 router.get(
     '/',
-    authorizeRoles('Admin', 'Design Leader', 'Designer', 'User', 'Seller'),
+    authorizeRoles('Admin', 'Design Leader', 'Designer', 'User', 'Seller', "Customer Service"),
     ideaTaskController.getAllIdeaTasks
 );
 

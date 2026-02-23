@@ -112,6 +112,8 @@ function buildFilterFromQuery(req) {
   const isAdmin = hasRole(r, "Admin");
   const isDL = hasRole(r, "Design Leader");
   const isDesigner = hasRole(r, "Designer");
+  const isCS = hasRole(r, "Customer Service");
+
   const me = req.user?.userId;
   const meObjectId = new mongoose.Types.ObjectId(me);
   if (isAdmin || isDL) {
@@ -125,7 +127,7 @@ function buildFilterFromQuery(req) {
       { createdBy: meObjectId },
       { "assignedTo._id": meObjectId }
     );
-  } else if (isDesigner) {
+  } else if (isDesigner || isCS) {
     orConditions.push({ assignedTo: meObjectId });
   } else {
     orConditions.push({ createdBy: meObjectId });
