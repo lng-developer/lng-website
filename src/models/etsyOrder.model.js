@@ -21,6 +21,12 @@ const EtsyOrderItemEmbeddedSchema = new Schema(
 const EtsyOrderSchema = new Schema(
     {
         orderId: { type: String, required: true, unique: true, index: true },
+        shopId: {
+            type: Schema.Types.ObjectId,
+            ref: "Shop",
+            required: true,
+            index: true
+        },
 
         // Dates
         saleDate: { type: Date, index: true },
@@ -95,6 +101,10 @@ const EtsyOrderSchema = new Schema(
         numberOfItems: { type: Number, default: 0 },
 
         items: { type: [EtsyOrderItemEmbeddedSchema], default: [] },
+        address_validation: {
+            isValid: { type: Boolean, default: null },
+            smartyResponse: { type: Object, default: null },
+        },
     },
     { timestamps: true, versionKey: false }
 );

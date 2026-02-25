@@ -1,11 +1,14 @@
 const db = require('../models');
+const mongoose = require('mongoose');
 const EtsyOrder = db.EtsyOrder;
 const User = db.user;
+const Store = db.shop;
 
 const fs = require('fs');
 const { parse } = require('csv-parse');
+const axios = require('axios');
 
-// ================== UTIL ==================
+/* ================== UTIL ================== */
 
 const toNumber = (v) => {
     if (v === null || v === undefined) return null;
@@ -59,8 +62,8 @@ const detectFileType = (rows) => {
     return "unknown";
 };
 
-// ================== SELLER LOGIC ==================
-// SKU: "J2512-TS2S-270126-Abuela" => sellerCode = "J2512"
+/* ================== SELLER LOGIC (GIỮ NGUYÊN) ================== */
+
 const getSellerCodeFromSku = (sku) => {
     if (!sku) return null;
     const s = String(sku).trim();
@@ -70,11 +73,12 @@ const getSellerCodeFromSku = (sku) => {
     return first;
 };
 
-const fillSellerIfMissing = async (orderId, sellerCode) => {
+const fillSellerIfMissing = async (orderId, shopId, sellerCode) => {
     if (!sellerCode) return;
 
-    // Tìm user theo employee_id
-    const user = await User.findOne({ employee_id: sellerCode }).select('_id employee_id').lean();
+    const user = await User.findOne({ employee_id: sellerCode })
+        .select('_id employee_id')
+        .lean();
 
     const missing = (field) => ({
         $or: [
@@ -83,7 +87,6 @@ const fillSellerIfMissing = async (orderId, sellerCode) => {
         ]
     });
 
-    // Fill-if-missing, không overwrite
     const pipeline = [{
         $set: {
             "seller.sellerCode": {
@@ -95,88 +98,75 @@ const fillSellerIfMissing = async (orderId, sellerCode) => {
         }
     }];
 
-    await EtsyOrder.updateOne({ orderId }, pipeline, { upsert: true });
+    await EtsyOrder.updateOne({ orderId, shopId }, pipeline, { upsert: true });
 };
 
-// ================== INTERNAL LOGIC ==================
+/* ================== ADDRESS VALIDATION ================== */
 
-const fillIfMissingFromItemRow = async (orderId, row) => {
+const validateAddressWithSmarty = async (address) => {
+    try {
+        const response = await axios.get(
+            "https://us-street.api.smarty.com/street-address",
+            {
+                timeout: 8000,
+                params: {
+                    "auth-id": process.env.SMARTY_AUTH_ID,
+                    "auth-token": process.env.SMARTY_AUTH_TOKEN,
+                    street: address.address,
+                    street2: address.address_2,
+                    city: address.city,
+                    state: address.state,
+                    zipcode: address.zip_code,
+                },
+            }
+        );
 
-    const missing = (field) => ({
-        $or: [
-            { $eq: [{ $ifNull: [field, null] }, null] },
-            { $eq: [field, ""] }
-        ]
-    });
-
-    const pipeline = [{
-        $set: {
-            paidAt: toDate(row["Date Paid"])
-                ? { $cond: [missing("$paidAt"), toDate(row["Date Paid"]), "$paidAt"] }
-                : "$paidAt",
-
-            "shipping.name": row["Ship Name"]
-                ? { $cond: [missing("$shipping.name"), row["Ship Name"], "$shipping.name"] }
-                : "$shipping.name",
-
-            "buyer.display": row["Buyer"]
-                ? { $cond: [missing("$buyer.display"), row["Buyer"], "$buyer.display"] }
-                : "$buyer.display",
-
-            "coupon.code": row["Coupon Code"]
-                ? { $cond: [missing("$coupon.code"), row["Coupon Code"], "$coupon.code"] }
-                : "$coupon.code",
-
-            "coupon.details": row["Coupon Details"]
-                ? { $cond: [missing("$coupon.details"), row["Coupon Details"], "$coupon.details"] }
-                : "$coupon.details",
-
-            // Bạn có thể mở rộng các totals khác tương tự nếu muốn
-            "totals.orderShipping":
-                toNumber(row["Order Shipping"]) !== null
-                    ? {
-                        $cond: [
-                            { $eq: [{ $ifNull: ["$totals.orderShipping", null] }, null] },
-                            toNumber(row["Order Shipping"]),
-                            "$totals.orderShipping"
-                        ]
-                    }
-                    : "$totals.orderShipping"
+        const data = response.data;
+        if (Array.isArray(data) && data.length > 0) {
+            return { isValid: true, smartyResponse: data[0] };
         }
-    }];
 
-    await EtsyOrder.updateOne({ orderId }, pipeline, { upsert: true });
+        return { isValid: false, smartyResponse: null };
+    } catch (err) {
+        return { isValid: false, smartyResponse: { error: err.message } };
+    }
 };
 
-const upsertEmbeddedItem = async (orderId, itemDoc) => {
-    // Update nếu đã có transactionId
-    const updateExisting = await EtsyOrder.updateOne(
-        { orderId, "items.transactionId": itemDoc.transactionId },
-        { $set: { "items.$": itemDoc } }
-    );
+const validateAddressIfNeeded = async (orderDoc) => {
+    if (!orderDoc) return;
 
-    if (updateExisting.matchedCount > 0) return false;
+    if (
+        orderDoc.shipping?.country !== "United States" &&
+        orderDoc.shipping?.country !== "US"
+    ) return;
 
-    // Push nếu chưa có
-    await EtsyOrder.updateOne(
-        { orderId, "items.transactionId": { $ne: itemDoc.transactionId } },
-        { $push: { items: itemDoc } }
-    );
+    if (
+        orderDoc.address_validation?.isValid === null &&
+        orderDoc.address_validation?.smartyResponse === null
+    ) {
+        const result = await validateAddressWithSmarty({
+            address: orderDoc.shipping?.address1,
+            address_2: orderDoc.shipping?.address2,
+            city: orderDoc.shipping?.city,
+            state: orderDoc.shipping?.state,
+            zip_code: orderDoc.shipping?.zipcode,
+        });
 
-    return true;
+        orderDoc.address_validation = result;
+        await orderDoc.save();
+    }
 };
 
-const syncItemCount = async (orderId) => {
-    await EtsyOrder.updateOne(
-        { orderId },
-        [{ $set: { numberOfItems: { $size: { $ifNull: ["$items", []] } } } }]
-    );
-};
-
-// ================== CONTROLLER ==================
+/* ================== CONTROLLER ================== */
 
 const importOrders = async (req, res) => {
     try {
+
+        const { shopId } = req.body;
+
+        if (!shopId || !mongoose.Types.ObjectId.isValid(shopId)) {
+            return res.status(400).json({ message: "Valid shopId is required" });
+        }
 
         if (!req.files?.length) {
             return res.status(400).json({ message: "No files uploaded" });
@@ -194,14 +184,14 @@ const importOrders = async (req, res) => {
             const rows = await readCsv(file.path);
             const type = detectFileType(rows);
 
-            // ===== ORDER FILE =====
+            /* ===== ORDER FILE ===== */
             if (type === "orders") {
                 const bulkOps = rows
                     .map(row => row["Order ID"] ? ({
                         updateOne: {
-                            filter: { orderId: row["Order ID"] },
+                            filter: { orderId: row["Order ID"], shopId },
                             update: {
-                                $setOnInsert: { orderId: row["Order ID"], items: [] },
+                                $setOnInsert: { orderId: row["Order ID"], shopId, items: [] },
                                 $set: {
                                     saleDate: toDate(row["Sale Date"]),
                                     shippedAt: toDate(row["Date Shipped"]),
@@ -211,8 +201,6 @@ const importOrders = async (req, res) => {
 
                                     "buyer.userId": row["Buyer User ID"],
                                     "buyer.fullName": row["Full Name"],
-                                    "buyer.firstName": row["First Name"],
-                                    "buyer.lastName": row["Last Name"],
 
                                     "shipping.address1": row["Street 1"],
                                     "shipping.address2": row["Street 2"],
@@ -220,22 +208,6 @@ const importOrders = async (req, res) => {
                                     "shipping.state": row["Ship State"],
                                     "shipping.zipcode": row["Ship Zipcode"],
                                     "shipping.country": row["Ship Country"],
-
-                                    "totals.orderValue": toNumber(row["Order Value"]),
-                                    "totals.shipping": toNumber(row["Shipping"]),
-                                    "totals.salesTax": toNumber(row["Sales Tax"]),
-                                    "totals.orderTotal": toNumber(row["Order Total"]),
-                                    "totals.cardProcessingFees": toNumber(row["Card Processing Fees"]),
-                                    "totals.orderNet": toNumber(row["Order Net"]),
-
-                                    "totals.adjustedOrderTotal": toNumber(row["Adjusted Order Total"]),
-                                    "totals.adjustedCardProcessingFees": toNumber(row["Adjusted Card Processing Fees"]),
-                                    "totals.adjustedNet": toNumber(row["Adjusted Net"]),
-                                    "totals.adjustedOrderValue": toNumber(row["Adjusted Order Value"]),
-                                    "totals.adjustedShipping": toNumber(row["Adjusted Shipping"]),
-                                    "totals.adjustedSalesTax": toNumber(row["Adjusted Sales Tax"]),
-
-                                    numberOfItems: toInt(row["Number of Items"])
                                 }
                             },
                             upsert: true
@@ -244,12 +216,11 @@ const importOrders = async (req, res) => {
                     .filter(Boolean);
 
                 if (bulkOps.length) {
-                    const result = await EtsyOrder.bulkWrite(bulkOps, { ordered: false });
-                    stats.ordersUpserted += (result.modifiedCount || 0) + (result.upsertedCount || 0);
+                    await EtsyOrder.bulkWrite(bulkOps, { ordered: false });
                 }
             }
 
-            // ===== ITEM FILE =====
+            /* ===== ITEM FILE ===== */
             if (type === "items") {
 
                 const affectedOrders = new Set();
@@ -261,17 +232,12 @@ const importOrders = async (req, res) => {
 
                     affectedOrders.add(orderId);
 
-                    // ensure order exists
                     await EtsyOrder.updateOne(
-                        { orderId },
-                        { $setOnInsert: { orderId, items: [] } },
+                        { orderId, shopId },
+                        { $setOnInsert: { orderId, shopId, items: [] } },
                         { upsert: true }
                     );
 
-                    // fill-if-missing patch from item row
-                    await fillIfMissingFromItemRow(orderId, row);
-
-                    // build item
                     const itemDoc = {
                         transactionId: row["Transaction ID"],
                         listingId: row["Listing ID"],
@@ -284,22 +250,36 @@ const importOrders = async (req, res) => {
                         variations: parseVariations(row["Variations"])
                     };
 
-                    // ✅ fill seller from SKU prefix (fill-if-missing)
-                    const sellerCode = getSellerCodeFromSku(itemDoc.sku);
-                    if (sellerCode) {
-                        await fillSellerIfMissing(orderId, sellerCode);
-                        stats.sellerLinked += 1; // đếm số row có attempt (không phải số order unique)
+                    const updateExisting = await EtsyOrder.updateOne(
+                        { orderId, shopId, "items.transactionId": itemDoc.transactionId },
+                        { $set: { "items.$": itemDoc } }
+                    );
+
+                    if (updateExisting.matchedCount === 0) {
+                        await EtsyOrder.updateOne(
+                            { orderId, shopId },
+                            { $push: { items: itemDoc } }
+                        );
                     }
 
-                    // upsert embedded item
-                    const created = await upsertEmbeddedItem(orderId, itemDoc);
+                    // 🔥 GIỮ NGUYÊN SELLER FLOW
+                    const sellerCode = getSellerCodeFromSku(itemDoc.sku);
+                    if (sellerCode) {
+                        await fillSellerIfMissing(orderId, shopId, sellerCode);
+                        stats.sellerLinked += 1;
+                    }
+
                     stats.itemsProcessed += 1;
-                    if (created) stats.itemsCreated += 1;
                 }
 
-                // sync numberOfItems after processing
                 for (const oid of affectedOrders) {
-                    await syncItemCount(oid);
+                    await EtsyOrder.updateOne(
+                        { orderId: oid, shopId },
+                        [{ $set: { numberOfItems: { $size: { $ifNull: ["$items", []] } } } }]
+                    );
+
+                    const order = await EtsyOrder.findOne({ orderId: oid, shopId });
+                    await validateAddressIfNeeded(order);
                 }
             }
 
@@ -307,7 +287,7 @@ const importOrders = async (req, res) => {
         }
 
         return res.json({
-            message: "Etsy Order import completed (fill-if-missing + seller from SKU)",
+            message: "Etsy Order import completed (multi-shop + seller preserved)",
             stats
         });
 
@@ -316,172 +296,48 @@ const importOrders = async (req, res) => {
     }
 };
 
-// GET /api/etsy-orders
-// Query:
-//  page, limit, sortBy, sortOrder
-//  q, sellerId, sellerCode, status, hasShipped, dateFrom, dateTo, dateField
+/* =======================================================
+   GET LIST
+======================================================= */
+
 const getListOrders = async (req, res) => {
     try {
-        const {
-            page = 1,
-            limit = 20,
+        const { page = 1, limit = 20, shopId, status, q } = req.query;
 
-            sortBy = 'saleDate',     // saleDate | paidAt | shippedAt | createdAt | updatedAt
-            sortOrder = 'desc',      // asc | desc
-
-            q,
-            sellerId,
-            sellerCode,
-            status,
-            hasShipped,              // "true" | "false"
-            dateFrom,
-            dateTo,
-            dateField = 'saleDate',  // saleDate | paidAt | shippedAt
-        } = req.query;
-
-        const pageNum = Math.max(1, parseInt(page, 10) || 1);
-        const limitNum = Math.min(200, Math.max(1, parseInt(limit, 10) || 20));
-        const skip = (pageNum - 1) * limitNum;
-
-        const orderDir = String(sortOrder).toLowerCase() === 'asc' ? 1 : -1;
-        const safeSortFields = new Set(['saleDate', 'paidAt', 'shippedAt', 'createdAt', 'updatedAt']);
-        const finalSortBy = safeSortFields.has(sortBy) ? sortBy : 'saleDate';
-
-        const sort = { [finalSortBy]: orderDir };
-
-        // ---------------- filter ----------------
         const filter = {};
+        if (shopId && mongoose.Types.ObjectId.isValid(shopId))
+            filter.shopId = shopId;
+        if (status) filter.status = status;
 
-        if (sellerId) filter['seller.sellerId'] = sellerId;
-        if (sellerCode) filter['seller.sellerCode'] = sellerCode;
-
-        if (status !== undefined && status !== null && String(status).trim() !== '') {
-            filter.status = String(status).trim();
-        }
-
-        if (hasShipped === 'true') filter.shippedAt = { $ne: null };
-        if (hasShipped === 'false') filter.shippedAt = null;
-
-        if (dateFrom || dateTo) {
-            const from = dateFrom ? new Date(dateFrom) : null;
-            const to = dateTo ? new Date(dateTo) : null;
-
-            const field = (dateField === 'paidAt')
-                ? 'paidAt'
-                : (dateField === 'shippedAt' ? 'shippedAt' : 'saleDate');
-
-            filter[field] = {};
-            if (from && !Number.isNaN(from.getTime())) filter[field].$gte = from;
-            if (to && !Number.isNaN(to.getTime())) filter[field].$lte = to;
-
-            if (Object.keys(filter[field]).length === 0) delete filter[field];
-        }
-
-        // keyword search (orderId, buyer, shipping, coupon, items...)
-        if (q && String(q).trim()) {
-            const keyword = String(q).trim();
-            const escaped = keyword.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-            const regex = new RegExp(escaped, 'i');
-
+        if (q) {
+            const regex = new RegExp(q, "i");
             filter.$or = [
                 { orderId: regex },
-
-                // buyer
-                { 'buyer.userId': regex },
-                { 'buyer.fullName': regex },
-                { 'buyer.firstName': regex },
-                { 'buyer.lastName': regex },
-                { 'buyer.display': regex },
-
-                // seller code (sellerId search handled separately)
-                { 'seller.sellerCode': regex },
-
-                // coupon
-                { 'coupon.code': regex },
-                { 'coupon.details': regex },
-
-                // shipping
-                { 'shipping.name': regex },
-                { 'shipping.address1': regex },
-                { 'shipping.address2': regex },
-                { 'shipping.city': regex },
-                { 'shipping.state': regex },
-                { 'shipping.zipcode': regex },
-                { 'shipping.country': regex },
-
-                // items
-                { 'items.transactionId': regex },
-                { 'items.listingId': regex },
-                { 'items.sku': regex },
-                { 'items.itemName': regex },
-
-                // classification
-                { orderType: regex },
-                { listingsType: regex },
-                { paymentType: regex },
-                { paymentMethod: regex },
-                { currency: regex },
-                { status: regex },
+                { "buyer.fullName": regex },
+                { "items.sku": regex },
             ];
         }
 
-        // ---------------- projection ----------------
-        // List view: trả đủ field theo schema, items có thể slice để nhẹ
-        const projection = {
-            orderId: 1,
-
-            saleDate: 1,
-            paidAt: 1,
-            shippedAt: 1,
-
-            status: 1,
-
-            orderType: 1,
-            listingsType: 1,
-            paymentType: 1,
-            paymentMethod: 1,
-            currency: 1,
-
-            buyer: 1,
-            seller: 1,
-
-            coupon: 1,
-            shipping: 1,
-            totals: 1,
-
-            numberOfItems: 1,
-
-            // nếu list dài, nên chỉ preview 3-5 items
-            items: { $slice: 5 },
-
-            createdAt: 1,
-            updatedAt: 1,
-        };
-
-        const query = EtsyOrder.find(filter, projection)
-            .sort(sort)
-            .skip(skip)
-            .limit(limitNum)
-            .populate({
-                path: 'seller.sellerId',
-                select: 'full_name email employee_id team_id role_id', // theo user doc bạn gửi
-                options: { lean: true },
-            })
-            .lean();
+        const pageNum = Math.max(1, parseInt(page));
+        const limitNum = Math.min(200, parseInt(limit));
+        const skip = (pageNum - 1) * limitNum;
 
         const [total, data] = await Promise.all([
             EtsyOrder.countDocuments(filter),
-            query,
+            EtsyOrder.find(filter)
+                .populate("shopId", "name store merchant")
+                .populate("seller.sellerId", "full_name email employee_id")
+                .sort({ saleDate: -1 })
+                .skip(skip)
+                .limit(limitNum)
+                .lean(),
         ]);
-
-        const pages = Math.ceil(total / limitNum);
 
         return res.json({
             page: pageNum,
             limit: limitNum,
             total,
-            pages,
-            itemsCount: data.length,
+            pages: Math.ceil(total / limitNum),
             data,
         });
     } catch (error) {
@@ -489,10 +345,7 @@ const getListOrders = async (req, res) => {
     }
 };
 
-
-
-
 module.exports = {
     importOrders,
-    getListOrders
+    getListOrders,
 };
