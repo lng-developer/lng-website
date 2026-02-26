@@ -4198,6 +4198,71 @@ const updateScaleOrder = async (req, res) => {
   res.json(user);
 };
 
+
+/**
+ * POST /update-tracking
+ * Body: { orderId: string, tracking: string }
+ * Tìm order theo orderId → duyệt tất cả items → cập nhật tracking_info.tracking
+ * Nếu tracking có giá trị → tự động set status = "Shipped"
+ */
+const updateTrackingByOrderId = async (req, res) => {
+  try {
+    const { orderId, tracking } = req.body;
+
+    if (!orderId) {
+      return res.status(400).json({ message: "orderId is required" });
+    }
+    if (tracking === undefined || tracking === null) {
+      return res.status(400).json({ message: "tracking is required" });
+    }
+
+    const tTracking = String(tracking).trim();
+
+    // Nếu có tracking → auto set status Shipped
+    const nextItemStatus = tTracking.length > 0 ? "Shipped" : undefined;
+
+    const $set = {
+      "items.$[].tracking_info.tracking": tTracking,
+      "items.$[].tracking_info.updated_at": new Date(),
+    };
+
+    if (nextItemStatus) {
+      $set["items.$[].tracking_info.status"] = nextItemStatus;
+    }
+
+    const order = await OrderCustomProduct.findOneAndUpdate(
+      { orderId },
+      { $set },
+      { new: true }
+    );
+
+    if (!order) {
+      return res.status(404).json({ message: "Order not found" });
+    }
+
+    // Sync order-level status
+    const newOrderStatus = computeOrderStatusFromItems(order.items);
+    if (newOrderStatus !== order.status) {
+      await OrderCustomProduct.updateOne(
+        { _id: order._id },
+        { $set: { status: newOrderStatus } }
+      );
+      order.status = newOrderStatus;
+    }
+
+    return res.json({
+      message: "Tracking updated for all items",
+      orderId: order.orderId,
+      orderStatus: order.status,
+      tracking: tTracking,
+      itemsUpdated: order.items.length,
+    });
+  } catch (err) {
+    console.error("updateTrackingByOrderId error:", err);
+    return res.status(500).json({ message: "Update failed", error: err.message });
+  }
+};
+
 module.exports = {
   // getAllOrders,
   getOrderById,
@@ -4219,4 +4284,5 @@ module.exports = {
   updateScaleOrder,
   validateAddressByOrderId,
   validateInvalidAddressesBatch,
+  updateTrackingByOrderId,
 };

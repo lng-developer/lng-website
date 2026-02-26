@@ -77,4 +77,6 @@ router.post("/:orderId/validate-address", controller.validateAddressByOrderId);
 router.post("/orders/address/validate-invalid", controller.validateInvalidAddressesBatch);
 
 
+router.post("/update-tracking", controller.updateTrackingByOrderId);
+
 module.exports = router;
