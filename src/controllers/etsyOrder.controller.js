@@ -416,7 +416,7 @@ const getListOrders = async (req, res) => {
         const sortField = allowedSortFields.includes(sortBy) ? sortBy : "saleDate";
         const sortDir = sortOrder === "asc" ? 1 : -1;
 
-        const [total, data] = await Promise.all([
+        const [total, rawData] = await Promise.all([
             EtsyOrder.countDocuments(filter),
             EtsyOrder.find(filter)
                 .populate("shopId", "name store merchant")
@@ -427,12 +427,107 @@ const getListOrders = async (req, res) => {
                 .lean(),
         ]);
 
+        // ===== Collect vendorProductIds for cost_center =====
+        const vpIdSet = new Set();
+        for (const order of rawData) {
+            for (const item of (order.items || [])) {
+                if (item.cost_breakdown?.vendorProductId) {
+                    vpIdSet.add(item.cost_breakdown.vendorProductId);
+                }
+            }
+        }
+
+        // Batch lookup VendorProduct + Vendor
+        const vpMap = new Map(); // vendorProductId -> { vendorProductDisplayName, ... }
+        if (vpIdSet.size > 0) {
+            const VendorProduct = db.vendorProduct;
+            const Vendor = db.vendor;
+            const vpDocs = await VendorProduct.find({ _id: { $in: [...vpIdSet] } }).lean();
+            const vendorIds = [...new Set(vpDocs.map(vp => String(vp.vendor_id)))];
+            const vendorDocs = await Vendor.find({ _id: { $in: vendorIds } }).lean();
+            const vendorMap = new Map(vendorDocs.map(v => [String(v._id), v.name]));
+
+            for (const vp of vpDocs) {
+                const vendorName = vendorMap.get(String(vp.vendor_id)) || "Unknown";
+                vpMap.set(String(vp._id), {
+                    vendorProductId: String(vp._id),
+                    vendorProductDisplayName: `${vendorName} - ${vp.product_name || ""}`,
+                });
+            }
+        }
+
+        // ===== Transform data =====
+        const data = rawData.map((order) => {
+            const shop = order.shopId || {};
+            const sellerPopulated = order.seller?.sellerId || null;
+
+            return {
+                orderId: order.orderId,
+                customer_infor: {
+                    name: order.buyer?.fullName || order.shipping?.name || "",
+                    address: order.shipping?.address1 || "",
+                    address_2: order.shipping?.address2 || "",
+                    city: order.shipping?.city || "",
+                    state: order.shipping?.state || "",
+                    zip_code: order.shipping?.zipcode || "",
+                    country: order.shipping?.country || "",
+                },
+                status: order.status || "New",
+                purchase_date: order.saleDate || null,
+                createdAt: order.createdAt || null,
+                shopName: shop.name || "",
+                shipping_type: order.shipping_type || "Standard",
+                items: (order.items || []).map((item) => {
+                    // Build cost_center
+                    let cost_center = null;
+                    if (item.cost_breakdown?.vendorProductId) {
+                        const vpInfo = vpMap.get(String(item.cost_breakdown.vendorProductId));
+                        cost_center = {
+                            vendorProductId: item.cost_breakdown.vendorProductId,
+                            vendorProductDisplayName: vpInfo?.vendorProductDisplayName || "",
+                            sizeValue: item.cost_breakdown.sizeValue || null,
+                            colorValue: item.cost_breakdown.colorValue || null,
+                        };
+                    }
+
+                    // Build version3Data from variations
+                    let version3Data = null;
+                    if (item.variations && typeof item.variations === "object") {
+                        version3Data = Object.entries(item.variations).map(([label, value]) => ({
+                            label,
+                            value: value || "",
+                        }));
+                    }
+
+                    return {
+                        orderItemId: item.transactionId || "",
+                        sku: item.sku || "",
+                        title: item.itemName || "",
+                        quantity: item.quantity || 1,
+                        version3Data,
+                        baseImageUrl: item.baseImage?.imageUrl || "",
+                        listingId: item.listingId || null,
+                        cost_center,
+                        tracking_info: item.tracking_info || {},
+                        scale_status: item.scale_status || null,
+                    };
+                }),
+                base_cost: order.base_cost || 0,
+                address_validation: order.address_validation?.isValid ?? null,
+                seller: sellerPopulated ? {
+                    _id: sellerPopulated._id,
+                    full_name: sellerPopulated.full_name,
+                    email: sellerPopulated.email,
+                } : null,
+                numberOfItems: order.numberOfItems || 0,
+            };
+        });
+
         return res.json({
-            page: pageNum,
-            limit: limitNum,
-            total,
-            pages: Math.ceil(total / limitNum),
             data,
+            totalCount: total,
+            totalPages: Math.ceil(total / limitNum),
+            currentPage: pageNum,
         });
     } catch (error) {
         return res.status(500).json({ error: error.message });
