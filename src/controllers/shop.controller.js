@@ -4,7 +4,10 @@ const User = db.user;
 const RealtimeLog = db.RealtimeLog;
 
 const getAllShops = async (req, res) => {
-  const shops = await Shop.find().populate("userIds");
+  const { merchant } = req.query;
+  const filter = {};
+  if (merchant) filter.merchant = new RegExp(merchant, "i");
+  const shops = await Shop.find(filter).populate("userIds");
   res.json(shops);
 };
 
@@ -160,7 +163,7 @@ const connectExtension = async (req, res) => {
         label: label || null,
         meta: { shopId, version: version || "" },
       });
-    } catch (_) {}
+    } catch (_) { }
 
     return res.json({ ok: true });
   } catch (e) {
