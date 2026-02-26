@@ -14,6 +14,7 @@ const EtsyOrderItemEmbeddedSchema = new Schema(
 
         variationsRaw: { type: String },
         variations: { type: Schema.Types.Mixed, default: {} },
+        cost_breakdown: { type: Schema.Types.Mixed, default: null },
     },
     { _id: false }
 );
@@ -57,7 +58,6 @@ const EtsyOrderSchema = new Schema(
             sellerCode: { type: String, index: true }, // ví dụ: J2512
         },
 
-
         coupon: {
             code: { type: String },
             details: { type: String },
@@ -71,6 +71,13 @@ const EtsyOrderSchema = new Schema(
             state: { type: String },
             zipcode: { type: String },
             country: { type: String },
+        },
+
+        // Shipping type (không có sẵn trong CSV Etsy mặc định, nhưng cần cho tính cost nếu bạn map)
+        shipping_type: {
+            type: String,
+            enum: ["SecondDay", "Ground", "Overnight", "Economy", "Standard", "Expedited"],
+            default: "Standard",
         },
 
         totals: {
@@ -97,6 +104,10 @@ const EtsyOrderSchema = new Schema(
             inPersonDiscount: { type: Number },
             vatPaidByBuyer: { type: Number },
         },
+
+        base_cost: { type: Number, default: 0 },
+        base_cost_computed_at: { type: Date, default: null },
+        base_cost_shipping_groups: { type: Schema.Types.Mixed, default: [] },
 
         numberOfItems: { type: Number, default: 0 },
 

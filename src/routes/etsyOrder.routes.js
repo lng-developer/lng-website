@@ -20,6 +20,8 @@ const storage = multer.diskStorage({
 const upload = multer({ storage });
 
 router.post('/import', upload.array('files', 2), etsyOrderController.importOrders);
+router.get('/statistic', etsyOrderController.getEtsyOrderStatistics);
 router.get('/', etsyOrderController.getListOrders);
+router.post('/compute-base-cost', etsyOrderController.computeBaseCostForEtsyOrder);
 
 module.exports = router;
