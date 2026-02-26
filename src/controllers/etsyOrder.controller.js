@@ -224,6 +224,7 @@ const importOrders = async (req, res) => {
             if (type === "items") {
 
                 const affectedOrders = new Set();
+                let computedCount = 0;
 
                 for (const row of rows) {
 
@@ -280,7 +281,19 @@ const importOrders = async (req, res) => {
 
                     const order = await EtsyOrder.findOne({ orderId: oid, shopId });
                     await validateAddressIfNeeded(order);
+
+                    try {
+                        // Tự động tính toán cost breakdown sau khi import
+                        if (order && Array.isArray(order.items) && order.items.length > 0) {
+                            await calculateEtsyCost(order);
+                            computedCount++;
+                        }
+                    } catch (err) {
+                        console.error(`Auto-compute cost failed for Etsy order ${oid}:`, err.message);
+                    }
                 }
+
+                stats.ordersCostComputed = computedCount;
             }
 
             fs.unlink(file.path, () => { });
@@ -302,32 +315,107 @@ const importOrders = async (req, res) => {
 
 const getListOrders = async (req, res) => {
     try {
-        const { page = 1, limit = 20, shopId, status, q } = req.query;
+        const {
+            page = 1,
+            limit = 20,
+            shopId,
+            status,
+            q,
+            // Filters mới
+            sellerCode,
+            sellerId,
+            currency,
+            paymentMethod,
+            shipping_type,
+            saleDateFrom,
+            saleDateTo,
+            shippedAtFrom,
+            shippedAtTo,
+            addressValid,         // "true" | "false" | "null"
+            baseCostComputed,     // "true" | "false" — đã tính cost chưa
+            sortBy = "saleDate",  // field to sort
+            sortOrder = "desc",   // "asc" | "desc"
+        } = req.query;
 
         const filter = {};
+
+        // ===== Filters cơ bản =====
         if (shopId && mongoose.Types.ObjectId.isValid(shopId))
             filter.shopId = shopId;
         if (status) filter.status = status;
+        if (currency) filter.currency = currency.toUpperCase();
+        if (paymentMethod) filter.paymentMethod = new RegExp(paymentMethod, "i");
+        if (shipping_type) filter.shipping_type = shipping_type;
 
+        // ===== Seller filter =====
+        if (sellerCode) filter["seller.sellerCode"] = new RegExp(sellerCode, "i");
+        if (sellerId && mongoose.Types.ObjectId.isValid(sellerId))
+            filter["seller.sellerId"] = sellerId;
+
+        // ===== Date range filters =====
+        if (saleDateFrom || saleDateTo) {
+            filter.saleDate = {};
+            if (saleDateFrom) filter.saleDate.$gte = new Date(saleDateFrom);
+            if (saleDateTo) filter.saleDate.$lte = new Date(saleDateTo);
+        }
+        if (shippedAtFrom || shippedAtTo) {
+            filter.shippedAt = {};
+            if (shippedAtFrom) filter.shippedAt.$gte = new Date(shippedAtFrom);
+            if (shippedAtTo) filter.shippedAt.$lte = new Date(shippedAtTo);
+        }
+
+        // ===== Address validation filter =====
+        if (addressValid === "true") filter["address_validation.isValid"] = true;
+        else if (addressValid === "false") filter["address_validation.isValid"] = false;
+        else if (addressValid === "null") filter["address_validation.isValid"] = null;
+
+        // ===== Base cost computed filter =====
+        if (baseCostComputed === "true") {
+            filter.base_cost_computed_at = { $ne: null };
+        } else if (baseCostComputed === "false") {
+            filter.$or = filter.$or || [];
+            filter.base_cost_computed_at = null;
+        }
+
+        // ===== Full-text search =====
         if (q) {
             const regex = new RegExp(q, "i");
-            filter.$or = [
+            const searchOr = [
                 { orderId: regex },
                 { "buyer.fullName": regex },
+                { "buyer.userId": regex },
                 { "items.sku": regex },
+                { "items.itemName": regex },
+                { "items.transactionId": regex },
+                { "seller.sellerCode": regex },
+                { "shipping.city": regex },
+                { "shipping.state": regex },
+                { "shipping.country": regex },
             ];
+            // Merge with existing $or if needed
+            if (filter.$or) {
+                filter.$and = [{ $or: filter.$or }, { $or: searchOr }];
+                delete filter.$or;
+            } else {
+                filter.$or = searchOr;
+            }
         }
 
         const pageNum = Math.max(1, parseInt(page));
         const limitNum = Math.min(200, parseInt(limit));
         const skip = (pageNum - 1) * limitNum;
 
+        // ===== Sort =====
+        const allowedSortFields = ["saleDate", "createdAt", "updatedAt", "base_cost", "numberOfItems", "orderId", "status"];
+        const sortField = allowedSortFields.includes(sortBy) ? sortBy : "saleDate";
+        const sortDir = sortOrder === "asc" ? 1 : -1;
+
         const [total, data] = await Promise.all([
             EtsyOrder.countDocuments(filter),
             EtsyOrder.find(filter)
                 .populate("shopId", "name store merchant")
                 .populate("seller.sellerId", "full_name email employee_id")
-                .sort({ saleDate: -1 })
+                .sort({ [sortField]: sortDir })
                 .skip(skip)
                 .limit(limitNum)
                 .lean(),
@@ -345,7 +433,571 @@ const getListOrders = async (req, res) => {
     }
 };
 
+/* ================== COMPUTE BASE COST LOGIC ================== */
+
+const ConfigCostCenter = db.configCostCenter;
+const VendorCostCenter = db.vendorCostCenter;
+const ConfigOptionMapping = db.configOptionMapping;
+const VendorProduct = db.vendorProduct;
+
+function parseConfigCodeFromSKU(sku = "") {
+    const parts = String(sku).split("-").map((s) => s.trim()).filter(Boolean);
+    return parts.length >= 2 ? parts[1] : "";
+}
+
+function normalize(s) {
+    return String(s || "").trim().toLowerCase().replace(/\s+/g, " ");
+}
+
+function toArray(val) {
+    if (Array.isArray(val)) return val;
+    if (val == null) return [];
+    return [val];
+}
+
+function pickValueByKeys(labelValueMap, keys = []) {
+    for (const k of toArray(keys)) {
+        const v = labelValueMap.get(normalize(k));
+        if (v != null && v !== "") return v;
+    }
+    return "";
+}
+
+function extractLabelValueMapFromEtsyItem(item) {
+    const map = new Map();
+    const vars = item?.variations || {};
+    for (const [label, value] of Object.entries(vars)) {
+        if (!label) continue;
+        const normLabel = normalize(label);
+        map.set(normLabel, String(value || ""));
+        if (normLabel === "style - size" && value) {
+            const lastDash = String(value).lastIndexOf(" - ");
+            if (lastDash > 0) {
+                const stylePart = String(value).substring(0, lastDash).trim();
+                const sizePart = String(value).substring(lastDash + 3).trim();
+                if (!map.has("style")) map.set("style", stylePart);
+                if (!map.has("size")) map.set("size", sizePart);
+                if (!map.has("product type")) map.set("product type", stylePart);
+            }
+        }
+    }
+    return map;
+}
+
+async function selectConfigByProductType(configCode, labelValueMap, mapOptionValueFn = null) {
+    const cfgCandidates = await ConfigCostCenter.find({
+        config_code: configCode,
+        is_deleted: { $in: [false, null] },
+    })
+        .populate("product_for_seller")
+        .lean();
+
+    if (!cfgCandidates.length)
+        return { cfg: null, reason: "No config cost center found by config_code" };
+
+    let mappedProductTypeInfo = null;
+
+    for (const c of cfgCandidates) {
+        let typeValRaw = pickValueByKeys(labelValueMap, c.customize_product_type_key || []);
+
+        // Etsy fallback: nếu không tìm thấy key "Select Product Type", thử lấy "product type" 
+        if (!typeValRaw && labelValueMap.has("product type")) {
+            typeValRaw = labelValueMap.get("product type");
+        }
+
+        let typeValToMatch = normalize(typeValRaw);
+
+        // Thử mapping biến thể kiểu product type nếu có mapOptionValueFn
+        if (typeValRaw && mapOptionValueFn && !mappedProductTypeInfo) {
+            mappedProductTypeInfo = await mapOptionValueFn({ configCode, key: "product type", rawValue: typeValRaw });
+        }
+
+        if (mappedProductTypeInfo && mappedProductTypeInfo.value && normalize(mappedProductTypeInfo.value) !== typeValToMatch) {
+            typeValToMatch = normalize(mappedProductTypeInfo.value);
+        }
+
+        const sellerName = normalize(c?.product_for_seller?.name || "");
+        if (typeValToMatch && sellerName && typeValToMatch === sellerName) {
+            return { cfg: c, productTypeValue: typeValRaw, matchedBy: mappedProductTypeInfo?.matchType ? "product_type_mapped" : "product_type_exact" };
+        }
+    }
+
+    if (cfgCandidates.length === 1) {
+        const only = cfgCandidates[0];
+        const typeValRaw = pickValueByKeys(labelValueMap, only.customize_product_type_key || []);
+        return { cfg: only, productTypeValue: typeValRaw, matchedBy: "single_candidate_fallback" };
+    }
+
+    // Fallback: partial match
+    const partialMatches = [];
+    for (const c of cfgCandidates) {
+        const typeValRaw = pickValueByKeys(labelValueMap, c.customize_product_type_key || []);
+        const typeVal = normalize(typeValRaw);
+        const sellerName = normalize(c?.product_for_seller?.name || "");
+        if (typeVal && sellerName && sellerName.includes(typeVal)) {
+            partialMatches.push({ cfg: c, typeValRaw });
+        }
+    }
+
+    if (partialMatches.length === 1) {
+        return {
+            cfg: partialMatches[0].cfg,
+            productTypeValue: partialMatches[0].typeValRaw,
+            matchedBy: "product_type_partial_match",
+        };
+    }
+
+    return { cfg: null, reason: `Multiple configs (${cfgCandidates.length}) - partial matches (${partialMatches.length}); cannot determine by product type key/value` };
+}
+
+async function mapOptionValue({ configCode, key, rawValue }) {
+    let val = String(rawValue ?? "");
+    if (!val) return { value: val, ruleId: null, matchType: null };
+    const rules = await ConfigOptionMapping.find({ config_code: configCode, key, active: { $ne: false } })
+        .sort({ priority: 1, created_at: 1 }).lean();
+    const nl = (x) => normalize(x);
+    const n = (x) => String(x || "").trim();
+    for (const r of rules || []) {
+        const mt = String(r.match_type || "equals").toLowerCase();
+        const flags = r.regex_flags || "i";
+        const cs = !!r.case_sensitive;
+        const mval = String(r.match_value ?? ""); const mapped = String(r.mapped_value ?? "");
+
+        try {
+            if (mt === "equals") { if (cs ? n(val) === n(mval) : nl(val) === nl(mval)) return { value: mapped, ruleId: String(r._id), matchType: mt }; }
+            if (mt === "contains") { if (cs ? n(val).includes(n(mval)) : nl(val).includes(nl(mval))) return { value: mapped, ruleId: String(r._id), matchType: mt }; }
+            if (mt === "regex") { if (new RegExp(mval, flags).test(val)) return { value: mapped, ruleId: String(r._id), matchType: mt }; }
+            if (mt === "regex_replace") { const replaced = val.replace(new RegExp(mval, flags), mapped); if (replaced !== val) return { value: replaced, ruleId: String(r._id), matchType: mt }; }
+        } catch (_e) { }
+    }
+    return { value: val, ruleId: null, matchType: null };
+}
+
+function findBestCostCenter(candidates, sizeValue, colorValue, { strict = true } = {}) {
+    const norm = (s) => String(s || "").toLowerCase().trim();
+    const hit = candidates.find((c) => norm(c.vendor_size) === norm(sizeValue) && norm(c.vendor_color) === norm(colorValue));
+    if (hit) return hit;
+    if (strict) return null;
+    return null;
+}
+
+async function getVendorIdByVendorProductId(vpId) {
+    const vp = await VendorProduct.findById(vpId).select("vendor_id").lean();
+    return vp?.vendor_id ? String(vp.vendor_id) : null;
+}
+
+function choosePreferredVendorIdStable(candidateSetsPerItem, vendorRank) {
+    if (!candidateSetsPerItem.length) return null;
+    let inter = new Set(candidateSetsPerItem[0]);
+    for (let i = 1; i < candidateSetsPerItem.length; i++) {
+        inter = new Set([...inter].filter((v) => candidateSetsPerItem[i].has(v)));
+        if (inter.size === 0) break;
+    }
+    if (!inter.size) return null;
+    let best = null, bestRank = Infinity;
+    for (const vId of inter) {
+        const r = vendorRank.get(String(vId)) ?? 999;
+        if (r < bestRank || (r === bestRank && String(vId) < String(best))) { best = vId; bestRank = r; }
+    }
+    return best;
+}
+
+async function calculateEtsyCost(order) {
+    // ===== QUERY CACHE =====
+    const _cfgCache = new Map(), _optCache = new Map(), _vpIdCache = new Map(), _vccCache = new Map();
+    const cachedMapOption = async (o) => { const k = `${o.configCode}::${o.key}::${o.rawValue}`; if (_optCache.has(k)) return _optCache.get(k); const r = await mapOptionValue(o); _optCache.set(k, r); return r; };
+    const cachedSelectConfig = async (cc, lvm) => { if (_cfgCache.has(cc)) return _cfgCache.get(cc); const r = await selectConfigByProductType(cc, lvm, cachedMapOption); _cfgCache.set(cc, r); return r; };
+    const cachedVendorId = async (vpId) => { const k = String(vpId); if (_vpIdCache.has(k)) return _vpIdCache.get(k); const r = await getVendorIdByVendorProductId(vpId); _vpIdCache.set(k, r); return r; };
+    const cachedVCC = async (vpId) => { const k = String(vpId); if (_vccCache.has(k)) return _vccCache.get(k); const docs = await VendorCostCenter.find({ vendor_product: vpId, status: { $in: ["Active", "active", null] } }).select("vendor_size vendor_color standard_size standard_color base_cost sku international priority additional_costs").lean(); _vccCache.set(k, docs); return docs; };
+
+    // ===== PASS 1: Pre-scan =====
+    const stagedItems = [], preItems = [], candidateSetsPerItem = [];
+
+    for (const item of order.items) {
+        const itemId = item.transactionId;
+        const sku = (item?.sku || "").trim() || null;
+        const configCode = parseConfigCodeFromSKU(sku);
+        if (!configCode) { stagedItems.push({ transactionId: itemId, sku, status: "failed", reason: "Cannot parse config code" }); continue; }
+
+        const labelValueMap = extractLabelValueMapFromEtsyItem(item);
+        const { cfg, productTypeValue, matchedBy, reason: cfgReason } = await cachedSelectConfig(configCode, labelValueMap);
+
+        if (!cfg) { stagedItems.push({ transactionId: itemId, sku, configCode, status: "failed", reason: cfgReason }); continue; }
+
+        const sizeRaw = pickValueByKeys(labelValueMap, cfg.customize_size_key || []);
+        const colorRaw = pickValueByKeys(labelValueMap, cfg.customize_color_key || []);
+        const sizeMap = await cachedMapOption({ configCode, key: "size", rawValue: sizeRaw });
+        const colorMap = await cachedMapOption({ configCode, key: "color", rawValue: colorRaw });
+
+        let pfItems = toArray(cfg?.product_for_seller?.items).filter(Boolean);
+        if (!pfItems.length) { stagedItems.push({ transactionId: itemId, sku, configCode, status: "failed", reason: "No pfItems" }); continue; }
+
+        if (["EBM", "EBMA"].includes(configCode.toUpperCase())) {
+            const activeItems = pfItems.filter((x) => (x?.status || "").toLowerCase() === "active");
+            const fifth = activeItems.find((x) => Number(x.order) === 5);
+            if (fifth) pfItems = [fifth];
+            else { const sorted = [...activeItems].sort((a, b) => Number(a.order) - Number(b.order)); pfItems = sorted.length >= 5 ? [sorted[4]] : pfItems; }
+        }
+
+        preItems.push({ item, itemId, sku, used_sku: sku, configCode, productTypeValue, matchedBy, sizeValue: sizeMap.value, colorValue: colorMap.value, pfItems });
+
+        const vendorSet = new Set();
+        for (const pf of pfItems) {
+            const vpId = pf?.vendor_product; if (!vpId) continue;
+            const candidates = await cachedVCC(vpId);
+            const hit = findBestCostCenter(candidates, sizeMap.value, colorMap.value, { strict: true });
+            if (!hit) continue;
+            const vId = String(pf?.vendor_id || pf?.vendor?._id || (await cachedVendorId(vpId)) || "");
+            if (vId) vendorSet.add(vId);
+        }
+        candidateSetsPerItem.push(vendorSet);
+    }
+
+    let preferredVendorId = null;
+    if (preItems.length >= 2) {
+        const vendorRank = new Map();
+        for (const pre of preItems) { for (const it of toArray(pre.pfItems)) { const vpId = it?.vendor_product; if (!vpId) continue; const vId = String(it?.vendor_id || it?.vendor?._id || (await cachedVendorId(vpId)) || ""); if (!vId) continue; vendorRank.set(vId, Math.min(vendorRank.get(vId) ?? 999, it.order ?? 999)); } }
+        preferredVendorId = choosePreferredVendorIdStable(candidateSetsPerItem, vendorRank) || null;
+    }
+
+    // ===== PASS 2: Detailed calculation =====
+    const groups = new Map();
+    for (const pre of preItems) {
+        const { item, itemId, sku, configCode, productTypeValue, matchedBy, sizeValue, colorValue } = pre;
+        const { pfItems } = pre;
+
+        const vendorSelection = await (async () => {
+            const byOrder = (a, b) => (a.order || 999) - (b.order || 999);
+            const actives = pfItems.filter((it) => String(it.status || "").toLowerCase() === "active").sort(byOrder);
+            let itemsToCheck = actives.length ? actives : [...pfItems].sort(byOrder);
+            const resolved = [];
+            for (const it of itemsToCheck) { const vpId = it?.vendor_product; if (!vpId) continue; const vId = String(it?.vendor_id || it?.vendor?._id || (await cachedVendorId(vpId)) || ""); resolved.push({ ...it, __vendorId: vId, __vendorProductId: vpId }); }
+            const filtered = preferredVendorId ? resolved.filter((x) => x.__vendorId && String(x.__vendorId) === String(preferredVendorId)) : resolved;
+            if (preferredVendorId && filtered.length === 0) return { success: false, reason: `No pfItems under vendor ${preferredVendorId}` };
+            const checkList = filtered.length ? filtered : resolved;
+            for (const cItem of checkList) {
+                const candidates = await cachedVCC(cItem.__vendorProductId); if (!candidates?.length) continue;
+                let hit = findBestCostCenter(candidates, sizeValue, colorValue, { strict: true });
+                if (!hit) hit = findBestCostCenter(candidates, sizeValue, colorValue, { strict: false });
+                if (hit && Number(hit?.base_cost || 0) > 0) return { success: true, vendorProductId: cItem.__vendorProductId, matched: hit, selectedOrder: cItem.order || 999, itemDisplayName: cItem.display_name || "Unknown", vendorId: cItem.__vendorId };
+            }
+            return { success: false, reason: "No matching vendor product" };
+        })();
+
+        if (!vendorSelection.success) { stagedItems.push({ transactionId: itemId, sku, configCode, sizeValue, colorValue, status: "failed", reason: vendorSelection.reason }); continue; }
+
+        const { vendorProductId, matched, selectedOrder, itemDisplayName, vendorId } = vendorSelection;
+        const baseEach = Number(matched?.base_cost || 0);
+        const qty = Math.max(1, Number(item.quantity || 1));
+
+        const rate = await (async () => {
+            const pickFromDoc = (doc, pp) => { if (!doc) return null; const hp = doc.priority && (doc.priority.economy != null || doc.priority.additional != null); const hi = doc.international && (doc.international.economy != null || doc.international.additional != null); if (pp === "priority" && hp) return { eco: Number(doc.priority.economy ?? 0), add: Number(doc.priority.additional ?? 0), profile: "priority" }; if (hi) return { eco: Number(doc.international.economy ?? 0), add: Number(doc.international.additional ?? 0), profile: "international" }; return null; };
+            if (matched?.international && (matched.international.economy != null || matched.international.additional != null))
+                return { eco: Number(matched.international.economy ?? 0), add: Number(matched.international.additional ?? 0), profile: "international" };
+            const allDocs = await cachedVCC(vendorProductId);
+            for (const doc of allDocs) { const p = pickFromDoc(doc, "international"); if (p) return p; }
+            return { eco: 0, add: 0, profile: "international" };
+        })();
+
+        const additionalCosts = { embroidery: 0, two_sided_print: 0, two_position_print: 0 };
+        if (["TSB"].includes(configCode.toUpperCase())) additionalCosts.two_sided_print = Number(matched?.additional_costs?.two_sided_print || 0);
+        if (["TS2S"].includes(configCode.toUpperCase())) additionalCosts.two_position_print = Number(matched?.additional_costs?.two_position_print || 0);
+        if (["EBM", "EBMA"].includes(configCode.toUpperCase())) additionalCosts.embroidery = Number(matched?.additional_costs?.embroidery || 0);
+        const totalAdditionalCost = additionalCosts.embroidery + additionalCosts.two_sided_print + additionalCosts.two_position_print;
+
+        const rec = { transactionId: itemId, sku, used_sku: sku, configCode, productTypeValue: productTypeValue || null, selectedConfigBy: matchedBy || "unknown", sizeValue, colorValue, vendorProductId, vendorId, selectedOrder, itemDisplayName, baseEach, qty, eco: rate.eco, add: rate.add, shipProfile: rate.profile, matchedSku: matched?.sku || null, additionalCosts, totalAdditionalCost, status: "ok" };
+        stagedItems.push(rec);
+        const key = `${vendorId}::profile=${rate.profile}::eco=${rate.eco}::add=${rate.add}`;
+        const g = groups.get(key) || { vendorId, shipProfile: rate.profile, items: [], economyMax: 0 };
+        g.items.push({ ...rec }); g.economyMax = Math.max(g.economyMax, rate.eco); groups.set(key, g);
+    }
+
+    // ===== Tổng hợp =====
+    const perItemResults = [];
+    const groupBreakdowns = [];
+    for (const rec of stagedItems) {
+        if (rec.status !== "ok") { perItemResults.push(rec); continue; }
+        perItemResults.push({
+            transactionId: rec.transactionId, sku: rec.sku, configCode: rec.configCode, sizeValue: rec.sizeValue, colorValue: rec.colorValue, productTypeValue: rec.productTypeValue, selectedConfigBy: rec.selectedConfigBy,
+            vendorProductId: rec.vendorProductId, vendorId: rec.vendorId, matchedSku: rec.matchedSku, selectedOrder: rec.selectedOrder, itemDisplayName: rec.itemDisplayName,
+            base_cost_each: rec.baseEach, quantity: rec.qty,
+            additional_costs_breakdown: rec.additionalCosts, total_additional_cost_per_item: rec.totalAdditionalCost * rec.qty,
+            shipping_international_economy: 0, shipping_international_additional_units: 0, shipping_international_additional_rate: 0,
+            base_cost_total_for_item_including_shipping: rec.baseEach * rec.qty + rec.totalAdditionalCost * rec.qty,
+            status: "ok",
+        });
+    }
+
+    // Phân bổ shipping
+    for (const [, g] of groups.entries()) {
+        const totalQtyProfile = g.items.reduce((s, it) => s + it.qty, 0);
+        if (totalQtyProfile <= 0) continue;
+        const ecoOnce = g.economyMax;
+        let remainEco = 1, remainAdd = Math.max(0, totalQtyProfile - 1);
+        const sorted = [...g.items].sort((a, b) => b.eco - a.eco);
+        for (const it of sorted) {
+            const out = perItemResults.find((r) => r.transactionId === it.transactionId && r.status === "ok"); if (!out) continue;
+            let ecoHere = 0;
+            if (remainEco > 0 && it.qty > 0) { ecoHere = ecoOnce; remainEco = 0; }
+            let addUnits = it.qty - (ecoHere > 0 ? 1 : 0);
+            addUnits = Math.max(0, Math.min(addUnits, remainAdd)); remainAdd -= addUnits;
+            out.shipping_international_economy += ecoHere;
+            out.shipping_international_additional_units += addUnits;
+            out.shipping_international_additional_rate = it.add;
+            out.base_cost_total_for_item_including_shipping = Number((out.base_cost_total_for_item_including_shipping + ecoHere + addUnits * it.add).toFixed(2));
+            out.formula = `(base ${it.baseEach} * qty ${it.qty}) + add_cost ${it.totalAdditionalCost} * qty ${it.qty} + [${g.shipProfile}] eco ${ecoHere} + add ${it.add} * ${addUnits}`;
+        }
+        groupBreakdowns.push({ vendor_id: g.vendorId, total_qty: totalQtyProfile, shipping_profile: g.shipProfile, shipping_economy_once: ecoOnce });
+    }
+
+    let total = 0;
+    for (const r of perItemResults) if (r.status === "ok") total += r.base_cost_total_for_item_including_shipping;
+
+    // ===== LƯU VÀO DATABASE MONGODB BẰNG BULK WRITE - BỎ QUA GỐC MONGOOSE ARRAY MAPPING LỖI =====
+    if (order._id) {
+        const itemBulkOps = [];
+        for (const out of perItemResults) {
+            if (out.status !== "ok") continue;
+
+            itemBulkOps.push({
+                updateOne: {
+                    filter: { _id: order._id, "items.transactionId": out.transactionId },
+                    update: {
+                        $set: {
+                            "items.$.cost_breakdown": {
+                                configCode: out.configCode,
+                                productTypeValue: out.productTypeValue || "Unknown",
+                                selectedConfigBy: out.selectedConfigBy || "Unknown",
+                                sizeValue: out.sizeValue || "",
+                                colorValue: out.colorValue || "",
+                                vendorProductId: out.vendorProductId || "",
+                                matchedSku: out.matchedSku || "",
+                                selectedOrder: out.selectedOrder || 1,
+                                itemDisplayName: out.itemDisplayName || "",
+                                base_cost_each: out.base_cost_each || 0,
+                                quantity: out.quantity || 1,
+                                additional_costs_breakdown: {
+                                    embroidery: out.additional_costs_breakdown?.embroidery || 0,
+                                    two_sided_print: out.additional_costs_breakdown?.two_sided_print || 0,
+                                    two_position_print: out.additional_costs_breakdown?.two_position_print || 0
+                                },
+                                total_additional_cost_per_item: out.total_additional_cost_per_item || 0,
+                                shipping_international_economy: out.shipping_international_economy || 0,
+                                shipping_international_additional_units: out.shipping_international_additional_units || 0,
+                                shipping_international_additional_rate: out.shipping_international_additional_rate || 0,
+                                base_cost_total_for_item_including_shipping: out.base_cost_total_for_item_including_shipping || 0,
+                                formula: out.formula || ""
+                            }
+                        }
+                    }
+                }
+            });
+        }
+
+        if (itemBulkOps.length > 0) {
+            console.log(`[calculateEtsyCost] BulkWrite: ${itemBulkOps.length} ops for order._id=${order._id}`);
+            console.log(`[calculateEtsyCost] Sample filter:`, JSON.stringify(itemBulkOps[0].updateOne.filter));
+            const bulkResult = await EtsyOrder.bulkWrite(itemBulkOps);
+            console.log(`[calculateEtsyCost] BulkWrite result:`, JSON.stringify({
+                matchedCount: bulkResult.matchedCount,
+                modifiedCount: bulkResult.modifiedCount,
+                upsertedCount: bulkResult.upsertedCount
+            }));
+        } else {
+            console.log(`[calculateEtsyCost] NO bulkWrite ops - all items failed calculation`);
+        }
+
+        order.base_cost = Number(total.toFixed(2));
+        order.base_cost_shipping_groups = groupBreakdowns;
+        order.base_cost_computed_at = new Date();
+
+        await EtsyOrder.updateOne(
+            { _id: order._id },
+            {
+                $set: {
+                    base_cost: order.base_cost,
+                    base_cost_shipping_groups: order.base_cost_shipping_groups,
+                    base_cost_computed_at: order.base_cost_computed_at
+                }
+            }
+        );
+    }
+
+    return {
+        preferredVendorId,
+        groupBreakdowns,
+        perItemResults,
+    };
+}
+
+const computeBaseCostForEtsyOrder = async (req, res) => {
+    try {
+        const { orderId, orderData } = req.body;
+        if (!orderId) return res.status(400).json({ message: "Missing orderId" });
+
+        // Sử dụng document gốc để có thể save() đoạn sau
+        let order = await EtsyOrder.findOne({ orderId });
+
+        // Nếu không tìm thấy Order nhưng có truyền JSON data -> Tạo order mới
+        if (!order) {
+            if (!orderData || typeof orderData !== "object") {
+                return res.status(404).json({ message: "Etsy order not found in DB. Provide 'orderData' object to auto-import." });
+            }
+
+            // Gắn cứng orderId từ data truyền vào để tránh lỗi lệch
+            orderData.orderId = orderId;
+
+            // Nếu dữ liệu thiếu shopId thì ta tìm 1 shop đại diện hoặc null (tuỳ schema bắt buộc hay ko)
+            if (!orderData.shopId) {
+                const Shop = db.shop;
+                const defaultShop = await Shop.findOne({ status: "active" }).select("_id").lean();
+                if (defaultShop) {
+                    orderData.shopId = defaultShop._id;
+                }
+            }
+
+            // Lưu order mới vào DB
+            order = new EtsyOrder(orderData);
+            await order.save();
+        }
+
+        if (!Array.isArray(order.items) || order.items.length === 0) {
+            return res.status(400).json({ message: "Order has no items" });
+        }
+
+        // Etsy mặc định Standard shipping nếu ko có
+        const shippingTypeForOrder = order.shipping_type || "Standard";
+
+        const calculationData = await calculateEtsyCost(order);
+
+        return res.json({
+            platform: "etsy",
+            orderId,
+            base_cost: order.base_cost,
+            preferred_vendor_id: calculationData.preferredVendorId || null,
+            shipping_group_breakdowns: calculationData.groupBreakdowns,
+            detail: calculationData.perItemResults,
+        });
+
+    } catch (err) {
+        return res.status(500).json({ message: "Compute failed for Etsy Order", error: err.message });
+    }
+}
+/* ================== STATISTICS (GIỐNG AMAZON) ================== */
+
+const getEtsyOrderStatistics = async (req, res) => {
+    try {
+        const {
+            shopId,
+            sellerCode,
+            sellerId,
+            from,
+            to,
+            search,
+            shipping_type,
+        } = req.query;
+
+        // ===== BUILD MATCH =====
+        const match = {};
+
+        if (shopId && mongoose.Types.ObjectId.isValid(shopId)) {
+            match.shopId = new mongoose.Types.ObjectId(shopId);
+        }
+        if (sellerCode) match["seller.sellerCode"] = new RegExp(sellerCode, "i");
+        if (sellerId && mongoose.Types.ObjectId.isValid(sellerId)) {
+            match["seller.sellerId"] = new mongoose.Types.ObjectId(sellerId);
+        }
+        if (shipping_type) match.shipping_type = shipping_type;
+
+        // Date range
+        if (from || to) {
+            match.saleDate = {};
+            if (from) match.saleDate.$gte = new Date(from);
+            if (to) match.saleDate.$lte = new Date(to);
+        }
+
+        // Search
+        if (search) {
+            const regex = new RegExp(search, "i");
+            match.$or = [
+                { orderId: regex },
+                { "buyer.fullName": regex },
+                { "buyer.userId": regex },
+                { "items.sku": regex },
+                { "items.itemName": regex },
+                { "seller.sellerCode": regex },
+            ];
+        }
+
+        // ===== FACET CONDITIONS =====
+        const NO_COST_CENTER = {
+            $and: [
+                {
+                    $or: [
+                        { base_cost: { $exists: false } },
+                        { base_cost: null },
+                        { base_cost: 0 },
+                    ],
+                },
+                { status: { $ne: "Cancelled" } },
+            ],
+        };
+
+        const [stat] = await EtsyOrder.aggregate([
+            { $match: match },
+            {
+                $facet: {
+                    all: [{ $count: "c" }],
+                    new: [
+                        { $match: { $or: [{ status: "New" }, { status: "" }, { status: null }] } },
+                        { $count: "c" },
+                    ],
+                    noCostCenter: [{ $match: NO_COST_CENTER }, { $count: "c" }],
+                    fulfilled: [{ $match: { status: "Fulfilled" } }, { $count: "c" }],
+                    shipped: [{ $match: { status: "Shipped" } }, { $count: "c" }],
+                    cancelled: [{ $match: { status: "Cancelled" } }, { $count: "c" }],
+                    refund: [{ $match: { status: "Refund" } }, { $count: "c" }],
+                    invalidAddress: [
+                        { $match: { "address_validation.isValid": false } },
+                        { $count: "c" },
+                    ],
+                },
+            },
+            {
+                $project: {
+                    all: { $ifNull: [{ $arrayElemAt: ["$all.c", 0] }, 0] },
+                    new: { $ifNull: [{ $arrayElemAt: ["$new.c", 0] }, 0] },
+                    noCostCenter: { $ifNull: [{ $arrayElemAt: ["$noCostCenter.c", 0] }, 0] },
+                    fulfilled: { $ifNull: [{ $arrayElemAt: ["$fulfilled.c", 0] }, 0] },
+                    shipped: { $ifNull: [{ $arrayElemAt: ["$shipped.c", 0] }, 0] },
+                    cancelled: { $ifNull: [{ $arrayElemAt: ["$cancelled.c", 0] }, 0] },
+                    refund: { $ifNull: [{ $arrayElemAt: ["$refund.c", 0] }, 0] },
+                    invalidAddress: { $ifNull: [{ $arrayElemAt: ["$invalidAddress.c", 0] }, 0] },
+                },
+            },
+        ]);
+
+        return res.json(
+            stat || {
+                all: 0,
+                new: 0,
+                noCostCenter: 0,
+                fulfilled: 0,
+                shipped: 0,
+                cancelled: 0,
+                refund: 0,
+                invalidAddress: 0,
+            }
+        );
+    } catch (err) {
+        console.error("❌ getEtsyOrderStatistics error:", err);
+        return res.status(500).json({ message: "Internal Server Error" });
+    }
+};
+
 module.exports = {
     importOrders,
     getListOrders,
+    computeBaseCostForEtsyOrder,
+    getEtsyOrderStatistics,
 };
