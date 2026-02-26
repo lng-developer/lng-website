@@ -53,7 +53,8 @@ const {
   PointsRoutes,
   ShippingBatchRoutes,
   ToDoListRoutes,
-  EtsyOrderRoutes
+  EtsyOrderRoutes,
+  EtsyListingRoutes
 } = require("./src/routes");
 
 app.use("/api/role", roleRoutes);
@@ -85,6 +86,7 @@ app.use("/api/points", PointsRoutes);
 app.use("/api/shipping-batches", ShippingBatchRoutes);
 app.use("/api/to-do", ToDoListRoutes);
 app.use("/api/etsy", EtsyOrderRoutes);
+app.use("/api/etsy-listing", EtsyListingRoutes);
 
 
 // ===== HTTP server
@@ -110,7 +112,7 @@ const io = new Server(httpServer, {
 function shutdown() {
   try {
     io.close();
-  } catch {}
+  } catch { }
   try {
     httpServer.close(() => process.exit(0));
   } catch {

@@ -1,6 +1,7 @@
 const db = require('../models');
 const mongoose = require('mongoose');
 const EtsyOrder = db.EtsyOrder;
+const EtsyListing = require('../models/etsyListing.model');
 const User = db.user;
 const Store = db.shop;
 
@@ -226,6 +227,19 @@ const importOrders = async (req, res) => {
                 const affectedOrders = new Set();
                 let computedCount = 0;
 
+                // 🔥 Batch lookup: lấy tất cả SKU → tìm IMAGE1 từ etsylistings
+                const allSkus = rows
+                    .map(r => r["SKU"])
+                    .filter(Boolean);
+                const uniqueSkus = [...new Set(allSkus)];
+                const listings = await EtsyListing.find({ SKU: { $in: uniqueSkus } }).lean();
+                const skuImageMap = new Map();
+                for (const listing of listings) {
+                    if (listing.SKU && listing.IMAGE1) {
+                        skuImageMap.set(listing.SKU, listing.IMAGE1);
+                    }
+                }
+
                 for (const row of rows) {
 
                     const orderId = row["Order ID"];
@@ -239,16 +253,20 @@ const importOrders = async (req, res) => {
                         { upsert: true }
                     );
 
+                    const itemSku = row["SKU"];
+                    const baseImageUrl = skuImageMap.get(itemSku) || null;
+
                     const itemDoc = {
                         transactionId: row["Transaction ID"],
                         listingId: row["Listing ID"],
-                        sku: row["SKU"],
+                        sku: itemSku,
                         itemName: row["Item Name"],
                         quantity: toInt(row["Quantity"]) ?? 1,
                         unitPrice: toNumber(row["Price"]),
                         itemTotal: toNumber(row["Item Total"]),
                         variationsRaw: row["Variations"],
-                        variations: parseVariations(row["Variations"])
+                        variations: parseVariations(row["Variations"]),
+                        baseImage: baseImageUrl ? { imageUrl: baseImageUrl } : undefined,
                     };
 
                     const updateExisting = await EtsyOrder.updateOne(

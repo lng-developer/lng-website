@@ -15,6 +15,12 @@ const EtsyOrderItemEmbeddedSchema = new Schema(
         variationsRaw: { type: String },
         variations: { type: Schema.Types.Mixed, default: {} },
         cost_breakdown: { type: Schema.Types.Mixed, default: null },
+
+        baseImage: {
+            imageUrl: String,
+            width: Number,
+            height: Number,
+        },
     },
     { _id: false }
 );
@@ -34,7 +40,7 @@ const EtsyOrderSchema = new Schema(
         paidAt: { type: Date, index: true },
         shippedAt: { type: Date, index: true },
 
-        status: { type: String, index: true },
+        status: { type: String, index: true, default: "New" },
 
         // Classification / payment
         orderType: { type: String },
