@@ -336,68 +336,62 @@ const getListOrders = async (req, res) => {
         const {
             page = 1,
             limit = 20,
-            shopId,
+            from,
+            to,
+            search,
+            platform,
+            userNull,
+            noPsd,
+            shippingType,
+            shopName,
+            teamId,
+            openCase,
             status,
-            q,
-            // Filters mới
-            sellerCode,
-            sellerId,
-            currency,
-            paymentMethod,
-            shipping_type,
-            saleDateFrom,
-            saleDateTo,
-            shippedAtFrom,
-            shippedAtTo,
-            addressValid,         // "true" | "false" | "null"
-            baseCostComputed,     // "true" | "false" — đã tính cost chưa
-            sortBy = "saleDate",  // field to sort
-            sortOrder = "desc",   // "asc" | "desc"
+            sortBy = "saleDate",
+            sortOrder = "desc",
         } = req.query;
 
         const filter = {};
 
         // ===== Filters cơ bản =====
-        if (shopId && mongoose.Types.ObjectId.isValid(shopId))
-            filter.shopId = shopId;
         if (status) filter.status = status;
-        if (currency) filter.currency = currency.toUpperCase();
-        if (paymentMethod) filter.paymentMethod = new RegExp(paymentMethod, "i");
-        if (shipping_type) filter.shipping_type = shipping_type;
+        if (shippingType) filter.shipping_type = shippingType;
 
-        // ===== Seller filter =====
-        if (sellerCode) filter["seller.sellerCode"] = new RegExp(sellerCode, "i");
-        if (sellerId && mongoose.Types.ObjectId.isValid(sellerId))
-            filter["seller.sellerId"] = sellerId;
+        // ===== Shop name filter =====
+        if (shopName) {
+            const shops = await Store.find({ name: new RegExp(shopName, "i") }).select("_id").lean();
+            const shopIds = shops.map(s => s._id);
+            filter.shopId = { $in: shopIds };
+        }
 
-        // ===== Date range filters =====
-        if (saleDateFrom || saleDateTo) {
+        // ===== Team filter =====
+        if (teamId) {
+            const teamShops = await Store.find({ team: teamId }).select("_id").lean();
+            const teamShopIds = teamShops.map(s => s._id);
+            if (filter.shopId) {
+                // Intersect with shopName filter nếu có
+                const existing = filter.shopId.$in || [filter.shopId];
+                filter.shopId = { $in: existing.filter(id => teamShopIds.some(tid => tid.equals(id))) };
+            } else {
+                filter.shopId = { $in: teamShopIds };
+            }
+        }
+
+        // ===== User null (orders chưa có seller) =====
+        if (userNull === "true") {
+            filter["seller.sellerId"] = { $in: [null, undefined] };
+        }
+
+        // ===== Date range (saleDate) =====
+        if (from || to) {
             filter.saleDate = {};
-            if (saleDateFrom) filter.saleDate.$gte = new Date(saleDateFrom);
-            if (saleDateTo) filter.saleDate.$lte = new Date(saleDateTo);
-        }
-        if (shippedAtFrom || shippedAtTo) {
-            filter.shippedAt = {};
-            if (shippedAtFrom) filter.shippedAt.$gte = new Date(shippedAtFrom);
-            if (shippedAtTo) filter.shippedAt.$lte = new Date(shippedAtTo);
-        }
-
-        // ===== Address validation filter =====
-        if (addressValid === "true") filter["address_validation.isValid"] = true;
-        else if (addressValid === "false") filter["address_validation.isValid"] = false;
-        else if (addressValid === "null") filter["address_validation.isValid"] = null;
-
-        // ===== Base cost computed filter =====
-        if (baseCostComputed === "true") {
-            filter.base_cost_computed_at = { $ne: null };
-        } else if (baseCostComputed === "false") {
-            filter.$or = filter.$or || [];
-            filter.base_cost_computed_at = null;
+            if (from) filter.saleDate.$gte = new Date(from);
+            if (to) filter.saleDate.$lte = new Date(to);
         }
 
         // ===== Full-text search =====
-        if (q) {
-            const regex = new RegExp(q, "i");
+        if (search) {
+            const regex = new RegExp(search, "i");
             const searchOr = [
                 { orderId: regex },
                 { "buyer.fullName": regex },
@@ -410,13 +404,7 @@ const getListOrders = async (req, res) => {
                 { "shipping.state": regex },
                 { "shipping.country": regex },
             ];
-            // Merge with existing $or if needed
-            if (filter.$or) {
-                filter.$and = [{ $or: filter.$or }, { $or: searchOr }];
-                delete filter.$or;
-            } else {
-                filter.$or = searchOr;
-            }
+            filter.$or = searchOr;
         }
 
         const pageNum = Math.max(1, parseInt(page));
