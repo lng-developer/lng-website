@@ -63,6 +63,57 @@ const detectFileType = (rows) => {
     return "unknown";
 };
 
+async function mapOptionValue({ configCode, key, rawValue }) {
+    let val = String(rawValue ?? "");
+    if (!val) return { value: val, ruleId: null, matchType: null };
+    if (!ConfigOptionMapping)
+        return { value: val, ruleId: null, matchType: null };
+
+    const rules = await ConfigOptionMapping.find({
+        config_code: configCode,
+        key,
+        active: { $ne: false },
+    })
+        .sort({ priority: 1, created_at: 1 })
+        .lean();
+
+    const n = (x) => String(x || "").trim();
+    const nl = (x) => normalize(x);
+
+    for (const r of rules || []) {
+        const mt = String(r.match_type || "equals").toLowerCase();
+        const flags = r.regex_flags || "i";
+        const cs = !!r.case_sensitive;
+        const mval = String(r.match_value ?? "");
+        const mapped = String(r.mapped_value ?? "");
+
+        try {
+            if (mt === "equals") {
+                const ok = cs ? n(val) === n(mval) : nl(val) === nl(mval);
+                if (ok) return { value: mapped, ruleId: String(r._id), matchType: mt };
+            }
+            if (mt === "contains") {
+                const ok = cs ? n(val).includes(n(mval)) : nl(val).includes(nl(mval));
+                if (ok) return { value: mapped, ruleId: String(r._id), matchType: mt };
+            }
+            if (mt === "regex") {
+                const re = new RegExp(mval, flags);
+                if (re.test(val))
+                    return { value: mapped, ruleId: String(r._id), matchType: mt };
+            }
+            if (mt === "regex_replace") {
+                const re = new RegExp(mval, flags);
+                const replaced = val.replace(re, mapped);
+                if (replaced !== val)
+                    return { value: replaced, ruleId: String(r._id), matchType: mt };
+            }
+        } catch (_e) {
+            /* ignore */
+        }
+    }
+    return { value: val, ruleId: null, matchType: null };
+}
+
 /* ================== SELLER LOGIC (GIỮ NGUYÊN) ================== */
 
 const getSellerCodeFromSku = (sku) => {
@@ -347,6 +398,7 @@ const getListOrders = async (req, res) => {
             teamId,
             openCase,
             status,
+            isNoCostCenter,
             sortBy = "saleDate",
             sortOrder = "desc",
         } = req.query;
@@ -387,6 +439,21 @@ const getListOrders = async (req, res) => {
             filter.saleDate = {};
             if (from) filter.saleDate.$gte = new Date(from);
             if (to) filter.saleDate.$lte = new Date(to);
+        }
+
+        // ===== isNoCostCenter: đơn chưa có base_cost =====
+        if (isNoCostCenter === "true") {
+            filter.$and = [
+                ...(filter.$and || []),
+                {
+                    $or: [
+                        { base_cost: { $exists: false } },
+                        { base_cost: null },
+                        { base_cost: 0 },
+                    ],
+                },
+                { status: { $ne: "Cancelled" } },
+            ];
         }
 
         // ===== Full-text search =====
@@ -585,7 +652,7 @@ function extractLabelValueMapFromEtsyItem(item) {
     return map;
 }
 
-async function selectConfigByProductType(configCode, labelValueMap, mapOptionValueFn = null) {
+async function selectConfigByProductType(configCode, labelValueMap, mapOptionValue = null) {
     const cfgCandidates = await ConfigCostCenter.find({
         config_code: configCode,
         is_deleted: { $in: [false, null] },
@@ -608,9 +675,9 @@ async function selectConfigByProductType(configCode, labelValueMap, mapOptionVal
 
         let typeValToMatch = normalize(typeValRaw);
 
-        // Thử mapping biến thể kiểu product type nếu có mapOptionValueFn
-        if (typeValRaw && mapOptionValueFn && !mappedProductTypeInfo) {
-            mappedProductTypeInfo = await mapOptionValueFn({ configCode, key: "product type", rawValue: typeValRaw });
+        // Thử mapping biến thể kiểu product type nếu có mapOptionValue
+        if (typeValRaw && mapOptionValue && !mappedProductTypeInfo) {
+            mappedProductTypeInfo = await mapOptionValue({ configCode, key: "product type", rawValue: typeValRaw });
         }
 
         if (mappedProductTypeInfo && mappedProductTypeInfo.value && normalize(mappedProductTypeInfo.value) !== typeValToMatch) {
@@ -711,27 +778,37 @@ async function calculateEtsyCost(order) {
     const cachedVendorId = async (vpId) => { const k = String(vpId); if (_vpIdCache.has(k)) return _vpIdCache.get(k); const r = await getVendorIdByVendorProductId(vpId); _vpIdCache.set(k, r); return r; };
     const cachedVCC = async (vpId) => { const k = String(vpId); if (_vccCache.has(k)) return _vccCache.get(k); const docs = await VendorCostCenter.find({ vendor_product: vpId, status: { $in: ["Active", "active", null] } }).select("vendor_size vendor_color standard_size standard_color base_cost sku international priority additional_costs").lean(); _vccCache.set(k, docs); return docs; };
 
+    // ===== helper: sku audit (giống Amazon version) =====
+    function getSkuForCost(item) {
+        const originalSku = (item?.sku || "").trim() || null;
+        const mappedSku = (item?.mapped_sku || "").trim() || null;
+        const usedSku = mappedSku || originalSku; // ưu tiên mapped_sku
+        return { originalSku, mappedSku, usedSku };
+    }
+
     // ===== PASS 1: Pre-scan =====
     const stagedItems = [], preItems = [], candidateSetsPerItem = [];
 
     for (const item of order.items) {
         const itemId = item.transactionId;
-        const sku = (item?.sku || "").trim() || null;
-        const configCode = parseConfigCodeFromSKU(sku);
-        if (!configCode) { stagedItems.push({ transactionId: itemId, sku, status: "failed", reason: "Cannot parse config code" }); continue; }
+        const { originalSku, mappedSku, usedSku } = getSkuForCost(item);
+
+        const configCode = parseConfigCodeFromSKU(usedSku);
+        if (!configCode) { stagedItems.push({ transactionId: itemId, sku: originalSku, mapped_sku: mappedSku, used_sku: usedSku, status: "failed", reason: "Cannot parse config code" }); continue; }
 
         const labelValueMap = extractLabelValueMapFromEtsyItem(item);
         const { cfg, productTypeValue, matchedBy, reason: cfgReason } = await cachedSelectConfig(configCode, labelValueMap);
 
-        if (!cfg) { stagedItems.push({ transactionId: itemId, sku, configCode, status: "failed", reason: cfgReason }); continue; }
+        if (!cfg) { stagedItems.push({ transactionId: itemId, sku: originalSku, mapped_sku: mappedSku, used_sku: usedSku, configCode, status: "failed", reason: cfgReason }); continue; }
 
         const sizeRaw = pickValueByKeys(labelValueMap, cfg.customize_size_key || []);
         const colorRaw = pickValueByKeys(labelValueMap, cfg.customize_color_key || []);
+        // mapOptionValue: convert size/color raw → vendor-compatible value
         const sizeMap = await cachedMapOption({ configCode, key: "size", rawValue: sizeRaw });
         const colorMap = await cachedMapOption({ configCode, key: "color", rawValue: colorRaw });
 
         let pfItems = toArray(cfg?.product_for_seller?.items).filter(Boolean);
-        if (!pfItems.length) { stagedItems.push({ transactionId: itemId, sku, configCode, status: "failed", reason: "No pfItems" }); continue; }
+        if (!pfItems.length) { stagedItems.push({ transactionId: itemId, sku: originalSku, mapped_sku: mappedSku, used_sku: usedSku, configCode, status: "failed", reason: "No pfItems" }); continue; }
 
         if (["EBM", "EBMA"].includes(configCode.toUpperCase())) {
             const activeItems = pfItems.filter((x) => (x?.status || "").toLowerCase() === "active");
@@ -740,7 +817,7 @@ async function calculateEtsyCost(order) {
             else { const sorted = [...activeItems].sort((a, b) => Number(a.order) - Number(b.order)); pfItems = sorted.length >= 5 ? [sorted[4]] : pfItems; }
         }
 
-        preItems.push({ item, itemId, sku, used_sku: sku, configCode, productTypeValue, matchedBy, sizeValue: sizeMap.value, colorValue: colorMap.value, pfItems });
+        preItems.push({ item, itemId, sku: originalSku, mapped_sku: mappedSku, used_sku: usedSku, configCode, productTypeValue, matchedBy, sizeValue: sizeMap.value, colorValue: colorMap.value, pfItems });
 
         const vendorSet = new Set();
         for (const pf of pfItems) {
@@ -764,7 +841,7 @@ async function calculateEtsyCost(order) {
     // ===== PASS 2: Detailed calculation =====
     const groups = new Map();
     for (const pre of preItems) {
-        const { item, itemId, sku, configCode, productTypeValue, matchedBy, sizeValue, colorValue } = pre;
+        const { item, itemId, sku, mapped_sku, used_sku, configCode, productTypeValue, matchedBy, sizeValue, colorValue } = pre;
         const { pfItems } = pre;
 
         const vendorSelection = await (async () => {
@@ -785,7 +862,7 @@ async function calculateEtsyCost(order) {
             return { success: false, reason: "No matching vendor product" };
         })();
 
-        if (!vendorSelection.success) { stagedItems.push({ transactionId: itemId, sku, configCode, sizeValue, colorValue, status: "failed", reason: vendorSelection.reason }); continue; }
+        if (!vendorSelection.success) { stagedItems.push({ transactionId: itemId, sku, mapped_sku, used_sku, configCode, sizeValue, colorValue, status: "failed", reason: vendorSelection.reason }); continue; }
 
         const { vendorProductId, matched, selectedOrder, itemDisplayName, vendorId } = vendorSelection;
         const baseEach = Number(matched?.base_cost || 0);
