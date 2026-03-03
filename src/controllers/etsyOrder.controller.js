@@ -247,7 +247,6 @@ const importOrders = async (req, res) => {
                                 $set: {
                                     saleDate: toDate(row["Sale Date"]),
                                     shippedAt: toDate(row["Date Shipped"]),
-                                    status: row["Status"],
                                     currency: row["Currency"],
                                     paymentMethod: row["Payment Method"],
 
