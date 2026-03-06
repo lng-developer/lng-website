@@ -46,7 +46,7 @@ const getEtsyReportMatrix = async (req, res) => {
     }
 
     // ===== opCost constants =====
-    const OPCOST_PER_PERSON_PER_DAY = 30;
+    const OPCOST_PER_PERSON_PER_DAY = 0;
     const OP_COST_EXCLUDE_USER_IDS = new Set(["68b93ed3f02eed8dec002ee3"]);
 
     // ===== 1) Prepared date list =====
