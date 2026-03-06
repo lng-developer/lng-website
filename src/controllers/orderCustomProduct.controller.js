@@ -3422,7 +3422,7 @@ const computeBaseCostForOrder = async (req, res) => {
           matched?.additional_costs?.two_sided_print || 0
         );
       }
-      if (["TS2S"].includes(configCode.toUpperCase())) {
+      if (["TS2S", "QZES"].includes(configCode.toUpperCase())) {
         additionalCosts.two_position_print = Number(
           matched?.additional_costs?.two_position_print || 0
         );
