@@ -398,7 +398,15 @@ const getReportMatrix = async (req, res) => {
             sellerName: "$sellerName",
             day: "$day",
           },
-          items: { $sum: 1 },
+          items: {
+            $sum: {
+              $cond: [
+                { $isArray: "$items" },
+                { $size: "$items" },
+                1,
+              ],
+            },
+          },
           revenue: { $sum: { $ifNull: ["$amazon_finance_total.revenue", 0] } },
           fee: { $sum: { $ifNull: ["$amazon_finance_total.fee", 0] } },
           shipping_tax: {
@@ -1406,8 +1414,8 @@ const exportAmazonAdsSpendBySellerExcel = async (req, res) => {
     const fileName = `amazon_ads_spend_${toUTCStartOfDay(fromDate)
       .toISOString()
       .slice(0, 10)}_to_${toUTCStartOfDay(toDate)
-      .toISOString()
-      .slice(0, 10)}.xlsx`;
+        .toISOString()
+        .slice(0, 10)}.xlsx`;
 
     res.setHeader(
       "Content-Type",

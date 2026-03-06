@@ -432,7 +432,7 @@ function buildCompletedShippingFile(completed, options = {}) {
 
     if (tracking.startsWith("YT")) {
       finalCarrierCode = "Yun Express";
-      finalShipMethod = "YunExpress Global Direct Line";
+      finalShipMethod = "YunExpress Global Direct line (standard )-Tracked";
     }
 
 
