@@ -95,6 +95,8 @@ const EtsyOrderSchema = new Schema(
             cardProcessingFees: { type: Number },
             orderNet: { type: Number },
 
+            fee: { type: Number },
+
             adjustedOrderTotal: { type: Number },
             adjustedCardProcessingFees: { type: Number },
             adjustedNet: { type: Number },

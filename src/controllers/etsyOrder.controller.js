@@ -239,31 +239,75 @@ const importOrders = async (req, res) => {
             /* ===== ORDER FILE ===== */
             if (type === "orders") {
                 const bulkOps = rows
-                    .map(row => row["Order ID"] ? ({
-                        updateOne: {
-                            filter: { orderId: row["Order ID"], shopId },
-                            update: {
-                                $setOnInsert: { orderId: row["Order ID"], shopId, items: [] },
-                                $set: {
-                                    saleDate: toDate(row["Sale Date"]),
-                                    shippedAt: toDate(row["Date Shipped"]),
-                                    currency: row["Currency"],
-                                    paymentMethod: row["Payment Method"],
+                    .map(row => {
+                        if (!row["Order ID"]) return null;
 
-                                    "buyer.userId": row["Buyer User ID"],
-                                    "buyer.fullName": row["Full Name"],
+                        const orderValue = toNumber(row["Order Value"]) || 0;
+                        const shipping = toNumber(row["Shipping"]) || 0;
+                        const orderTotal = toNumber(row["Order Total"]) || 0;
+                        const discountAmount = toNumber(row["Discount Amount"]) || 0;
+                        const cardProcessingFees = toNumber(row["Card Processing Fees"]) || 0;
+                        const orderNet = toNumber(row["Order Net"]) || 0;
 
-                                    "shipping.address1": row["Street 1"],
-                                    "shipping.address2": row["Street 2"],
-                                    "shipping.city": row["Ship City"],
-                                    "shipping.state": row["Ship State"],
-                                    "shipping.zipcode": row["Ship Zipcode"],
-                                    "shipping.country": row["Ship Country"],
-                                }
-                            },
-                            upsert: true
+                        let salesTax = toNumber(row["Sales Tax"]) || 0;
+
+                        // Recalculate Sales Tax if 0 (Etsy Marketplace Facilitator Tax scenario)
+                        // Formula: Order Total = Order Value + Shipping + Sales Tax - Discount Amount
+                        if (salesTax === 0 && orderTotal > 0) {
+                            const computedTax = orderTotal - (orderValue + shipping - discountAmount);
+                            if (computedTax > 0) {
+                                salesTax = Number(computedTax.toFixed(2));
+                            }
                         }
-                    }) : null)
+
+                        // Tính FEE theo công thức đặc thù VN:
+                        // 1. 6.5% of ordertotal (excluding tax)
+                        // 2. 4.5% of ordertotal + 11500vnd (quy đổi USD)
+                        // 3. 1.24% of ordertotal (excluding tax)
+                        const orderTotalExcludingTax = orderTotal - salesTax;
+                        const exchangeRate = 26000; // Tỷ giá giả định 26,000 VND = 1 USD
+                        const fixedFeeUsd = 11500 / exchangeRate;
+
+                        const calculatedFee =
+                            (0.065 * orderTotalExcludingTax) +
+                            (0.045 * orderTotal + fixedFeeUsd) +
+                            (0.0124 * orderTotalExcludingTax);
+
+                        return {
+                            updateOne: {
+                                filter: { orderId: row["Order ID"], shopId },
+                                update: {
+                                    $setOnInsert: { orderId: row["Order ID"], shopId, items: [] },
+                                    $set: {
+                                        saleDate: toDate(row["Sale Date"]),
+                                        shippedAt: toDate(row["Date Shipped"]),
+                                        currency: row["Currency"],
+                                        paymentMethod: row["Payment Method"],
+
+                                        "buyer.userId": row["Buyer User ID"],
+                                        "buyer.fullName": row["Full Name"],
+
+                                        "shipping.address1": row["Street 1"],
+                                        "shipping.address2": row["Street 2"],
+                                        "shipping.city": row["Ship City"],
+                                        "shipping.state": row["Ship State"],
+                                        "shipping.zipcode": row["Ship Zipcode"],
+                                        "shipping.country": row["Ship Country"],
+
+                                        "totals.orderValue": orderValue,
+                                        "totals.shipping": shipping,
+                                        "totals.salesTax": salesTax,
+                                        "totals.orderTotal": orderTotal,
+                                        "totals.fee": Number(calculatedFee.toFixed(2)),
+                                        "totals.cardProcessingFees": cardProcessingFees,
+                                        "totals.orderNet": orderNet,
+                                        "totals.discountAmount": discountAmount
+                                    }
+                                },
+                                upsert: true
+                            }
+                        };
+                    })
                     .filter(Boolean);
 
                 if (bulkOps.length) {

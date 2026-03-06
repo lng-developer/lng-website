@@ -15,6 +15,15 @@ router.get(
   authorizeRoles("Admin", "Seller"),
   reportController.getReportMatrix
 );
+
+// ✅ NEW: Etsy Dedicated Report Endpoint
+router.get(
+  "/etsy-matrix",
+  authenticateToken,
+  authorizeRoles("Admin", "Seller"),
+  require("../controllers").etsyReportController.getEtsyReportMatrix
+);
+
 router.post(
   "/import-file",
   upload.single("file"),
