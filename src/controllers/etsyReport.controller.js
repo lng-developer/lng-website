@@ -291,6 +291,7 @@ const getEtsyReportMatrix = async (req, res) => {
         baseCost: sum(S.baseCost),
         ads: sum(S.ads),
         fee: sum(S.fee),
+        discount: sum(S.itemPromotionDiscount),
         opCost: sum(S.opCost),
         refund: sum(S.refund),
         profit1: sum(S.profit1),
