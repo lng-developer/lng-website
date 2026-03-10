@@ -1,0 +1,521 @@
+// src/modules/system/services/ext.service.js
+const db = require("../../../models");
+const Shop = db.shop;
+const RealtimeLog = db.RealtimeLog;
+const OrderCustomProduct = db.orderCustomProduct;
+
+const mongoose = require("mongoose");
+const axios = require("axios").default;
+const qs = require("querystring");
+
+const VendorProduct = db.vendorProduct || mongoose.model("VendorProduct");
+const Vendor = db.vendor || mongoose.model("Vendor");
+
+const {
+    NODE_ENV = "development",
+    GRABINK_API_KEY = "",
+    MERCHFOX_TOKENKEY = "",
+    MERCHFOX_SECRET = "",
+    MERCHIZE_ACCESS_TOKEN = "",
+    MANGOTEE_ENDPOINT = "https://v3.mangoteeprints.com/api/public/v1/orders",
+    MANGOTEE_API_KEY = "",
+    PRINTWAY_ENDPOINT = "https://apis.printway.io/v3/order/create-new-order",
+    PRINTWAY_PAID_ENDPOINT = "https://apis.printway.io/v3/order/paid",
+    PRINTWAY_ACCESS_TOKEN = "",
+    VENDOR_SYNC_DEBUG = "0",
+} = process.env;
+
+const DEBUG = VENDOR_SYNC_DEBUG === "1";
+
+const MANGOTEE_BASE_URL = MANGOTEE_ENDPOINT.replace(/\/orders\/?$/, "");
+const PRINTWAY_DETAIL_BASE_URL = PRINTWAY_ENDPOINT.replace(
+    "/create-new-order",
+    "/detail"
+).replace(/\/+$/, "");
+
+const httpBeeful = axios.create({ baseURL: "https://be.grabink.co", timeout: 20000, validateStatus: () => true });
+const httpMerchFox = axios.create({ baseURL: "https://api.mymerchfox.com", timeout: 20000, validateStatus: () => true });
+const httpMerchize = axios.create({
+    baseURL: "https://bo-group-1-2.merchize.com/403c7ev/bo-api",
+    timeout: 20000,
+    headers: { Authorization: `Bearer ${MERCHIZE_ACCESS_TOKEN}`, Accept: "application/json" },
+    validateStatus: () => true,
+});
+const httpPrintway = axios.create({
+    baseURL: PRINTWAY_DETAIL_BASE_URL,
+    timeout: 20000,
+    headers: { "pw-access-token": PRINTWAY_ACCESS_TOKEN, Accept: "application/json", "Content-Type": "application/json" },
+    validateStatus: () => true,
+});
+const httpMangoTee = axios.create({
+    baseURL: MANGOTEE_BASE_URL,
+    timeout: 20000,
+    headers: { "X-API-Key": MANGOTEE_API_KEY, Accept: "application/json" },
+    validateStatus: () => true,
+});
+
+const norm = (s) => String(s || "").trim();
+const lower = (s) => norm(s).toLowerCase();
+
+function isValidTrackingNumber(s) {
+    const t = norm(s);
+    if (!t) return false;
+    if (t === "-" || t === "---") return false;
+    if (/^0+$/.test(t)) return false;
+    if (!/[A-Za-z0-9]/.test(t)) return false;
+    if (t.length < 8) return false;
+    return true;
+}
+
+function normalizeVendorKey(nameOrType) {
+    const s = lower(nameOrType);
+    if (!s) return "";
+    if (s.includes("beeful") || s.includes("grabink")) return "beeful";
+    if (s.includes("merchfox") || s.includes("merch fox")) return "merchfox";
+    if (s.includes("merchize")) return "merchize";
+    if (s.includes("printway") || s.includes("print way") || s === "pw") return "printway";
+    if (s.includes("mangotee") || s.includes("mango tee") || s.includes("mangoteeprints")) return "mangotee";
+    if (["beeful", "merchfox", "merchize", "printway", "mangotee"].includes(s)) return s;
+    return "";
+}
+
+async function buildVendorMapsFromVpidSet(vpidSet) {
+    const vpids = Array.from(vpidSet);
+    if (vpids.length === 0) return new Map();
+    const vps = await VendorProduct.find({ _id: { $in: vpids } }).select({ _id: 1, vendor_id: 1 }).lean();
+    const vendorIds = [...new Set(vps.map((vp) => vp.vendor_id).filter(Boolean))];
+    const vendors = vendorIds.length
+        ? await Vendor.find({ _id: { $in: vendorIds } }).select({ _id: 1, name: 1, fulfillment_type: 1 }).lean()
+        : [];
+    const vendorMap = new Map(vendors.map((v) => [String(v._id), v]));
+    const vpidToVendor = new Map();
+    for (const vp of vps) {
+        const vend = vendorMap.get(String(vp.vendor_id));
+        const vendorKey = normalizeVendorKey(vend?.fulfillment_type) || normalizeVendorKey(vend?.name);
+        vpidToVendor.set(String(vp._id), { vendorKey, vendorName: vend?.name || "" });
+    }
+    return vpidToVendor;
+}
+
+function groupItemsByVendorWithMap(doc, vpidToVendor) {
+    const groups = {};
+    for (let i = 0; i < (doc.items || []).length; i++) {
+        const it = doc.items[i];
+        const vpid = it?.cost_breakdown?.vendorProductId;
+        const info = vpid ? vpidToVendor.get(String(vpid)) : null;
+        const key = info?.vendorKey || "unknown";
+        if (!groups[key]) groups[key] = { itemIndexes: [] };
+        groups[key].itemIndexes.push(i);
+    }
+    return groups;
+}
+
+async function fetchBeeful(orderId) {
+    const url = `/api/external/order/${encodeURIComponent(orderId)}`;
+    const res = await httpBeeful.get(url, { params: { api_key: GRABINK_API_KEY } });
+    if (DEBUG) console.log("[Beeful][HTTP]", res.status, "| keys:", Object.keys(res.data || {}));
+    if (!res.data || typeof res.data !== "object") throw new Error(`Beeful empty (HTTP ${res.status})`);
+    if (res.status >= 400 || res.data?.message === "Not Found" || res.data?.error) {
+        throw new Error(`Beeful error: ${res.data?.message || res.data?.error || res.status}`);
+    }
+    const raw = res.data;
+    const tracking = norm(raw?.tracking?.trackingNumber) || norm(raw?.trackingId) || "";
+    const carrier = norm(raw?.shippingProvider);
+    const shipped = lower(raw?.status) === "shipped" || Boolean(tracking);
+    return { tracking, carrier, shipped, raw };
+}
+
+function parseMerchFoxResp(orderId, res) {
+    const { status } = res;
+    let raw = res.data;
+    if (typeof raw === "string") {
+        try { raw = JSON.parse(raw); } catch (e) {
+            const head = raw.slice(0, 300).replace(/\s+/g, " ");
+            throw new Error(`[MerchFox ${status}] Non-JSON for ${orderId}: ${head}`);
+        }
+    }
+    if (!raw || typeof raw !== "object") throw new Error(`MerchFox bad JSON (HTTP ${status})`);
+    if (status >= 400) throw new Error(`MerchFox HTTP ${status}: ${raw.message || raw.error || "Error"}`);
+    if (raw.code !== 0 || !raw.data) throw new Error(`MerchFox API code=${raw.code}: ${raw.message || "Unknown"}`);
+    return raw.data;
+}
+
+async function fetchMerchFox(orderId) {
+    const url = "/storeapi/v2/order/detail";
+    const res1 = await httpMerchFox.request({
+        method: "get", url,
+        headers: { tokenkey: MERCHFOX_TOKENKEY, secret: MERCHFOX_SECRET, Accept: "application/json", "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8" },
+        data: qs.stringify({ mfid: orderId }),
+        transformResponse: [(d) => d],
+    });
+    if (DEBUG) console.log("[MerchFox][TRY GET+BODY]", res1.status);
+    try {
+        const data = parseMerchFoxResp(orderId, res1);
+        const rawTracking = norm(data?.tracking?.number);
+        const tracking = isValidTrackingNumber(rawTracking) ? rawTracking : "";
+        const carrier = norm(data?.tracking?.carrier);
+        const shipped = Boolean(tracking);
+        return { tracking, carrier, shipped, raw: data };
+    } catch (_) {
+        const res2 = await httpMerchFox.get(url, {
+            headers: { tokenkey: MERCHFOX_TOKENKEY, secret: MERCHFOX_SECRET, Accept: "application/json" },
+            params: { mfid: orderId },
+            transformResponse: [(d) => d],
+        });
+        if (DEBUG) console.log("[MerchFox][TRY GET?mfid=]", res2.status);
+        const data = parseMerchFoxResp(orderId, res2);
+        const rawTracking = norm(data?.tracking?.number);
+        const tracking = isValidTrackingNumber(rawTracking) ? rawTracking : "";
+        const carrier = norm(data?.tracking?.carrier);
+        const shipped = Boolean(tracking);
+        return { tracking, carrier, shipped, raw: data };
+    }
+}
+
+async function fetchMerchize(orderId) {
+    let res = await httpMerchize.get("/order/external/orders/tracking", { params: { external_number: orderId } });
+    if (DEBUG) console.log("[Merchize][HTTP tracking]", res.status, "| keys:", Object.keys(res.data || {}));
+    if (res.status >= 400) throw new Error(`Merchize HTTP ${res.status} (tracking)`);
+    if (res.data?.success === true && Array.isArray(res.data.data) && res.data.data.length > 0) {
+        const obj = res.data.data[0];
+        const tracking = norm(obj?.tracking_number);
+        const carrier = norm(obj?.tracking_company);
+        const shipped = isValidTrackingNumber(tracking);
+        return { tracking, carrier, shipped, raw: obj };
+    }
+    res = await httpMerchize.get("/order/external/orders/order-detail", { params: { external_number: orderId } });
+    if (DEBUG) console.log("[Merchize][HTTP detail]", res.status, "| keys:", Object.keys(res.data || {}));
+    if (res.status >= 400) throw new Error(`Merchize HTTP ${res.status} (detail)`);
+    if (res.data?.success === true && Array.isArray(res.data.data) && res.data.data.length > 0) {
+        const obj = res.data.data[0];
+        const tracking = norm(obj?.tracking_number);
+        const carrier = norm(obj?.tracking_company);
+        const shipped = isValidTrackingNumber(tracking);
+        return { tracking, carrier, shipped, raw: obj };
+    }
+    throw new Error(`Merchize empty for ${orderId}`);
+}
+
+function _pwPickLatest(list) {
+    if (!Array.isArray(list) || list.length === 0) return null;
+    return list.map((t) => ({
+        trackingNumber: (t?.trackingNumber ?? t?.tracking_number ?? "").trim(),
+        trackingUrl: (t?.trackingUrl ?? t?.tracking_url ?? "").trim(),
+        carrierName: (t?.carrierName ?? t?.carrier ?? t?.carrierCode ?? "").trim(),
+        updatedAtMs: new Date(t?.updatedAt ?? t?.updated_at ?? 0).getTime(),
+    })).sort((a, b) => (b.updatedAtMs || 0) - (a.updatedAtMs || 0))[0];
+}
+
+async function fetchPrintway(orderId, doc) {
+    const tries = [{ body: { order_name: orderId } }];
+    const cachedPwid = norm(doc?.printway_submission?.pw_order_id);
+    if (cachedPwid) tries.push({ body: { pw_order_id: cachedPwid } });
+    if (/^PW\d+/i.test(orderId)) tries.push({ body: { pw_order_id: orderId } });
+
+    let lastErr = null;
+    for (const t of tries) {
+        const res = await httpPrintway.request({
+            method: "get", url: "", params: t.body, transformResponse: [(d) => d],
+        });
+        if (DEBUG) console.log("[Printway v3][HTTP]", res.status, "| body:", t.body);
+        if (res.status >= 400) { lastErr = new Error(`Printway v3 HTTP ${res.status}`); continue; }
+        let raw;
+        try { raw = typeof res.data === "string" ? JSON.parse(res.data) : res.data; } catch { lastErr = new Error("Printway v3 non-JSON payload"); continue; }
+        if (!raw || typeof raw !== "object") { lastErr = new Error("Printway v3 empty payload"); continue; }
+
+        let orders = [];
+        if (Array.isArray(raw.data)) orders = raw.data;
+        else if (raw.data && typeof raw.data === "object") orders = [raw.data];
+        else if (Array.isArray(raw)) orders = raw;
+        else orders = [raw];
+        if (!orders.length) { lastErr = new Error("Printway v3 empty data list"); continue; }
+
+        const combined = [];
+        for (const ord of orders) {
+            if (Array.isArray(ord.trackings)) combined.push(...ord.trackings);
+            if (Array.isArray(ord.orderitems)) {
+                for (const it of ord.orderitems) { if (it?.tracking) combined.push(it.tracking); }
+            }
+        }
+        const latest = _pwPickLatest(combined);
+        const firstOrder = orders[0];
+        if (!latest) return { tracking: "", carrier: "", shipped: false, raw: firstOrder };
+        return { tracking: latest.trackingNumber || "", carrier: latest.carrierName || "", shipped: Boolean(latest.trackingNumber || ""), raw: firstOrder };
+    }
+    throw lastErr || new Error("Printway v3 unknown error");
+}
+
+function _mtPickLatestEvent(events) {
+    if (!Array.isArray(events) || events.length === 0) return null;
+    const primary = events.filter((e) => e && e.primary === true);
+    const pool = primary.length ? primary : events;
+    return pool.map((e) => ({
+        trackingNumber: norm(e.tracking_number || e.trackingNumber || ""),
+        carrierName: norm(e.carrier || ""),
+        trackingUrl: norm(e.tracking_url || e.trackingUrl || ""),
+        createdAtMs: new Date(e.created_at || e.updated_at || 0).getTime(),
+    })).sort((a, b) => (b.createdAtMs || 0) - (a.createdAtMs || 0))[0];
+}
+
+async function fetchMangoTee(orderId) {
+    if (!MANGOTEE_API_KEY) throw new Error("MangoTee missing API key");
+    const url = `/orders/${encodeURIComponent(orderId)}`;
+    const res = await httpMangoTee.get(url);
+    if (DEBUG) console.log("[MangoTee][HTTP]", res.status);
+    if (res.status >= 400) throw new Error(`MangoTee HTTP ${res.status}`);
+    const raw = res.data;
+    if (!raw || typeof raw !== "object") throw new Error("MangoTee empty payload");
+    if (raw.status !== true || raw.code !== "SUCCESS" || !raw.data) throw new Error(`MangoTee bad response: code=${raw.code}`);
+
+    const data = raw.data;
+    let tracking = norm(data.tracking_number);
+    if (!isValidTrackingNumber(tracking)) tracking = "";
+    let carrier = "";
+    const ev = _mtPickLatestEvent(data.events || []);
+    if (ev) {
+        if (!tracking && isValidTrackingNumber(ev.trackingNumber)) tracking = ev.trackingNumber;
+        carrier = ev.carrierName || carrier;
+    }
+    const shipped = lower(data.status) === "shipped" || lower(data.production_status) === "fulfilled" || Boolean(tracking);
+    return { tracking, carrier, shipped, raw };
+}
+
+function applyToItemsOfVendor(doc, vendorKey, { tracking, carrier, shipped, raw }) {
+    let changed = 0;
+    doc.items = (doc.items || []).map((it) => {
+        const vpid = it?.cost_breakdown?.vendorProductId;
+        const cached = vpid ? doc.__vpidToVendor?.get(String(vpid)) : null;
+        const thisVendorKey = cached?.vendorKey || "";
+        if (thisVendorKey !== vendorKey) return it.toObject?.() ? it.toObject() : it;
+
+        const ti = it.tracking_info || {};
+        const prevTracking = norm(ti.tracking);
+        const thePrevStatus = norm(ti.status);
+        const nextTI = {
+            ...ti,
+            fulfillment: vendorKey === "beeful" ? "Beeful" : vendorKey === "merchfox" ? "MerchFox" : vendorKey === "merchize" ? "Merchize" : vendorKey === "printway" ? "Printway" : vendorKey === "mangotee" ? "MangoTee" : norm(ti.fulfillment),
+            tracking: tracking || prevTracking,
+            status: shipped ? "Shipped" : thePrevStatus || "New",
+            updated_at: new Date(),
+            note: [norm(ti.note), carrier && `carrier:${carrier}`].filter(Boolean).join(" | "),
+        };
+        if (nextTI.tracking !== prevTracking || nextTI.status !== thePrevStatus || nextTI.fulfillment !== ti.fulfillment || nextTI.note !== ti.note) changed++;
+        return { ...(it.toObject?.() ? it.toObject() : it), tracking_info: nextTI };
+    });
+
+    if (vendorKey === "beeful") doc.beeful_submission = { ...(doc.beeful_submission || {}), attempt_count: (doc.beeful_submission?.attempt_count || 0) + 1, last_response: raw };
+    else if (vendorKey === "merchfox") doc.merchfox_submission = { ...(doc.merchfox_submission || {}), attempt_count: (doc.merchfox_submission?.attempt_count || 0) + 1, last_response: raw, mfid: doc.orderId };
+    else if (vendorKey === "merchize") doc.merchize_submission = { ...(doc.merchize_submission || {}), attempt_count: (doc.merchize_submission?.attempt_count || 0) + 1, last_response: raw };
+    else if (vendorKey === "printway") doc.printway_submission = { ...(doc.printway_submission || {}), attempt_count: (doc.printway_submission?.attempt_count || 0) + 1, last_response: raw, pw_order_id: norm(raw?.order?.pw_order_id), order_name: norm(raw?.order?.order_name) };
+    else if (vendorKey === "mangotee") doc.mangotee_submission = { ...(doc.mangotee_submission || {}), attempt_count: (doc.mangotee_submission?.attempt_count || 0) + 1, last_response: raw, order_id: norm(raw?.data?.order_id), mt_status: norm(raw?.data?.status || raw?.data?.production_status) };
+
+    return changed;
+}
+
+async function updateOrderByVendors(orderId, vpidToVendorPrefetched = null) {
+    const doc = await OrderCustomProduct.findOne({ orderId: orderId.trim() });
+    if (!doc) throw new Error(`Order not found in DB: ${orderId}`);
+    let vpidSet = new Set();
+    for (const it of doc.items || []) {
+        const vpid = it?.cost_breakdown?.vendorProductId;
+        if (vpid) vpidSet.add(String(vpid));
+    }
+    const vpidToVendor = vpidToVendorPrefetched || (await buildVendorMapsFromVpidSet(vpidSet));
+    doc.__vpidToVendor = vpidToVendor;
+
+    const groups = groupItemsByVendorWithMap(doc, vpidToVendor);
+    const vendorKeys = Object.keys(groups).filter((k) => ["beeful", "merchfox", "merchize", "printway", "mangotee"].includes(k));
+    if (vendorKeys.length === 0) throw new Error(`No known vendor mapping from items.cost_breakdown.vendorProductId for ${orderId}`);
+
+    let totalChanged = 0;
+    for (const vk of vendorKeys) {
+        try {
+            let res;
+            if (vk === "beeful") res = await fetchBeeful(orderId);
+            else if (vk === "merchfox") res = await fetchMerchFox(orderId);
+            else if (vk === "merchize") res = await fetchMerchize(orderId);
+            else if (vk === "printway") res = await fetchPrintway(orderId, doc);
+            else if (vk === "mangotee") res = await fetchMangoTee(orderId);
+            else continue;
+            totalChanged += applyToItemsOfVendor(doc, vk, res);
+        } catch (e) {
+            console.error(`[VENDOR FAIL][${vk}] ${orderId}:`, e.message);
+        }
+    }
+
+    const allShipped = (doc.items || []).every((it) => lower(it?.tracking_info?.status) === "shipped");
+    let orderStatusChanged = false;
+    if (allShipped && doc.status !== "Shipped") {
+        doc.status = "Shipped";
+        orderStatusChanged = true;
+    }
+    await doc.save();
+    return { updatedItems: totalChanged, orderStatusChanged };
+}
+
+async function runBatch({ max = 100, dryRun = false } = {}) {
+    const candidates = await OrderCustomProduct.find({
+        status: { $ne: "Shipped" },
+        "items.cost_breakdown.vendorProductId": { $exists: true, $ne: null },
+    }).sort({ createdAt: -1 }).limit(max).lean();
+
+    const vpidSet = new Set();
+    for (const o of candidates) {
+        for (const it of o.items || []) {
+            const vpid = it?.cost_breakdown?.vendorProductId;
+            if (vpid) vpidSet.add(String(vpid));
+        }
+    }
+    const vpidToVendor = await buildVendorMapsFromVpidSet(vpidSet);
+    const knownKeys = new Set(["beeful", "merchfox", "merchize", "printway", "mangotee"]);
+    const filtered = candidates.filter((o) => {
+        const groups = groupItemsByVendorWithMap(o, vpidToVendor);
+        return Object.keys(groups).some((k) => knownKeys.has(k));
+    });
+
+    if (dryRun) {
+        return {
+            ok: true, mode: "dry-run", scanned: filtered.length, orderIds: filtered.map((o) => o.orderId),
+            vendorsPerOrder: filtered.map((o) => {
+                const g = groupItemsByVendorWithMap(o, vpidToVendor);
+                return { orderId: o.orderId, vendorKeys: Object.keys(g).filter((k) => knownKeys.has(k)) };
+            }),
+        };
+    }
+
+    let ok = 0, fail = 0;
+    for (const o of filtered) {
+        try {
+            const r = await updateOrderByVendors(o.orderId, vpidToVendor);
+            if (DEBUG || NODE_ENV !== "test") {
+                console.log(`[OK] ${o.orderId} | itemsChanged=${r.updatedItems} | orderStatusChanged=${r.orderStatusChanged}`);
+            }
+            ok++;
+        } catch (err) {
+            console.error(`[FAIL] ${o.orderId}:`, err.message);
+            fail++;
+        }
+    }
+    return { ok, fail, scanned: filtered.length };
+}
+
+const pullAllOrder = async (io, action, label, type, payload) => {
+    const task = { type: type, payload: payload };
+    io.emit("server:task", task);
+    const recipients = io.of("/").sockets.size || 0;
+
+    await RealtimeLog.create({
+        label: "All Clients",
+        action,
+        level: "info",
+        message: `Start import orders for ${recipients} client...`,
+        ts: new Date(),
+    });
+
+    return recipients;
+};
+
+const requestExtension = async (io, shopId, machineId, action, label, type, payload) => {
+    const task = { type: type, payload: payload };
+    io.to(`machine:${machineId}`).emit("server:task", task);
+
+    let message = "";
+    switch (type) {
+        case "IMPORT_ORDERS": message = "Start import orders ..."; break;
+        case "IMPORT_ADS_SPEND": message = "Start import ads ..."; break;
+        case "IMPORT_FBM_ORDERS": message = "Start import FBM orders ..."; break;
+        default: break;
+    }
+
+    await RealtimeLog.create({
+        shopId, machineId, label, action, level: "info", message: message, ts: new Date(),
+    });
+};
+
+const getClientOnline = async (io, presence, filterShopId, filterMachineId, q) => {
+    if (!io || !presence) return [];
+
+    const now = Date.now();
+    const TTL_MS = Number(process.env.PRESENCE_TTL_MS || 45000);
+    const liveSocketIds = new Set(io.of("/").sockets.keys());
+    const snap = presence.snapshot() || [];
+
+    const latestByMachine = new Map();
+    for (const c of snap) {
+        if (!c?.machineId) continue;
+        if (filterShopId && String(c.shopId) !== String(filterShopId)) continue;
+        if (filterMachineId && String(c.machineId) !== String(filterMachineId)) continue;
+
+        const prev = latestByMachine.get(String(c.machineId));
+        if (!prev || (c.lastSeen || 0) > (prev.lastSeen || 0)) {
+            latestByMachine.set(String(c.machineId), c);
+        }
+    }
+
+    const roomMap = io.of("/").adapter.rooms;
+    const candidates = [];
+    for (const c of latestByMachine.values()) {
+        let sid = c.socketId && liveSocketIds.has(c.socketId) ? c.socketId : null;
+        if (!sid && roomMap) {
+            const room = roomMap.get(`machine:${c.machineId}`);
+            if (room && room.size) {
+                for (const anySid of room) {
+                    if (liveSocketIds.has(anySid)) {
+                        sid = anySid;
+                        break;
+                    }
+                }
+            }
+        }
+        if (!sid) continue;
+        if (q) {
+            const hay = `${c.label || ""} ${c.ua || ""}`.toLowerCase();
+            if (!hay.includes(String(q).toLowerCase())) continue;
+        }
+        candidates.push({ ...c, socketId: sid });
+    }
+
+    if (!candidates.length) return [];
+
+    const uniqueShopIds = [...new Set(candidates.map((c) => String(c.shopId)).filter(Boolean))];
+    const shops = await Shop.find({ _id: { $in: uniqueShopIds } }, { _id: 1, name: 1, store: 1 }).lean();
+    const shopMap = new Map(shops.map((s) => [String(s._id), s]));
+
+    return candidates.map((c) => {
+        const shop = shopMap.get(String(c.shopId));
+        const lastSeenMs = c.lastSeen || now;
+        const staleMs = now - lastSeenMs;
+        const stale = staleMs > TTL_MS;
+
+        return {
+            socketId: c.socketId || null,
+            clientId: c.machineId || null,
+            machineId: c.machineId || null,
+            label: c.label || shop?.name || shop?.store || `Client ${c.machineId}`,
+            version: c.version || "",
+            ua: c.ua || "",
+            ip: c.ip || "",
+            shopId: String(c.shopId || ""),
+            shopName: shop?.name || shop?.store || String(c.shopId || ""),
+            id: `${String(c.shopId)}:${String(c.machineId)}`,
+            connectedAt: lastSeenMs,
+            lastSeen: lastSeenMs,
+            status: stale ? "maybe-online" : "online",
+            statusSummary: {
+                overall: stale ? "warning" : "success",
+                lastTs: lastSeenMs,
+                onlineForSec: 0,
+                idleForSec: Math.max(0, Math.floor(staleMs / 1000)),
+            },
+        };
+    });
+};
+
+module.exports = {
+    updateOrderByVendors,
+    runBatch,
+    pullAllOrder,
+    requestExtension,
+    getClientOnline
+};
+
