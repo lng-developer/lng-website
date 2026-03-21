@@ -430,6 +430,11 @@ function buildCompletedShippingFile(completed, options = {}) {
       finalShipMethod = "Yanwen Air Economy Mail General";
     }
 
+    if (tracking.startsWith("UL")) {
+      finalCarrierCode = "Yanwen";
+      finalShipMethod = "Yanwen Air Economy Mail General";
+    }
+
     if (tracking.startsWith("YT")) {
       finalCarrierCode = "Yun Express";
       finalShipMethod = "YunExpress Global Direct line (standard )-Tracked";
@@ -716,6 +721,11 @@ const downloadAllUpdatedFakeFile = async (req, res, next) => {
       let finalShipMethod = shipMethod;
 
       if (tracking.startsWith("UK")) {
+        finalCarrierCode = "Yanwen";
+        finalShipMethod = "Yanwen Air Economy Mail General";
+      }
+
+      if (tracking.startsWith("UL")) {
         finalCarrierCode = "Yanwen";
         finalShipMethod = "Yanwen Air Economy Mail General";
       }
