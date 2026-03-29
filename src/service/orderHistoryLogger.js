@@ -1,5 +1,9 @@
+<<<<<<< Updated upstream:src/service/orderHistoryLogger.js
 const db = require('../models');
 const OrderHistory = db.OrderHistory
+=======
+const OrderHistory = require("../models/orderHistory.model");
+>>>>>>> Stashed changes:src/modules/order/services/orderHistoryLogger.js
 
 async function logOrderHistory({
   orderDoc,

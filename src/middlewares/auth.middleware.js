@@ -1,8 +1,7 @@
 // middleware/auth.js
 const jwt = require('jsonwebtoken');
 const mongoose = require('mongoose');
-const db = require('../models');
-const User = db.user;
+const User = require('../modules/auth/models/user.model');
 
 const DEBUG_AUTH = process.env.DEBUG_AUTH === '1';
 

@@ -20,4 +20,6 @@ const teamSchema = mongoose.Schema({
   timestamps: true
 });
 
+teamSchema.index({ leaderId: 1 });
+
 module.exports = mongoose.model('Team', teamSchema);

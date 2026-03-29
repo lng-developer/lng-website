@@ -28,4 +28,6 @@ const shopSchema = new mongoose.Schema(
   { timestamps: { createdAt: "created_at", updatedAt: "updated_at" } }
 );
 
+shopSchema.index({ name: 1 }, { unique: true });
+
 module.exports = mongoose.model("Shop", shopSchema);

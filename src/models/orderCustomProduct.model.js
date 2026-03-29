@@ -301,5 +301,9 @@ const orderCustomProductSchema = new mongoose.Schema({
 
 // Tối ưu truy vấn theo orderId + orderItemId
 orderCustomProductSchema.index({ orderId: 1, "items.orderItemId": 1 });
+orderCustomProductSchema.index({ status: 1, shopId: 1, createdAt: -1 });
+orderCustomProductSchema.index({ sellerId: 1, status: 1, createdAt: -1 });
+orderCustomProductSchema.index({ base_cost: 1 });
+orderCustomProductSchema.index({ "items.asin": 1 });
 
 module.exports = mongoose.model("OrderCustomProduct", orderCustomProductSchema);

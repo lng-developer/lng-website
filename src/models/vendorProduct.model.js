@@ -9,4 +9,6 @@ const vendorProductSchema = new mongoose.Schema({
     product_type_design: String
 }, { timestamps: { createdAt: 'created_at', updatedAt: 'updated_at' } });
 
+vendorProductSchema.index({ vendor_id: 1, status: 1 });
+
 module.exports = mongoose.model('VendorProduct', vendorProductSchema);

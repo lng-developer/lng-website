@@ -1,5 +1,9 @@
+<<<<<<< Updated upstream:src/service/psdTask/psdTask.js
 // services/psdTask.service.js
 const PsdTask = require("../../models/psdTask.model");
+=======
+const PsdTask = require("../models/psdTask.model");
+>>>>>>> Stashed changes:src/modules/task/services/psdTask.service.js
 
 async function changeStatus(taskId, toStatus, by, action, note, extra = {}) {
   const task = await PsdTask.findById(taskId);

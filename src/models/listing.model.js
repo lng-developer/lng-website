@@ -53,5 +53,7 @@ const listingSchema = new mongoose.Schema({
     other_config: String,
 }, { timestamps: true });
 
+listingSchema.index({ seller: 1 });
+listingSchema.index({ "psd.status": 1 });
 
 module.exports = mongoose.model('Listing', listingSchema);

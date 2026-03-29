@@ -1,4 +1,5 @@
 const mongoose = require('mongoose');
+<<<<<<< Updated upstream:src/helper/orderHelper.js
 const db = require("../models");
 const OrderCustomProduct = db.orderCustomProduct;
 const VendorProduct = db.vendorProduct;
@@ -6,6 +7,14 @@ const Vendor = db.vendor;
 const Listing = db.listing;
 const Team = db.Team;
 const User = db.user;
+=======
+const OrderCustomProduct = require("../models/order.model");
+const VendorProduct = require("../../vendor/models/vendorProduct.model");
+const Vendor = require("../../vendor/models/vendor.model");
+const Listing = require("../../catalog/models/listing.model");
+const Team = require("../../team/models/team.model");
+const User = require("../../auth/models/user.model");
+>>>>>>> Stashed changes:src/modules/order/helpers/orderHelper.js
 
 function validateIds({ teamId, sellerId, userId }) {
   const result = {

@@ -1,10 +1,13 @@
 // controllers/trello/helpers.js
+<<<<<<< Updated upstream:src/helper/toDoList.helper.js
 const db = require("../models");
+=======
+>>>>>>> Stashed changes:src/modules/system/helpers/toDoList.helper.js
 const mongoose = require("mongoose");
-const Project = db.Project
-const Category = db.Category
-const User = db.user;
-const Role = db.role;
+const Project = require("../../task/models/project.model");
+const Category = require("../../catalog/models/category.model");
+const User = require("../../auth/models/user.model");
+const Role = require("../../auth/models/role.model");
 function toObjectId(id) {
     if (!id) return null;
     if (id instanceof mongoose.Types.ObjectId) return id;

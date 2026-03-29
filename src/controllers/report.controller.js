@@ -1,12 +1,17 @@
+<<<<<<< Updated upstream:src/controllers/report.controller.js
 const db = require("../models");
 const OrderCustomProduct = db.orderCustomProduct;
 const AdsDailySummary = db.Ads;
+=======
+const OrderCustomProduct = require("../../order/models/order.model");
+const AdsDailySummary = require("../models/ads.model");
+>>>>>>> Stashed changes:src/modules/report/services/report.service.js
 const { parse } = require("csv-parse/sync");
 const mongoose = require("mongoose");
 const ExcelJS = require("exceljs");
-const User = db.user;
-const Shop = db.shop;
-const Team = db.Team;
+const User = require("../../auth/models/user.model");
+const Shop = require("../../auth/models/shop.model");
+const Team = require("../../team/models/team.model");
 
 // ép số an toàn
 const num = (v) => {

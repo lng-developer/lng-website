@@ -38,4 +38,6 @@ const vendorCostCenterSchema = new mongoose.Schema({
     status: { type: String, enum: ['Active', 'Inactive'], default: 'Active' }
 }, { timestamps: { createdAt: 'created_at', updatedAt: 'updated_at' } });
 
+vendorCostCenterSchema.index({ vendor_product: 1, status: 1 });
+
 module.exports = mongoose.model('VendorCostCenter', vendorCostCenterSchema);

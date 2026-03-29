@@ -2460,6 +2460,7 @@ const updateBaseImageUrl = async (req, res) => {
   }
 };
 
+<<<<<<< Updated upstream:src/controllers/orderCustomProduct.controller.js
 // ================== BASE COST HELPERS & APIS ==================
 function parseConfigCodeFromSKU(sku = "") {
   const parts = String(sku)
@@ -3023,6 +3024,23 @@ async function getVendorIdByVendorProductId(vendorProductId) {
     .lean();
   return vp?.vendor_id ? String(vp.vendor_id) : null;
 }
+=======
+// ================== BASE COST — SHARED MODULE ==================
+// All cost-engine helpers moved to src/modules/cost-engine/services/costEngine.service.js
+const costEngine = require("../../cost-engine");
+const {
+  parseConfigCodeFromSKU,
+  toArray,
+  pickValueByKeys,
+  extractLabelValueMapFromAmazonItem: extractLabelValueMapFromItem,
+  findBestCostCenter,
+  choosePreferredVendorIdStable,
+  resolveAdditionalCosts,
+  filterEbmPfItems,
+  getSkuForCost,
+  createCacheContext,
+} = costEngine;
+>>>>>>> Stashed changes:src/modules/order/controllers/orderCustomProduct.controller.js
 
 // ================== COMPUTE BASE COST (FULL) ==================
 const computeBaseCostForOrder = async (req, res) => {

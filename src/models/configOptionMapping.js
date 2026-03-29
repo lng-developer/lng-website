@@ -11,4 +11,6 @@ const configOptionMappingSchema = new mongoose.Schema({
   active: { type: Boolean, default: true },
 }, { timestamps: { createdAt: 'created_at', updatedAt: 'updated_at' } });
 
+configOptionMappingSchema.index({ config_code: 1, key: 1, active: 1, priority: 1 });
+
 module.exports = mongoose.model('ConfigOptionMapping', configOptionMappingSchema);
