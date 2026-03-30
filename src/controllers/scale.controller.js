@@ -767,7 +767,7 @@ const retrySendFulfillment = async (req, res) => {
     );
     const providersHint = AVAILABLE_PROVIDERS.length
       ? AVAILABLE_PROVIDERS.join(" | ")
-      : "grabink | merchfox | merchize | printway";
+      : "grabink | merchfox | merchize | printway | mangotee | lng | lenful | ss88";
 
     // 1) Nếu không truyền provider, auto-resolve từ VendorProduct → Vendor
     if (!providerKey) {
