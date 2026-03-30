@@ -82,9 +82,14 @@ const PRINT_POSITION_MAP = {
     mockup_back: 'MOK'
 };
 
-// --- UPDATED: build uploadFiles theo enum SS88 ---
+// --- UPDATED: build uploadFiles theo enum SS88 + luôn kèm mockup từ baseImage.imageUrl ---
 function buildSS88UploadFiles(item = {}) {
     const out = {};
+    const mockupUrl = resolveAssetUrl(
+        item?.baseImage?.imageUrl ||
+        item?.snapshotImage ||
+        item?.image
+    );
 
     // 1. Ưu tiên item.uploadFiles nếu đã có
     if (item?.uploadFiles && typeof item.uploadFiles === 'object') {
@@ -104,6 +109,11 @@ function buildSS88UploadFiles(item = {}) {
             }
         }
 
+        // luôn kèm mockup nếu có
+        if (mockupUrl && !out.MOC) {
+            out.MOC = mockupUrl;
+        }
+
         if (Object.keys(out).length) return out;
     }
 
@@ -111,7 +121,9 @@ function buildSS88UploadFiles(item = {}) {
     const ff = item?.fulfillment_file;
     if (!ff) {
         const svg = resolveAssetUrl(item?.svgFile);
-        return svg ? { FRO: svg } : {};
+        if (svg) out.FRO = svg;
+        if (mockupUrl && !out.MOC) out.MOC = mockupUrl;
+        return out;
     }
 
     const get = (obj, k) => obj?.get ? obj.get(k) : obj?.[k];
@@ -123,11 +135,14 @@ function buildSS88UploadFiles(item = {}) {
 
     if (typeof source === 'string') {
         const url = resolveAssetUrl(source);
-        return url ? { FRO: url } : {};
+        if (url) out.FRO = url;
+        if (mockupUrl && !out.MOC) out.MOC = mockupUrl;
+        return out;
     }
 
     if (typeof source !== 'object' || Array.isArray(source)) {
-        return {};
+        if (mockupUrl) out.MOC = mockupUrl;
+        return out;
     }
 
     const mapping = [
@@ -149,10 +164,15 @@ function buildSS88UploadFiles(item = {}) {
         }
     }
 
-    // fallback cuối
-    if (!Object.keys(out).length) {
+    // fallback cuối cho design
+    if (!out.FRO) {
         const svg = resolveAssetUrl(item?.svgFile);
-        if (svg) out['FRO'] = svg;
+        if (svg) out.FRO = svg;
+    }
+
+    // luôn kèm mockup từ baseImage.imageUrl nếu có
+    if (mockupUrl && !out.MOC) {
+        out.MOC = mockupUrl;
     }
 
     return out;
