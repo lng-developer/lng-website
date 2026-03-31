@@ -6,6 +6,7 @@ const router = express.Router();
 
 // CRUD APIs
 router.get('/', vendorCostCenterController.getAllVendorCostCenters);
+router.get('/manual-search', vendorCostCenterController.manualSearchVendorCosts);
 router.get('/:id', vendorCostCenterController.getVendorCostCenterById);
 router.post('/', vendorCostCenterController.createVendorCostCenter);
 router.put('/:id', vendorCostCenterController.updateVendorCostCenter);

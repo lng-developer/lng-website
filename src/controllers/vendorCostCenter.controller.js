@@ -436,6 +436,76 @@ const bulkUpdateVendorCostCenterFromExcel = async (req, res) => {
     }
 };
 
+/**
+ * GET /api/vendor-cost-centers/manual-search
+ * Tra cứu giá vendor dựa trên tên sản phẩm (fuzzy), size (exact) và color (exact).
+ */
+const manualSearchVendorCosts = async (req, res) => {
+    try {
+        const { product_name, size, color } = req.query;
+
+        const pipeline = [
+            // 1. Join với VendorProduct
+            {
+                $lookup: {
+                    from: 'vendorproducts',
+                    localField: 'vendor_product',
+                    foreignField: '_id',
+                    as: 'product'
+                }
+            },
+            { $unwind: '$product' },
+            // 2. Join với Vendor
+            {
+                $lookup: {
+                    from: 'vendors',
+                    localField: 'product.vendor_id',
+                    foreignField: '_id',
+                    as: 'vendor'
+                }
+            },
+            { $unwind: '$vendor' }
+        ];
+
+        const match = {
+            status: { $in: ['Active', 'active', null] }
+        };
+
+        if (product_name) {
+            match['product.product_name'] = { $regex: product_name, $options: 'i' };
+        }
+        if (size) {
+            match.vendor_size = size; // Khớp chính xác hoàn toàn như yêu cầu
+        }
+        if (color) {
+            match.vendor_color = color; // Khớp chính xác hoàn toàn như yêu cầu
+        }
+
+        pipeline.push({ $match: match });
+
+        pipeline.push({
+            $project: {
+                _id: 1,
+                vendor_product: 1,
+                vendor_size: 1,
+                vendor_color: 1,
+                base_cost: 1,
+                sku: 1,
+                product_name: '$product.product_name',
+                image: '$product.image',
+                vendor_name: '$vendor.name',
+                vendor_id: '$vendor._id'
+            }
+        });
+
+        const results = await VendorCostCenter.aggregate(pipeline);
+        res.json(results);
+    } catch (error) {
+        console.error('❌ manualSearchVendorCosts Error:', error);
+        res.status(500).json({ message: error.message });
+    }
+};
+
 module.exports = {
     getAllVendorCostCenters,
     getVendorCostCenterById,
@@ -445,5 +515,6 @@ module.exports = {
     updateVendorCostCenterStatus,
     getCostCentersByVendorProduct,
     importVendorCostCenterFromExcel,
-    bulkUpdateVendorCostCenterFromExcel
+    bulkUpdateVendorCostCenterFromExcel,
+    manualSearchVendorCosts
 };

@@ -164,6 +164,12 @@ const orderItemSchema = new mongoose.Schema(
       ref: "Listing",
       default: null,
     },
+    // ✅ NEW: Manual Mapping Override (Precise)
+    manual_vendor_cost_center_id: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "VendorCostCenter",
+      default: null,
+    },
   },
   { _id: false }
 );
@@ -297,6 +303,13 @@ const orderCustomProductSchema = new mongoose.Schema({
 
   // Mốc đồng bộ gần nhất để bạn biết lần cuối import là khi nào
   last_amazon_finance_sync_at: { type: Date, default: null },
+
+  // ✅ NEW: Manual Order-level Vendor Override
+  forced_vendor_id: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: "Vendor",
+    default: null,
+  },
 });
 
 // Tối ưu truy vấn theo orderId + orderItemId

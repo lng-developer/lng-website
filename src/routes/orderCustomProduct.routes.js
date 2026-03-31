@@ -26,6 +26,13 @@ router.post(
   controller.computeBaseCostForMany
 );
 
+// Manual Mapping
+router.put(
+  "/manual-mapping",
+  authenticateToken,
+  controller.applyManualVendorMapping
+);
+
 // API xem chi tiết đơn hàng113-2352267-7335428
 router.get("/:id", authenticateToken, controller.getOrderById);
 

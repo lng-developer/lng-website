@@ -3202,6 +3202,33 @@ const computeBaseCostForOrder = async (req, res) => {
         }
       }
 
+      // (NEW) Check manual override first
+      if (item.manual_vendor_cost_center_id) {
+        const vcc = await VendorCostCenter.findById(item.manual_vendor_cost_center_id).lean();
+        if (vcc && Number(vcc.base_cost || 0) > 0) {
+          const vId = await cachedGetVendorId(vcc.vendor_product);
+          preItems.push({
+            item,
+            sku: originalSku,
+            mapped_sku: mappedSku,
+            used_sku: usedSku,
+            configCode,
+            productTypeValue,
+            matchedBy,
+            sizeValue: vcc.vendor_size,
+            colorValue: vcc.vendor_color,
+            manualVcc: vcc,
+            vendorId: vId,
+          });
+          // For manual selection, we "fake" a candidate set containing only this vendor
+          // so that the intersection logic still works (or we can just skip it if forced)
+          candidateSetsPerItem.push(new Set([vId]));
+          continue;
+        } else {
+          console.warn(`Manual VCC ${item.manual_vendor_cost_center_id} not found or has 0 cost. Falling back to auto.`);
+        }
+      }
+
       preItems.push({
         item,
         sku: originalSku,
@@ -3233,11 +3260,12 @@ const computeBaseCostForOrder = async (req, res) => {
 
     // (CODE MỚI) — KHÔNG ÉP vendor nếu đơn chỉ có 1 item.
     // Nếu có từ 2 item trở lên: giao vendor và chọn theo vendor-rank (pfItems.order)
-    let preferredVendorId = null;
-    if (preItems.length >= 2) {
+    let preferredVendorId = order.forced_vendor_id ? String(order.forced_vendor_id) : null;
+    if (!preferredVendorId && preItems.length >= 2) {
       // inline buildVendorRank (cached)
       const vendorRank = new Map();
       for (const pre of preItems) {
+        if (pre.manualVcc) continue; // Bỏ qua item đã được chọn thủ công khi tính rank chung
         for (const it of toArray(pre.pfItems)) {
           const vpId = it?.vendor_product;
           if (!vpId) continue;
@@ -3278,6 +3306,18 @@ const computeBaseCostForOrder = async (req, res) => {
 
       // ===== inline selectBestVendorProduct (cached) =====
       const vendorSelection = await (async () => {
+        // (NEW) Nếu đã có lựa chọn thủ công, trả về luôn
+        if (pre.manualVcc) {
+          return {
+            success: true,
+            vendorProductId: pre.manualVcc.vendor_product,
+            matched: pre.manualVcc,
+            selectedOrder: -1, // Manual
+            itemDisplayName: "Manual Selection",
+            vendorId: pre.vendorId,
+          };
+        }
+
         const byOrder = (a, b) => (a.order || 999) - (b.order || 999);
         const actives = pfItems
           .filter((it) => String(it.status || "").toLowerCase() === "active")
@@ -4263,6 +4303,41 @@ const updateTrackingByOrderId = async (req, res) => {
   }
 };
 
+/**
+ * PUT /api/orders/manual-mapping
+ * Cho phép Seller ép Vendor cho cả đơn hoặc ép một record VendorCostCenter cụ thể cho từng item.
+ */
+const applyManualVendorMapping = async (req, res) => {
+  try {
+    const { orderId, forcedVendorId, items } = req.body;
+    if (!orderId) return res.status(400).json({ message: "orderId is required" });
+
+    const order = await OrderCustomProduct.findOne({ orderId });
+    if (!order) return res.status(404).json({ message: "Order not found" });
+
+    if (forcedVendorId !== undefined) {
+      order.forced_vendor_id = forcedVendorId || null;
+    }
+
+    if (Array.isArray(items)) {
+      for (const override of items) {
+        const item = order.items.find(
+          (i) => String(i.orderItemId) === String(override.orderItemId)
+        );
+        if (item) {
+          item.manual_vendor_cost_center_id = override.vendorCostCenterId || null;
+        }
+      }
+    }
+
+    await order.save();
+    return res.json({ message: "Manual mapping applied successfully", orderId: order.orderId });
+  } catch (err) {
+    console.error("applyManualVendorMapping error:", err);
+    return res.status(500).json({ message: "Update failed", error: err.message });
+  }
+};
+
 module.exports = {
   // getAllOrders,
   getOrderById,
@@ -4285,4 +4360,5 @@ module.exports = {
   validateAddressByOrderId,
   validateInvalidAddressesBatch,
   updateTrackingByOrderId,
+  applyManualVendorMapping,
 };
