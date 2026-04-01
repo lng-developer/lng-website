@@ -611,7 +611,7 @@ const getListVendorProduct = async (req, res) => {
             product_id: item.product_id,
             status: item.status,
             vendor_id: item.vendor ? { _id: item.vendor._id, name: item.vendor.name } : null,
-            display_name: `${item.vendor.name} - ${item.product_name} - ${item.product_id}`
+            display_name: `${item.vendor?.name || 'Unknown Vendor'} - ${item.product_name} - ${item.product_id}`
         });
 
         // Xử lý kết quả trả về: hỗ trợ phân trang nếu có gửi kèm limit, ngược lại trả về list cơ bản bảo toàn tính tương thích cũ
