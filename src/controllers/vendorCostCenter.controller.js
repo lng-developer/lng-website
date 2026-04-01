@@ -164,6 +164,41 @@ const getCostCentersByVendorProduct = async (req, res) => {
 };
 
 // ==============================
+// GET structured sizes, colors, and prices for Frontend Selection UI
+// ==============================
+const getVendorProductVariants = async (req, res) => {
+    try {
+        const { vendorProductId } = req.params;
+
+        const variants = await VendorCostCenter.find({ 
+            vendor_product: vendorProductId, 
+            status: { $in: ['Active', 'active', null] }
+        }).lean();
+
+        // Trích xuất danh sách Size và Color duy nhất không trùng lặp
+        const sizes = [...new Set(variants.map(v => v.vendor_size).filter(Boolean))];
+        const colors = [...new Set(variants.map(v => v.vendor_color).filter(Boolean))];
+
+        // Tạo Dictionary Map cho Base Cost và thông tin theo cấu trúc [Size_Color]
+        // Ví dụ: pricingMap["S_Red"] = { base_cost: 15, sku: "SP1" }
+        const pricingMap = {};
+        variants.forEach(v => {
+            const key = `${v.vendor_size}_${v.vendor_color}`;
+            pricingMap[key] = {
+                base_cost: v.base_cost || 0,
+                sku: v.sku,
+                cost_center_id: v._id
+            };
+        });
+
+        res.json({ sizes, colors, pricingMap });
+    } catch (error) {
+        console.error('❌ getVendorProductVariants Error:', error);
+        res.status(500).json({ message: error.message });
+    }
+};
+
+// ==============================
 // IMPORT (create) from Excel – giữ nguyên như cũ (nếu bạn vẫn cần)
 // ==============================
 const importVendorCostCenterFromExcel = async (req, res) => {
@@ -499,12 +534,101 @@ const manualSearchVendorCosts = async (req, res) => {
         });
 
         const results = await VendorCostCenter.aggregate(pipeline);
-        res.json(results);
+        //count results
+        const count = await VendorCostCenter.countDocuments(match);
+        res.json({ total: count, results });
     } catch (error) {
         console.error('❌ manualSearchVendorCosts Error:', error);
         res.status(500).json({ message: error.message });
     }
 };
+
+const getListVendorProduct = async (req, res) => {
+    try {
+        const { search, vendor_id, limit, page = 1 } = req.query;
+        const mongoose = require('mongoose');
+
+        const pipeline = [];
+
+        // 1. Lọc cơ bản theo trạng thái (và vendor_id nếu có)
+        const matchStage = { status: { $in: ['Active', 'active', null] } };
+        if (vendor_id && mongoose.Types.ObjectId.isValid(vendor_id)) {
+            matchStage.vendor_id = new mongoose.Types.ObjectId(vendor_id);
+        }
+        pipeline.push({ $match: matchStage });
+
+        // 2. Lookup để lấy tên Vendor hỗ trợ tìm kiếm linh hoạt
+        pipeline.push({
+            $lookup: {
+                from: 'vendors',
+                localField: 'vendor_id',
+                foreignField: '_id',
+                as: 'vendor'
+            }
+        });
+        pipeline.push({
+            $unwind: {
+                path: '$vendor',
+                preserveNullAndEmptyArrays: true
+            }
+        });
+
+        // 3. Search Engine linh hoạt (tìm theo tên, mã sản phẩm, hãng)
+        if (search) {
+            const regex = new RegExp(search, 'i');
+            pipeline.push({
+                $match: {
+                    $or: [
+                        { product_name: regex },
+                        { product_id: regex },
+                        { 'vendor.name': regex }
+                    ]
+                }
+            });
+        }
+
+        // 4. Sort mặc định theo tên sản phẩm
+        pipeline.push({ $sort: { product_name: 1 } });
+
+        // 5. Chuẩn bị pipeline phân trang hoặc không phân trang
+        if (limit) {
+            const parsedLimit = parseInt(limit);
+            const skip = (parseInt(page) - 1) * parsedLimit;
+            pipeline.push({
+                $facet: {
+                    metadata: [{ $count: "total" }],
+                    data: [{ $skip: skip }, { $limit: parsedLimit }]
+                }
+            });
+        }
+
+        const aggregateResults = await VendorProduct.aggregate(pipeline);
+
+        // Format lại cho chuẩn xác với `.populate('vendor_id', 'name')`
+        const formatItem = (item) => ({
+            _id: item._id,
+            product_name: item.product_name,
+            product_id: item.product_id,
+            status: item.status,
+            vendor_id: item.vendor ? { _id: item.vendor._id, name: item.vendor.name } : null,
+            display_name: `${item.vendor.name} - ${item.product_name} - ${item.product_id}`
+        });
+
+        // Xử lý kết quả trả về: hỗ trợ phân trang nếu có gửi kèm limit, ngược lại trả về list cơ bản bảo toàn tính tương thích cũ
+        if (limit) {
+            const resultObj = aggregateResults[0];
+            const total = resultObj.metadata[0] ? resultObj.metadata[0].total : 0;
+            const data = resultObj.data.map(formatItem);
+            return res.json({ total, page: parseInt(page), limit: parseInt(limit), data });
+        } else {
+            const data = aggregateResults.map(formatItem);
+            return res.json(data);
+        }
+    } catch (error) {
+        console.error('❌ getListVendorProduct Error:', error);
+        res.status(500).json({ message: error.message });
+    }
+}
 
 module.exports = {
     getAllVendorCostCenters,
@@ -514,7 +638,9 @@ module.exports = {
     deleteVendorCostCenter,
     updateVendorCostCenterStatus,
     getCostCentersByVendorProduct,
+    getVendorProductVariants,
     importVendorCostCenterFromExcel,
     bulkUpdateVendorCostCenterFromExcel,
-    manualSearchVendorCosts
+    manualSearchVendorCosts,
+    getListVendorProduct
 };
