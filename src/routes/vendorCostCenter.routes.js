@@ -15,6 +15,7 @@ router.delete('/:id', vendorCostCenterController.deleteVendorCostCenter);
 router.post('/update-status', vendorCostCenterController.updateVendorCostCenterStatus);
 router.get('/by-product/:vendorProductId', vendorCostCenterController.getCostCentersByVendorProduct);
 router.get('/variants/:vendorProductId', vendorCostCenterController.getVendorProductVariants);
+router.get('/variants/:vendorProductId/lookup', vendorCostCenterController.lookupSpecificVariant);
 router.post('/import', upload.single('file'), vendorCostCenterController.importVendorCostCenterFromExcel);
 router.post('/bulk-update', upload.single('file'), vendorCostCenterController.bulkUpdateVendorCostCenterFromExcel);
 

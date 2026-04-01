@@ -1615,7 +1615,11 @@ const uploadToCloudinary = (buffer, filename) => {
 
 const getOrderById = async (req, res) => {
   try {
-    const order = await OrderCustomProduct.findById(req.params.id);
+    const order = await OrderCustomProduct.findById(req.params.id)
+      .populate("forced_vendor_id", "name") // Lấy thêm tên Hãng
+      .populate("items.manual_vendor_cost_center_id")
+      .lean(); // Lấy đầy đủ Size, Color, BaseCost của biến thể
+
     if (!order) {
       return res.status(404).json({ message: "Order not found" });
     }
@@ -4326,9 +4330,101 @@ const applyManualVendorMapping = async (req, res) => {
         );
         if (item) {
           item.manual_vendor_cost_center_id = override.vendorCostCenterId || null;
+
+          // 👉 Tự động fill item.cost_breakdown theo chuẩn Schema để Frontend hiện được data luôn
+          if (override.vendorCostCenterId) {
+            const vcc = await VendorCostCenter.findById(override.vendorCostCenterId).populate("vendor_product");
+            if (vcc) {
+              const qty = item.quantity || 1;
+              const baseCost = vcc.base_cost || 0;
+              
+              let embroidery = 0;
+              let twoSided = 0;
+              let twoPos = 0;
+
+              const usedSku = item.mapped_sku || item.sku || "";
+              let parsedConfigCode = "MANUAL_MAP";
+              try {
+                if (typeof parseConfigCodeFromSKU === 'function') {
+                  parsedConfigCode = parseConfigCodeFromSKU(usedSku) || "MANUAL_MAP";
+                } else if (usedSku) {
+                  parsedConfigCode = usedSku.split("-")[0] || "MANUAL_MAP";
+                }
+              } catch (e) {
+                if (usedSku) parsedConfigCode = usedSku.split("-")[0] || "MANUAL_MAP";
+              }
+
+              const configCodeUpper = parsedConfigCode.toUpperCase();
+              
+              if (["TSB"].includes(configCodeUpper)) {
+                twoSided = Number(vcc.additional_costs?.two_sided_print || 0);
+              }
+              if (["TS2S", "QZES"].includes(configCodeUpper)) {
+                twoPos = Number(vcc.additional_costs?.two_position_print || 0);
+              }
+              if (["EBM", "EBMA"].includes(configCodeUpper)) {
+                embroidery = Number(vcc.additional_costs?.embroidery || 0);
+              }
+
+              const totalAddCost = embroidery + twoSided + twoPos;
+
+              let eco = 0;
+              let add = 0;
+              let profileName = "international";
+              const sType = String(order.shipping_type || "").toLowerCase();
+              if (sType === "expedited" && vcc.priority && (vcc.priority.economy != null || vcc.priority.additional != null)) {
+                eco = Number(vcc.priority.economy || 0);
+                add = Number(vcc.priority.additional || 0);
+                profileName = "priority";
+              } else if (vcc.international) {
+                eco = Number(vcc.international.economy || 0);
+                add = Number(vcc.international.additional || 0);
+              }
+
+              // Tính tạm phí ship cho dòng này (đúng nhất nếu dòng này đứng độc lập)
+              const estimatedShipping = eco + (qty > 1 ? (qty - 1) * add : 0);
+
+              item.cost_breakdown = {
+                configCode: parsedConfigCode,
+                productTypeValue: vcc.product_type_design || vcc.vendor_product?.product_type_design || "Apparel",
+                selectedConfigBy: "Manual Seller Override",
+                sizeValue: vcc.vendor_size || "",
+                colorValue: vcc.vendor_color || "",
+                vendorProductId: vcc.vendor_product?._id ? String(vcc.vendor_product._id) : String(vcc.vendor_product || ""),
+                matchedSku: vcc.sku || "",
+                itemDisplayName: `${vcc.vendor_product?.product_name || "Custom"} - ${vcc.vendor_size || ""} - ${vcc.vendor_color || ""}`.trim(),
+                base_cost_each: baseCost,
+                quantity: qty,
+                additional_costs_breakdown: {
+                  embroidery: embroidery,
+                  two_sided_print: twoSided,
+                  two_position_print: twoPos,
+                },
+                shipping_international_economy: eco,
+                shipping_international_additional_rate: add,
+                shipping_international_additional_units: Math.max(0, qty - 1),
+                total_additional_cost_per_item: totalAddCost,
+                base_cost_total_for_item_including_shipping: (baseCost + totalAddCost) * qty + estimatedShipping,
+                formula: `Manual Mapping (${profileName})`,
+              };
+            }
+          } else {
+             // Nếu user remove manual map
+             // item.cost_breakdown = null; // hoặc giữ nguyên tuỳ policy
+          }
         }
       }
     }
+
+    // 👉 Gán lại tổng tiền (Order.base_cost) bằng tổng của tất cả items đã được tính shipping/print
+    let totalOrderBaseCost = 0;
+    for (const i of order.items) {
+      if (i.cost_breakdown?.base_cost_total_for_item_including_shipping) {
+        totalOrderBaseCost += i.cost_breakdown.base_cost_total_for_item_including_shipping;
+      }
+    }
+    order.base_cost = totalOrderBaseCost;
+    order.base_cost_computed_at = new Date();
 
     await order.save();
     return res.json({ message: "Manual mapping applied successfully", orderId: order.orderId });

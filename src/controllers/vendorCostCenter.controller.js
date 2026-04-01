@@ -630,6 +630,39 @@ const getListVendorProduct = async (req, res) => {
     }
 }
 
+/**
+ * Lấy chính xác 1 Vendor Cost Center dựa trên VendorProductId, Size và Color
+ * Dành cho Frontend xử lý từng tương tác lẻ (Thay vì fetch cả pricingMap)
+ */
+const lookupSpecificVariant = async (req, res) => {
+    try {
+        const { vendorProductId } = req.params;
+        const { size, color } = req.query;
+
+        if (!vendorProductId || !size || !color) {
+            return res.status(400).json({ message: "Thiếu vendorProductId, size hoặc color" });
+        }
+
+        const costCenter = await VendorCostCenter.findOne({
+            vendor_product: vendorProductId,
+            vendor_size: size,
+            vendor_color: color,
+            status: { $in: ['Active', 'active', null] }
+        })
+        .select('base_cost sku standard_size standard_color vendor_size vendor_color international priority additional_costs')
+        .lean();
+
+        if (!costCenter) {
+            return res.status(404).json({ message: "Không tìm thấy Cost Center cho biến thể này" });
+        }
+
+        return res.json(costCenter);
+    } catch (error) {
+        console.error('❌ lookupSpecificVariant Error:', error);
+        res.status(500).json({ message: error.message });
+    }
+}
+
 module.exports = {
     getAllVendorCostCenters,
     getVendorCostCenterById,
@@ -639,6 +672,7 @@ module.exports = {
     updateVendorCostCenterStatus,
     getCostCentersByVendorProduct,
     getVendorProductVariants,
+    lookupSpecificVariant,
     importVendorCostCenterFromExcel,
     bulkUpdateVendorCostCenterFromExcel,
     manualSearchVendorCosts,

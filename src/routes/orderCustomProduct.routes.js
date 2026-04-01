@@ -7,7 +7,9 @@ const { authenticateToken } = require("../middlewares/auth.middleware");
 // router.get("/", authenticateToken, controller.getAllOrders);
 
 // API dành riêng FE (tối ưu chỉ dữ liệu cần hiển thị)
-router.get("/fe", authenticateToken, controller.getFrontendOrders);
+router.get("/fe",
+  // authenticateToken, 
+  controller.getFrontendOrders);
 
 router.get("/statistic", authenticateToken, controller.getOrderStatistics);
 
@@ -29,12 +31,14 @@ router.post(
 // Manual Mapping
 router.put(
   "/manual-mapping",
-  authenticateToken,
+  // authenticateToken,
   controller.applyManualVendorMapping
 );
 
 // API xem chi tiết đơn hàng113-2352267-7335428
-router.get("/:id", authenticateToken, controller.getOrderById);
+router.get("/:id",
+  // authenticateToken, 
+  controller.getOrderById);
 
 router.post(
   "/update-from-xlsx",
