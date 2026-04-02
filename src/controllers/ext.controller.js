@@ -38,6 +38,10 @@ const {
   PRINTWAY_PAID_ENDPOINT = "https://apis.printway.io/v3/order/paid",
   PRINTWAY_ACCESS_TOKEN = "",
 
+  // SS88 (mmoseller)
+  // .env: SS88_API_KEY=<your_api_key>
+  SS88_API_KEY = "",
+
   // Debug flag cho server (tuỳ set)
   VENDOR_SYNC_DEBUG = "0",
 } = process.env;
@@ -98,6 +102,16 @@ const httpMangoTee = axios.create({
   validateStatus: () => true,
 });
 
+const httpSS88 = axios.create({
+  baseURL: "https://mmoseller.com/api/external",
+  timeout: 20000,
+  headers: {
+    "X-API-Key": SS88_API_KEY,
+    Accept: "application/json",
+  },
+  validateStatus: () => true,
+});
+
 // ====== HELPERS ======
 const norm = (s) => String(s || "").trim();
 const lower = (s) => norm(s).toLowerCase();
@@ -126,7 +140,8 @@ function normalizeVendorKey(nameOrType) {
     s.includes("mangoteeprints")
   )
     return "mangotee";
-  if (["beeful", "merchfox", "merchize", "printway", "mangotee"].includes(s))
+  if (s.includes("ss88") || s.includes("mmoseller")) return "ss88";
+  if (["beeful", "merchfox", "merchize", "printway", "mangotee", "ss88"].includes(s))
     return s;
   return "";
 }
@@ -145,8 +160,8 @@ async function buildVendorMapsFromVpidSet(vpidSet) {
   const vendorIds = [...new Set(vps.map((vp) => vp.vendor_id).filter(Boolean))];
   const vendors = vendorIds.length
     ? await Vendor.find({ _id: { $in: vendorIds } })
-        .select({ _id: 1, name: 1, fulfillment_type: 1 })
-        .lean()
+      .select({ _id: 1, name: 1, fulfillment_type: 1 })
+      .lean()
     : [];
 
   const vendorMap = new Map(vendors.map((v) => [String(v._id), v]));
@@ -514,6 +529,54 @@ async function fetchMangoTee(orderId) {
   return { tracking, carrier, shipped, raw };
 }
 
+/**
+ * SS88 (mmoseller.com)
+ * GET https://mmoseller.com/api/external/orders/{orderId}
+ * Tracking lấy từ data.trackingNumber (order-level),
+ * nếu null thì tìm trong data.items[*].trackingNumber
+ */
+async function fetchSS88(orderId) {
+  if (!SS88_API_KEY) throw new Error("SS88 missing API key (SS88_API_KEY)");
+
+  const url = `/orders/${encodeURIComponent(orderId)}`;
+  const res = await httpSS88.get(url);
+
+  if (DEBUG) console.log("[SS88][HTTP]", res.status);
+
+  if (res.status >= 400)
+    throw new Error(`SS88 HTTP ${res.status} for ${orderId}`);
+
+  const raw = res.data;
+  if (!raw || typeof raw !== "object")
+    throw new Error("SS88 empty payload");
+  if (raw.success !== true || !raw.data)
+    throw new Error(`SS88 bad response: success=${raw.success}`);
+
+  const data = raw.data;
+
+  // Lấy trackingNumber từ order-level trước, nếu không có thì tìm trong items
+  let tracking = norm(data.trackingNumber);
+  if (!isValidTrackingNumber(tracking)) {
+    const items = Array.isArray(data.items) ? data.items : [];
+    for (const item of items) {
+      const t = norm(item.trackingNumber);
+      if (isValidTrackingNumber(t)) {
+        tracking = t;
+        break;
+      }
+    }
+  }
+  if (!isValidTrackingNumber(tracking)) tracking = "";
+
+  const carrier = norm(data.carrier);
+  const shipped =
+    lower(data.status) === "shipped" ||
+    lower(data.status) === "delivered" ||
+    Boolean(tracking);
+
+  return { tracking, carrier, shipped, raw: data };
+}
+
 // ====== APPLY RESULT INTO ORDER DOC ======
 function applyToItemsOfVendor(
   doc,
@@ -541,14 +604,16 @@ function applyToItemsOfVendor(
         vendorKey === "beeful"
           ? "Beeful"
           : vendorKey === "merchfox"
-          ? "MerchFox"
-          : vendorKey === "merchize"
-          ? "Merchize"
-          : vendorKey === "printway"
-          ? "Printway"
-          : vendorKey === "mangotee"
-          ? "MangoTee"
-          : norm(ti.fulfillment),
+            ? "MerchFox"
+            : vendorKey === "merchize"
+              ? "Merchize"
+              : vendorKey === "printway"
+                ? "Printway"
+                : vendorKey === "mangotee"
+                  ? "MangoTee"
+                  : vendorKey === "ss88"
+                    ? "SS88"
+                    : norm(ti.fulfillment),
       tracking: tracking || prevTracking,
       status: shipped ? "Shipped" : thePrevStatus || "New",
       updated_at: new Date(),
@@ -604,6 +669,14 @@ function applyToItemsOfVendor(
       order_id: norm(raw?.data?.order_id),
       mt_status: norm(raw?.data?.status || raw?.data?.production_status),
     };
+  } else if (vendorKey === "ss88") {
+    doc.ss88_submission = {
+      ...(doc.ss88_submission || {}),
+      attempt_count: (doc.ss88_submission?.attempt_count || 0) + 1,
+      last_response: raw,
+      ss88_id: norm(raw?.id),
+      ss88_status: norm(raw?.status),
+    };
   }
 
   return changed;
@@ -625,8 +698,18 @@ async function updateOrderByVendors(orderId, vpidToVendorPrefetched = null) {
 
   const groups = groupItemsByVendorWithMap(doc, vpidToVendor);
   const vendorKeys = Object.keys(groups).filter((k) =>
-    ["beeful", "merchfox", "merchize", "printway", "mangotee"].includes(k)
+    ["beeful", "merchfox", "merchize", "printway", "mangotee", "ss88"].includes(k)
   );
+
+  // --- DIAGNOSTIC LOG (xoá sau khi debug xong) ---
+  console.log(`[DIAG][${orderId}] vpidSet=`, [...vpidSet]);
+  console.log(`[DIAG][${orderId}] vpidToVendor=`, [...vpidToVendor.entries()]);
+  console.log(`[DIAG][${orderId}] groups=`, JSON.stringify(groups));
+  console.log(`[DIAG][${orderId}] vendorKeys=`, vendorKeys);
+  for (const it of doc.items || []) {
+    console.log(`[DIAG][${orderId}] item tracking_info=`, JSON.stringify(it?.tracking_info));
+  }
+  // --- END DIAGNOSTIC LOG ---
 
   if (vendorKeys.length === 0) {
     throw new Error(
@@ -643,6 +726,7 @@ async function updateOrderByVendors(orderId, vpidToVendorPrefetched = null) {
       else if (vk === "merchize") res = await fetchMerchize(orderId);
       else if (vk === "printway") res = await fetchPrintway(orderId, doc);
       else if (vk === "mangotee") res = await fetchMangoTee(orderId);
+      else if (vk === "ss88") res = await fetchSS88(orderId);
       else continue;
 
       totalChanged += applyToItemsOfVendor(doc, vk, res);
@@ -688,6 +772,7 @@ async function runBatch({ max = 100, dryRun = false } = {}) {
     "merchize",
     "printway",
     "mangotee",
+    "ss88",
   ]);
   const filtered = candidates.filter((o) => {
     const groups = groupItemsByVendorWithMap(o, vpidToVendor);
