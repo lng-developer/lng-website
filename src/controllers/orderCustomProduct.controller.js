@@ -1777,6 +1777,7 @@ const getFrontendOrders = async (req, res) => {
       teamObjectId: ids.teamObjectId,
       sellerObjectId: ids.sellerObjectId,
       shopName,
+      roles
     });
 
     const { orders, totalCount, limitNum } = await executePipeline(
@@ -1894,7 +1895,11 @@ const getOrderStatistics = async (req, res) => {
     // ===== TEAM FILTER (leader) =====
     const Team = db.Team;
     const User = db.user;
-    const team = await Team.findOne({ leaderId: userId }).select("_id").lean();
+    let team = null;
+    // Bỏ qua ép giới hạn theo team nếu là Admin (trừ phi admin tự truyền ids.teamObjectId)
+    if (!roles.isAdmin) {
+      team = await Team.findOne({ leaderId: userId }).select("_id").lean();
+    }
     if (team && baseMatch.sellerId) delete baseMatch.sellerId;
 
     if (ids.teamObjectId || team) {
@@ -3507,8 +3512,8 @@ const computeBaseCostForOrder = async (req, res) => {
       };
       stagedItems.push(rec);
 
-      // group key
-      const shippingProfileKey = `${vendorId}::profile=${shipProfile}::eco=${eco}::add=${add}`;
+      // group key (Không phụ thuộc vào eco/add để các item cùng vendor tự gộp chung)
+      const shippingProfileKey = `${vendorId}::profile=${shipProfile}`;
       const g = groups.get(shippingProfileKey) || {
         vendorId,
         shipProfile,
@@ -3571,90 +3576,7 @@ const computeBaseCostForOrder = async (req, res) => {
     }
 
     for (const [vendorId, bucket] of vendorBuckets.entries()) {
-      const items = bucket.items;
-
-      // SPECIAL CASE: đúng 2 sản phẩm khác nhau, mỗi cái qty = 1
-      const distinctProducts = new Set(items.map((x) => x.vendorProductId))
-        .size;
-      const totalQty = items.reduce((s, it) => s + it.qty, 0);
-      const allQtyAreOne = items.every((it) => Number(it.qty) === 1);
-
-      if (distinctProducts === 2 && totalQty === 2 && allQtyAreOne) {
-        // reset ship trước
-        for (const it of items) {
-          const out = perItemResults.find(
-            (r) => r.orderItemId === it.orderItemId && r.status === "ok"
-          );
-          if (!out) continue;
-          const minus =
-            (out.shipping_international_economy || 0) +
-            (out.shipping_international_additional_units || 0) *
-            (out.shipping_international_additional_rate || 0);
-          out.base_cost_total_for_item_including_shipping = Number(
-            (out.base_cost_total_for_item_including_shipping - minus).toFixed(2)
-          );
-          out.shipping_international_economy = 0;
-          out.shipping_international_additional_units = 0;
-          out.shipping_international_additional_rate = 0;
-        }
-
-        const sortedByShipExpensive = [...items].sort((a, b) => {
-          if (b.eco !== a.eco) return b.eco - a.eco;
-          return (b.baseEach || 0) - (a.baseEach || 0);
-        });
-        const expensive = sortedByShipExpensive[0];
-        const cheap = sortedByShipExpensive[1];
-
-        // eco cho sp "đắt hơn"
-        {
-          const out = perItemResults.find(
-            (r) => r.orderItemId === expensive.orderItemId && r.status === "ok"
-          );
-          if (out) {
-            out.shipping_international_economy = expensive.eco;
-            out.base_cost_total_for_item_including_shipping = Number(
-              (
-                out.base_cost_total_for_item_including_shipping + expensive.eco
-              ).toFixed(2)
-            );
-            out.formula = `${out.formula || ""} | SPECIAL[${expensive.shipProfile
-              }]: eco(${expensive.eco}) for expensive product`;
-          }
-        }
-        // additional (1) cho sp "rẻ hơn"
-        {
-          const out = perItemResults.find(
-            (r) => r.orderItemId === cheap.orderItemId && r.status === "ok"
-          );
-          if (out) {
-            out.shipping_international_additional_units = 1;
-            out.shipping_international_additional_rate = cheap.add;
-            out.base_cost_total_for_item_including_shipping = Number(
-              (
-                out.base_cost_total_for_item_including_shipping + cheap.add
-              ).toFixed(2)
-            );
-            out.formula = `${out.formula || ""} | SPECIAL[${cheap.shipProfile
-              }]: add(${cheap.add}) for cheaper product`;
-          }
-        }
-
-        groupBreakdowns.push({
-          group_key: `vendor:${vendorId}::SPECIAL_TWO_PRODUCTS`,
-          vendor_id: vendorId,
-          total_qty: 2,
-          special_case: true,
-          shipping_profile: expensive.shipProfile,
-          rule: "eco of more expensive + additional of cheaper",
-          shipping_total_for_group: Number(
-            (expensive.eco + cheap.add).toFixed(2)
-          ),
-        });
-
-        continue;
-      }
-
-      // ELSE: phân bổ theo từng profile
+      // Phân bổ shipping theo từng profile (áp dụng chung 1 công thức đúng cho N items: Lấy economy đắt nhất trả 1 lần, còn lại trả thêm additional)
       for (const [profileKey, g] of bucket.profiles.entries()) {
         const totalQtyProfile = g.items.reduce((s, it) => s + it.qty, 0);
         if (totalQtyProfile <= 0) continue;
@@ -4331,103 +4253,33 @@ const applyManualVendorMapping = async (req, res) => {
         if (item) {
           item.manual_vendor_cost_center_id = override.vendorCostCenterId || null;
 
-          // 👉 Tự động fill item.cost_breakdown theo chuẩn Schema để Frontend hiện được data luôn
-          if (override.vendorCostCenterId) {
-            const vcc = await VendorCostCenter.findById(override.vendorCostCenterId).populate("vendor_product");
-            if (vcc) {
-              const qty = item.quantity || 1;
-              const baseCost = vcc.base_cost || 0;
-              
-              let embroidery = 0;
-              let twoSided = 0;
-              let twoPos = 0;
-
-              const usedSku = item.mapped_sku || item.sku || "";
-              let parsedConfigCode = "MANUAL_MAP";
-              try {
-                if (typeof parseConfigCodeFromSKU === 'function') {
-                  parsedConfigCode = parseConfigCodeFromSKU(usedSku) || "MANUAL_MAP";
-                } else if (usedSku) {
-                  parsedConfigCode = usedSku.split("-")[0] || "MANUAL_MAP";
-                }
-              } catch (e) {
-                if (usedSku) parsedConfigCode = usedSku.split("-")[0] || "MANUAL_MAP";
-              }
-
-              const configCodeUpper = parsedConfigCode.toUpperCase();
-              
-              if (["TSB"].includes(configCodeUpper)) {
-                twoSided = Number(vcc.additional_costs?.two_sided_print || 0);
-              }
-              if (["TS2S", "QZES"].includes(configCodeUpper)) {
-                twoPos = Number(vcc.additional_costs?.two_position_print || 0);
-              }
-              if (["EBM", "EBMA"].includes(configCodeUpper)) {
-                embroidery = Number(vcc.additional_costs?.embroidery || 0);
-              }
-
-              const totalAddCost = embroidery + twoSided + twoPos;
-
-              let eco = 0;
-              let add = 0;
-              let profileName = "international";
-              const sType = String(order.shipping_type || "").toLowerCase();
-              if (sType === "expedited" && vcc.priority && (vcc.priority.economy != null || vcc.priority.additional != null)) {
-                eco = Number(vcc.priority.economy || 0);
-                add = Number(vcc.priority.additional || 0);
-                profileName = "priority";
-              } else if (vcc.international) {
-                eco = Number(vcc.international.economy || 0);
-                add = Number(vcc.international.additional || 0);
-              }
-
-              // Tính tạm phí ship cho dòng này (đúng nhất nếu dòng này đứng độc lập)
-              const estimatedShipping = eco + (qty > 1 ? (qty - 1) * add : 0);
-
-              item.cost_breakdown = {
-                configCode: parsedConfigCode,
-                productTypeValue: vcc.product_type_design || vcc.vendor_product?.product_type_design || "Apparel",
-                selectedConfigBy: "Manual Seller Override",
-                sizeValue: vcc.vendor_size || "",
-                colorValue: vcc.vendor_color || "",
-                vendorProductId: vcc.vendor_product?._id ? String(vcc.vendor_product._id) : String(vcc.vendor_product || ""),
-                matchedSku: vcc.sku || "",
-                itemDisplayName: `${vcc.vendor_product?.product_name || "Custom"} - ${vcc.vendor_size || ""} - ${vcc.vendor_color || ""}`.trim(),
-                base_cost_each: baseCost,
-                quantity: qty,
-                additional_costs_breakdown: {
-                  embroidery: embroidery,
-                  two_sided_print: twoSided,
-                  two_position_print: twoPos,
-                },
-                shipping_international_economy: eco,
-                shipping_international_additional_rate: add,
-                shipping_international_additional_units: Math.max(0, qty - 1),
-                total_additional_cost_per_item: totalAddCost,
-                base_cost_total_for_item_including_shipping: (baseCost + totalAddCost) * qty + estimatedShipping,
-                formula: `Manual Mapping (${profileName})`,
-              };
-            }
-          } else {
-             // Nếu user remove manual map
-             // item.cost_breakdown = null; // hoặc giữ nguyên tuỳ policy
+          // 👉 Xoá breakdown cũ nếu user huỷ manual mapping để hàm compute ép tính lại từ đầu
+          if (!override.vendorCostCenterId) {
+             item.cost_breakdown = null;
           }
         }
       }
     }
 
-    // 👉 Gán lại tổng tiền (Order.base_cost) bằng tổng của tất cả items đã được tính shipping/print
-    let totalOrderBaseCost = 0;
-    for (const i of order.items) {
-      if (i.cost_breakdown?.base_cost_total_for_item_including_shipping) {
-        totalOrderBaseCost += i.cost_breakdown.base_cost_total_for_item_including_shipping;
-      }
-    }
-    order.base_cost = totalOrderBaseCost;
-    order.base_cost_computed_at = new Date();
-
+    // Lưu lại manual_vendor_cost_center_id trước
     await order.save();
-    return res.json({ message: "Manual mapping applied successfully", orderId: order.orderId });
+
+    // 👉 GỌI TRỰC TIẾP HÀM computeBaseCostForOrder ĐỂ TỰ ĐỘNG GOM NHÓM VÀ TÍNH SHIP CHUẨN XÁC DO MÌNH VỪA FIX
+    // Tránh việc tự cộng dồn tay gộp shipping sai ở đây.
+    let computedResult = null;
+    const mockReq = { body: { orderId } };
+    const mockRes = {
+      status: function () { return this; },
+      json: function (data) { computedResult = data; return this; }
+    };
+
+    await computeBaseCostForOrder(mockReq, mockRes);
+
+    return res.json({ 
+       message: "Manual mapping applied successfully", 
+       orderId,
+       computed_info: computedResult
+    });
   } catch (err) {
     console.error("applyManualVendorMapping error:", err);
     return res.status(500).json({ message: "Update failed", error: err.message });

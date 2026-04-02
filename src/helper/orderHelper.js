@@ -185,10 +185,15 @@ async function getVendorProductIdsByVendorName(vendorName) {
   return vpIds || [];
 }
 
-async function buildPipeline({ initialMatch, filters, userId, teamObjectId, shopName }) {
+async function buildPipeline({ initialMatch, filters, userId, teamObjectId, shopName, roles }) {
   const pipeline = [];
 
-  const team = await Team.findOne({ leaderId: userId }).select("_id").lean();
+  let team = null;
+  // Bỏ qua lọc theo team ngầm định nếu là Admin
+  if (!roles?.isAdmin) {
+      team = await Team.findOne({ leaderId: userId }).select("_id").lean();
+  }
+  
   const adjustedInitialMatch = { ...initialMatch };
   if (team && adjustedInitialMatch.sellerId) {
     delete adjustedInitialMatch.sellerId;
