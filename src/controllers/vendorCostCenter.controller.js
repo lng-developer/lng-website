@@ -510,10 +510,10 @@ const manualSearchVendorCosts = async (req, res) => {
             match['product.product_name'] = { $regex: product_name, $options: 'i' };
         }
         if (size) {
-            match.vendor_size = size; // Khớp chính xác hoàn toàn như yêu cầu
+            match.vendor_size = new RegExp(`^${size}$`, 'i'); // Khớp linh hoạt ignore-case
         }
         if (color) {
-            match.vendor_color = color; // Khớp chính xác hoàn toàn như yêu cầu
+            match.vendor_color = new RegExp(`^${color}$`, 'i'); // Khớp linh hoạt ignore-case
         }
 
         pipeline.push({ $match: match });
@@ -639,18 +639,60 @@ const lookupSpecificVariant = async (req, res) => {
         const { vendorProductId } = req.params;
         const { size, color } = req.query;
 
-        if (!vendorProductId || !size || !color) {
-            return res.status(400).json({ message: "Thiếu vendorProductId, size hoặc color" });
+        if (!vendorProductId) {
+            return res.status(400).json({ message: "Thiếu vendorProductId" });
         }
 
-        const costCenter = await VendorCostCenter.findOne({
+        const sizeVal = size || "";
+        const colorVal = color || "";
+
+        // TÌM KIẾM 1: Khớp chính xác hoàn toàn (kể cả rỗng)
+        let costCenter = await VendorCostCenter.findOne({
             vendor_product: vendorProductId,
-            vendor_size: size,
-            vendor_color: color,
+            vendor_size: sizeVal,
+            vendor_color: colorVal,
             status: { $in: ['Active', 'active', null] }
         })
         .select('base_cost sku standard_size standard_color vendor_size vendor_color international priority additional_costs')
         .lean();
+
+        // TÌM KIẾM 2: Tìm linh hoạt (IgnoreCase & bỏ qua tham số rỗng)
+        if (!costCenter && (sizeVal || colorVal)) {
+            const flexibleQuery = {
+                vendor_product: vendorProductId,
+                status: { $in: ['Active', 'active', null] }
+            };
+            if (sizeVal) flexibleQuery.vendor_size = new RegExp(`^${sizeVal}$`, "i");
+            if (colorVal) flexibleQuery.vendor_color = new RegExp(`^${colorVal}$`, "i");
+            
+            costCenter = await VendorCostCenter.findOne(flexibleQuery)
+                .select('base_cost sku standard_size standard_color vendor_size vendor_color international priority additional_costs')
+                .lean();
+        }
+
+        // TÌM KIẾM 3: Thử tìm theo standard_size / standard_color nếu vendor_size/color không tìm ra
+        if (!costCenter && (sizeVal || colorVal)) {
+            const standardQuery = {
+                vendor_product: vendorProductId,
+                status: { $in: ['Active', 'active', null] }
+            };
+            if (sizeVal) standardQuery.standard_size = new RegExp(`^${sizeVal}$`, "i");
+            if (colorVal) standardQuery.standard_color = new RegExp(`^${colorVal}$`, "i");
+            
+            costCenter = await VendorCostCenter.findOne(standardQuery)
+                .select('base_cost sku standard_size standard_color vendor_size vendor_color international priority additional_costs')
+                .lean();
+        }
+
+        // TÌM KIẾM 4: Fallback cực đại (Lấy biến thể đầu tiên làm mẫu nếu sản phẩm này ko có size/color giống order)
+        if (!costCenter) {
+            costCenter = await VendorCostCenter.findOne({
+                vendor_product: vendorProductId,
+                status: { $in: ['Active', 'active', null] }
+            })
+            .select('base_cost sku standard_size standard_color vendor_size vendor_color international priority additional_costs')
+            .lean();
+        }
 
         if (!costCenter) {
             return res.status(404).json({ message: "Không tìm thấy Cost Center cho biến thể này" });

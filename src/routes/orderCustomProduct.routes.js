@@ -8,7 +8,7 @@ const { authenticateToken } = require("../middlewares/auth.middleware");
 
 // API dành riêng FE (tối ưu chỉ dữ liệu cần hiển thị)
 router.get("/fe",
-  // authenticateToken, 
+  authenticateToken,
   controller.getFrontendOrders);
 
 router.get("/statistic", authenticateToken, controller.getOrderStatistics);
