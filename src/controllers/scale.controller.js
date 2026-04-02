@@ -236,6 +236,8 @@ function normalizeProviderKey(vendorDoc) {
   if (ft.includes("merchize") || nm.includes("merchize")) return "merchize";
   if (ft.includes("printway") || nm.includes("printway")) return "printway";
   if (ft.includes("mangotee") || nm.includes("mangotee")) return "mangotee";
+  if (ft.includes("ss88") || nm.includes("ss88")) return "ss88";
+  if (ft.includes("lenful") || nm.includes("lenful")) return "lenful";
   if (ft.includes("lng") || nm.includes("lng")) return "lng";
   // có thể bổ sung thêm provider khác ở đây
   return null;
