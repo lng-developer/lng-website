@@ -455,14 +455,34 @@ function parseResponseForLenful(body) {
         return d.order_number || d.orderNo || d.id || b.order_number || b.orderNo || b.id || null;
     };
 
+    const extractOrderNumberFromMessage = (m = "") => {
+        // Example: "Create order number 114-1900942-0865817 success!"
+        const match = String(m || "").match(/order number\s*([0-9A-Za-z-]+)/i);
+        return match?.[1] || null;
+    };
+
+    // Some vendors can return `success: false` even when order creation succeeded.
+    // In that case, we treat the response as soft-success if we can extract an order id.
+    const externalId = pickExternalId(body) || extractOrderNumberFromMessage(msg);
+    const looksLikeSuccess = /created|success|already exist|already created/i.test(msg);
+
     if (typeof body?.success === "boolean") {
         if (body.success) {
             return {
                 ok: true,
-                externalId: pickExternalId(body),
+                externalId,
                 normalized: { success: true, message: msg || "OK", data: body.data || body },
             };
         }
+
+        if (externalId) {
+            return {
+                ok: true,
+                externalId,
+                normalized: { success: true, message: msg || "OK (soft)", data: body.data || body, soft: true },
+            };
+        }
+
         const err = new Error(msg || "Lenful: Non-success response");
         err.code = "LENFUL_NON_SUCCESS";
         err.vendorResponse = body;
@@ -473,7 +493,7 @@ function parseResponseForLenful(body) {
         if (statusNum >= 200 && statusNum < 300) {
             return {
                 ok: true,
-                externalId: pickExternalId(body),
+                externalId,
                 normalized: { status: statusNum, message: msg || "OK", data: body.data || body },
             };
         }
@@ -486,7 +506,7 @@ function parseResponseForLenful(body) {
     if (body && (body.id || body.order_number || body.orderNo)) {
         return {
             ok: true,
-            externalId: body.order_number || body.orderNo || body.id || null,
+            externalId: externalId || body.order_number || body.orderNo || body.id || null,
             normalized: { message: msg || "OK (soft)", data: body, soft: true },
         };
     }

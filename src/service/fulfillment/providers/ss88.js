@@ -294,6 +294,24 @@ function buildShippingAddress(orderObj = {}) {
     };
 }
 
+// --- helper: map shipping_type sang SS88 serviceCode ---
+const SHIPPING_TYPE_MAP = {
+    // Standard / free economy → Standard
+    standard:      'Standard',
+    freeeconomy:   'Standard',
+    'free economy':'Standard',
+    economy:       'Standard',
+    // Expedited → Priority
+    expedited:     'Priority',
+    priority:      'Priority',
+};
+
+function mapShippingTypeToServiceCode(shippingType) {
+    if (!shippingType) return '';
+    const key = String(shippingType).toLowerCase().trim();
+    return SHIPPING_TYPE_MAP[key] || shippingType;
+}
+
 // --- helper: build payload tổng ---
 function buildPayload(orderObj, options = {}) {
     const envStatuses = (process.env.SS88_ALLOWED_STATUSES || '')
@@ -308,11 +326,12 @@ function buildPayload(orderObj, options = {}) {
     const completedItems = pickCompletedItems(orderObj, allowedStatuses);
     const shippingAddress = buildShippingAddress(orderObj);
 
-    const serviceCode = String(firstNonEmpty(
+    const rawServiceCode = String(firstNonEmpty(
         options?.serviceCode,
         orderObj?.shipping_type,
         orderObj?.shipping_service_code,
     ) || '');
+    const serviceCode = mapShippingTypeToServiceCode(rawServiceCode);
 
     const orderNumber = firstNonEmpty(
         options?.orderNumber,
