@@ -23,4 +23,16 @@ router.get(
   shippingBatchController.downloadAllUpdatedFakeFile
 );
 
+// ✅ Route mới: Export orders có tracking trực tiếp
+router.post(
+  "/export-orders-with-tracking",
+  shippingBatchController.exportOrdersWithTracking
+);
+
+// ✅ Route mới: Kiểm tra trạng thái orders
+router.get(
+  "/check-orders-status",
+  shippingBatchController.checkOrdersStatus
+);
+
 module.exports = router;

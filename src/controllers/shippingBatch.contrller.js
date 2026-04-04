@@ -741,6 +741,340 @@ const downloadAllUpdatedFakeFile = async (req, res, next) => {
   }
 };
 
+/**
+ * Flow mới: Query DB các orders có tracking và export ra file txt ngay lập tức
+ * POST /api/shipping-batch/export-orders-with-tracking
+ */
+const exportOrdersWithTracking = async (req, res, next) => {
+  try {
+    const {
+      machineId,
+      label = "Direct Export",
+      limit = 1000,
+      carrierCode = "USPS",
+      shipMethod = "USPS First Class",
+      fromDate,
+      toDate,
+      status = ["New", "Processing", "Shipped"], // default statuses
+    } = req.body;
+
+    if (!machineId) {
+      return res.status(400).json({ message: "machineId is required" });
+    }
+
+    // 1. Build query filter
+    const filter = {
+      status: { $in: Array.isArray(status) ? status : [status] },
+      "items.tracking_info.tracking": { $exists: true, $ne: "", $ne: null },
+    };
+
+    // Filter theo ngày tạo nếu có
+    if (fromDate || toDate) {
+      filter.createdAt = {};
+      if (fromDate) {
+        const from = new Date(fromDate);
+        if (!isNaN(from.getTime())) filter.createdAt.$gte = from;
+      }
+      if (toDate) {
+        const to = new Date(toDate);
+        if (!isNaN(to.getTime())) filter.createdAt.$lte = to;
+      }
+    }
+
+    // 2. Query orders có tracking
+    const orders = await OrderCustomProduct.find(filter)
+      .sort({ createdAt: -1 })
+      .limit(Number(limit))
+      .lean();
+
+    if (!orders.length) {
+      return res.status(404).json({
+        message: "No orders with tracking found",
+        filter,
+      });
+    }
+
+    // 3. Extract orders có tracking hợp lệ
+    const validOrders = [];
+    const shipDate = buildShipDateString(); // dùng current date
+
+    for (const order of orders) {
+      const orderId = order.orderId;
+      if (!orderId) continue;
+
+      // Lấy tracking từ item đầu tiên có tracking
+      let tracking = "";
+      for (const item of order.items || []) {
+        const itemTracking = normalizeField(item?.tracking_info?.tracking);
+        if (itemTracking && itemTracking !== "-" && itemTracking !== "---") {
+          tracking = itemTracking;
+          break;
+        }
+      }
+
+      if (tracking) {
+        validOrders.push({
+          orderId: normalizeField(orderId),
+          tracking,
+          createdAt: order.createdAt,
+        });
+      }
+    }
+
+    if (!validOrders.length) {
+      return res.status(404).json({
+        message: "No orders with valid tracking found",
+        totalScanned: orders.length,
+      });
+    }
+
+    // 4. Build file content
+    let content =
+      "order-id\tship-date\tcarrier-code\ttracking-number\tship-method\n";
+
+    for (const order of validOrders) {
+      let finalCarrierCode = carrierCode;
+      let finalShipMethod = shipMethod;
+
+      // Auto-detect carrier từ tracking prefix
+      if (order.tracking.startsWith("UK")) {
+        finalCarrierCode = "Yanwen";
+        finalShipMethod = "Yanwen Air Economy Mail General";
+      } else if (order.tracking.startsWith("YT")) {
+        finalCarrierCode = "Yun Express";
+        finalShipMethod = "YunExpress Global Direct line (standard )-Tracked";
+      }
+
+      content += [
+        order.orderId,
+        shipDate,
+        finalCarrierCode,
+        order.tracking,
+        finalShipMethod,
+      ].join("\t");
+
+      content += "\n";
+    }
+
+    // 5. Tạo batch record để tracking (optional)
+    const batch = await ShippingBatch.create({
+      machineId,
+      label,
+      type: "DIRECT_EXPORT",
+      fileName: `direct_export_${machineId}_${Date.now()}.txt`,
+      status: "COMPLETED",
+      completed: validOrders.map(o => ({
+        orderId: o.orderId,
+        tracking: o.tracking,
+        isFake: false,
+        source: "direct_query",
+      })),
+      tracking_fakes: [],
+      stats: {
+        totalOrders: validOrders.length,
+        totalReal: validOrders.length,
+        totalFake: 0,
+      },
+    });
+
+    // 6. Return file content
+    const filename = `export_orders_tracking_${Date.now()}.txt`;
+
+    return res
+      .status(200)
+      .set("Content-Type", "text/tab-separated-values; charset=utf-8")
+      .set("Content-Disposition", `attachment; filename="${filename}"`)
+      .send(content);
+
+  } catch (err) {
+    next(err);
+  }
+};
+
+/**
+ * API kiểm tra trạng thái orders: có tracking và đã đẩy lên Amazon
+ * GET /api/shipping-batch/check-orders-status
+ */
+const checkOrdersStatus = async (req, res, next) => {
+  try {
+    const {
+      machineId,
+      limit = 1000,
+      fromDate,
+      toDate,
+      status = ["New", "Processing", "Shipped"],
+      filterType = "all", // "all", "with-tracking", "without-tracking", "submitted", "not-submitted"
+    } = req.query;
+
+    if (!machineId) {
+      return res.status(400).json({ message: "machineId is required" });
+    }
+
+    // 1. Build query filter cho orders
+    const orderFilter = {
+      status: { $in: Array.isArray(status) ? status : [status] },
+    };
+
+    // Filter theo ngày tạo nếu có
+    if (fromDate || toDate) {
+      orderFilter.createdAt = {};
+      if (fromDate) {
+        const from = new Date(fromDate);
+        if (!isNaN(from.getTime())) orderFilter.createdAt.$gte = from;
+      }
+      if (toDate) {
+        const to = new Date(toDate);
+        if (!isNaN(to.getTime())) orderFilter.createdAt.$lte = to;
+      }
+    }
+
+    // 2. Query tất cả orders theo filter
+    const allOrders = await OrderCustomProduct.find(orderFilter)
+      .populate('shopId', 'name store') // ✅ Populate shop info
+      .sort({ createdAt: -1 })
+      .limit(Number(limit))
+      .lean();
+
+    if (!allOrders.length) {
+      return res.json({
+        orders: [],
+        totalCount: 0,
+        filter: {
+          machineId,
+          limit: Number(limit),
+          fromDate,
+          toDate,
+          status: Array.isArray(status) ? status : [status],
+          filterType,
+        },
+      });
+    }
+
+    // 3. Phân loại và build chi tiết orders
+    const ordersWithDetails = [];
+
+    for (const order of allOrders) {
+      let hasValidTracking = false;
+      let tracking = "";
+      let trackingInfo = null;
+
+      // Kiểm tra tracking trong items
+      for (const item of order.items || []) {
+        const itemTracking = normalizeField(item?.tracking_info?.tracking);
+        if (itemTracking && itemTracking !== "-" && itemTracking !== "---") {
+          hasValidTracking = true;
+          tracking = itemTracking;
+          trackingInfo = {
+            tracking: itemTracking,
+            fulfillment: item.tracking_info?.fulfillment || "",
+            status: item.tracking_info?.status || "",
+            carrier: item.tracking_info?.note || "",
+            updated_at: item.tracking_info?.updated_at || null,
+          };
+          break;
+        }
+      }
+
+      ordersWithDetails.push({
+        orderId: order.orderId,
+        shopId: order.shopId?._id || order.shopId, // ✅ Handle populated vs non-populated
+        shopName: order.shopId?.name || null, // ✅ Thêm shop name
+        shopStore: order.shopId?.store || null, // ✅ Thêm shop store (seller ID)
+        status: order.status,
+        createdAt: order.createdAt,
+        updatedAt: order.updatedAt,
+        hasTracking: hasValidTracking,
+        tracking: tracking || null,
+        trackingInfo: trackingInfo,
+        itemsCount: (order.items || []).length,
+        // Thêm thông tin khác nếu cần
+        customerEmail: order.customer?.email || null,
+        totalAmount: order.total_amount || 0,
+      });
+    }
+
+    // 4. Kiểm tra orders nào đã được submit lên Amazon
+    const allOrderIds = ordersWithDetails.map(o => o.orderId);
+    
+    const submittedBatches = await ShippingBatch.find({
+      machineId,
+      "completed.orderId": { $in: allOrderIds },
+    }).lean();
+
+    // Tạo Map để track submission info
+    const submissionMap = new Map();
+    for (const batch of submittedBatches) {
+      for (const completed of batch.completed || []) {
+        if (allOrderIds.includes(completed.orderId)) {
+          submissionMap.set(completed.orderId, {
+            submittedToAmazon: true,
+            batchId: batch._id,
+            batchType: batch.type,
+            submittedAt: batch.createdAt,
+            batchLabel: batch.label,
+          });
+        }
+      }
+    }
+
+    // 5. Merge submission info vào orders
+    const finalOrders = ordersWithDetails.map(order => ({
+      ...order,
+      submittedToAmazon: submissionMap.has(order.orderId),
+      submissionInfo: submissionMap.get(order.orderId) || null,
+    }));
+
+    // 6. Apply filterType để lọc kết quả
+    let filteredOrders = finalOrders;
+    
+    switch (filterType) {
+      case "with-tracking":
+        filteredOrders = finalOrders.filter(o => o.hasTracking);
+        break;
+      case "without-tracking":
+        filteredOrders = finalOrders.filter(o => !o.hasTracking);
+        break;
+      case "submitted":
+        filteredOrders = finalOrders.filter(o => o.submittedToAmazon);
+        break;
+      case "not-submitted":
+        filteredOrders = finalOrders.filter(o => o.hasTracking && !o.submittedToAmazon);
+        break;
+      case "all":
+      default:
+        filteredOrders = finalOrders;
+        break;
+    }
+
+    // 7. Tính toán summary statistics cho reference
+    const stats = {
+      totalScanned: allOrders.length,
+      totalWithTracking: finalOrders.filter(o => o.hasTracking).length,
+      totalWithoutTracking: finalOrders.filter(o => !o.hasTracking).length,
+      totalSubmitted: finalOrders.filter(o => o.submittedToAmazon).length,
+      totalNotSubmitted: finalOrders.filter(o => o.hasTracking && !o.submittedToAmazon).length,
+      filteredCount: filteredOrders.length,
+    };
+
+    return res.json({
+      orders: filteredOrders,
+      totalCount: filteredOrders.length,
+      stats, // Thống kê tham khảo
+      filter: {
+        machineId,
+        limit: Number(limit),
+        fromDate,
+        toDate,
+        status: Array.isArray(status) ? status : [status],
+        filterType,
+      },
+    });
+
+  } catch (err) {
+    next(err);
+  }
+};
+
 module.exports = {
   createBatchFromFile,
   listShippingBatches,
@@ -748,4 +1082,6 @@ module.exports = {
   downloadCompletedFile,
   updateAllFakeTracking,
   downloadAllUpdatedFakeFile,
+  exportOrdersWithTracking,
+  checkOrdersStatus, // ✅ Thêm function mới
 };
