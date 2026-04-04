@@ -65,6 +65,15 @@ const ShippingBatchSchema = new mongoose.Schema(
     tracking_fakes: [FakeItemSchema],
 
     stats: { type: StatsSchema, default: () => ({}) },
+
+    // ✅ Thêm field tracking upload task
+    uploadTaskSent: { type: Boolean, default: false },
+    uploadTaskSentAt: { type: Date },
+    uploadTaskSentBy: { 
+      type: String, 
+      enum: ["auto", "frontend", "api", "cron"],
+      default: "auto"
+    },
   },
   {
     timestamps: true,

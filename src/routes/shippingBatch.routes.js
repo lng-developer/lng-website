@@ -35,4 +35,22 @@ router.get(
   shippingBatchController.checkOrdersStatus
 );
 
+// ✅ Route mới: FE gửi task UPLOAD_TRACKING thủ công
+router.post(
+  "/manual-upload-task",
+  shippingBatchController.manualUploadTask
+);
+
+// ✅ Route mới: FE lấy danh sách batch có thể upload
+router.get(
+  "/uploadable",
+  shippingBatchController.getUploadableBatches
+);
+
+// ✅ Route mới: FE tạo batch từ danh sách orders
+router.post(
+  "/create-from-orders",
+  shippingBatchController.createBatchFromOrders
+);
+
 module.exports = router;
