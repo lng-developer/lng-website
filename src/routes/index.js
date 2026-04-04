@@ -29,6 +29,7 @@ const ShippingBatchRoutes = require("./shippingBatch.routes");
 const ToDoListRoutes = require("./todoList.routes");
 const EtsyOrderRoutes = require("./etsyOrder.routes")
 const EtsyListingRoutes = require("./etsyListing.routes")
+const cronJobRoutes = require("./cronJob.routes");
 module.exports = {
   roleRoutes,
   userRoutes,
@@ -60,5 +61,6 @@ module.exports = {
   ShippingBatchRoutes,
   ToDoListRoutes,
   EtsyOrderRoutes,
-  EtsyListingRoutes
+  EtsyListingRoutes,
+  cronJobRoutes
 };

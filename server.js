@@ -54,7 +54,8 @@ const {
   ShippingBatchRoutes,
   ToDoListRoutes,
   EtsyOrderRoutes,
-  EtsyListingRoutes
+  EtsyListingRoutes,
+  cronJobRoutes
 } = require("./src/routes");
 
 app.use("/api/role", roleRoutes);
@@ -83,10 +84,11 @@ app.use("/api/logs", realtimeLogRoutes);
 app.use("/api/teams", teamRoutes);
 app.use("/api/admin", adminSessionRoutes);
 app.use("/api/points", PointsRoutes);
-app.use("/api/shipping-batches", ShippingBatchRoutes);
+app.use("/api/shipping-batch", ShippingBatchRoutes);
 app.use("/api/to-do", ToDoListRoutes);
 app.use("/api/etsy", EtsyOrderRoutes);
 app.use("/api/etsy-listing", EtsyListingRoutes);
+app.use("/api/cron-jobs", cronJobRoutes);
 
 
 // ===== HTTP server
@@ -130,6 +132,18 @@ app.set("presence", presence);
 
 registerSocketHandlers({ app, io });
 app.use("/api/ext", extRoutes);
+
+// ===== Khởi tạo Cron Jobs
+const cronJobService = require("./src/service/cronJobs");
+cronJobService.initializeJobs();
+
+// Graceful shutdown cho cron jobs
+const originalShutdown = shutdown;
+function shutdown() {
+  console.log('� [CRON] Stopping all cron jobs...');
+  cronJobService.stopAllJobs();
+  originalShutdown();
+}
 
 // ===== Error handler
 app.use((err, _req, res, _next) => {

@@ -19,7 +19,7 @@ const CompletedItemSchema = new mongoose.Schema(
     isFake: { type: Boolean, default: false },
     source: {
       type: String,
-      enum: ["system", "fake"],
+      enum: ["system", "fake", "direct_query"], // ✅ Thêm direct_query
       default: "system",
     },
 
@@ -48,7 +48,7 @@ const ShippingBatchSchema = new mongoose.Schema(
 
     type: {
       type: String,
-      enum: ["CONFIRM", "UPDATE_FAKE", "UPDATE_GLOBAL"],
+      enum: ["CONFIRM", "UPDATE_FAKE", "UPDATE_GLOBAL", "DIRECT_EXPORT"], // ✅ Thêm DIRECT_EXPORT
       default: "CONFIRM",
     },
 
@@ -56,7 +56,7 @@ const ShippingBatchSchema = new mongoose.Schema(
 
     status: {
       type: String,
-      enum: ["CREATED", "CONFIRM_FILE_READY", "UPDATE_FAKE"],
+      enum: ["CREATED", "CONFIRM_FILE_READY", "UPDATE_FAKE", "COMPLETED"], // ✅ Thêm COMPLETED
       default: "CREATED",
     },
 
