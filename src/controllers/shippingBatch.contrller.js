@@ -128,7 +128,7 @@ const createBatchFromFile = async (req, res, next) => {
     const completed = [];
     const tracking_fakes = [];
 
-    // 3) Với mỗi orderId đã lọc: lấy tracking hoặc gen fake
+    // 3) Với mỗi orderId đã lọc: chỉ xử lý đơn có real tracking
     for (const orderId of orderIds) {
       const realTracking = await getRealTrackingForOrder(orderId);
 
@@ -141,28 +141,19 @@ const createBatchFromFile = async (req, res, next) => {
           source: "system",
         });
       } else {
-        // Đơn chưa có tracking -> gen fake
-        const fake = generateFakeTracking(orderId);
-
-        completed.push({
-          orderId,
-          tracking: fake,
-          isFake: true,
-          source: "fake",
-        });
-
+        // Đơn chưa có tracking -> chỉ lưu vào tracking_fakes để theo dõi, không tạo fake tracking
         tracking_fakes.push({
           orderId,
-          tracking: fake,
+          note: "no real tracking available",
         });
       }
     }
 
     // 4) Stats
     const stats = {
-      totalOrders: completed.length,
-      totalFake: completed.filter((r) => r.isFake).length,
-      totalReal: completed.filter((r) => !r.isFake).length,
+      totalOrders: completed.length + tracking_fakes.length,
+      totalReal: completed.length, // chỉ đơn có real tracking
+      totalFake: tracking_fakes.length, // đơn không có tracking
     };
 
     // 5) Tạo record batch
@@ -511,23 +502,6 @@ const downloadCompletedFile = async (req, res, next) => {
     next(err);
   }
 };
-
-function buildShipDateString(baseDate) {
-  const ref = new Date(baseDate);
-
-  const shipDate = new Date(
-    Date.UTC(
-      ref.getUTCFullYear(),
-      ref.getUTCMonth(),
-      ref.getUTCDate(),
-      0,
-      22,
-      22,
-    ),
-  );
-
-  return shipDate.toISOString().replace(".000Z", "+00:00");
-}
 
 function buildGlobalUpdateFile(rows, options = {}) {
   const { carrierCode = "USPS", shipMethod = "USPS First Class" } = options;

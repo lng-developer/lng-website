@@ -4,7 +4,7 @@
   "main": "index.js",
   "type": "commonjs",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1",
+    "test": "jest",
     "start": "node server.js",
     "dev": "nodemon server.js"
   },
@@ -42,6 +42,8 @@
     "yargs": "^18.0.0"
   },
   "devDependencies": {
+    "fast-check": "^4.6.0",
+    "jest": "^30.3.0",
     "nodemon": "^3.1.10"
   }
 }
