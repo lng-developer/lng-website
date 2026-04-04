@@ -85,6 +85,7 @@ app.use("/api/teams", teamRoutes);
 app.use("/api/admin", adminSessionRoutes);
 app.use("/api/points", PointsRoutes);
 app.use("/api/shipping-batch", ShippingBatchRoutes);
+app.use("/api/shipping-batches", ShippingBatchRoutes); // ✅ Alias để hỗ trợ cả hai
 app.use("/api/to-do", ToDoListRoutes);
 app.use("/api/etsy", EtsyOrderRoutes);
 app.use("/api/etsy-listing", EtsyListingRoutes);
