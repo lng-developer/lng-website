@@ -3122,6 +3122,37 @@ const computeBaseCostForOrder = async (req, res) => {
         continue;
       }
 
+      // (NEW) Check manual override first
+      if (item.manual_vendor_cost_center_id) {
+        const vcc = await VendorCostCenter.findById(
+          item.manual_vendor_cost_center_id
+        ).lean();
+        if (vcc && Number(vcc.base_cost || 0) > 0) {
+          const vId = await cachedGetVendorId(vcc.vendor_product);
+          preItems.push({
+            item,
+            sku: originalSku,
+            mapped_sku: mappedSku,
+            used_sku: usedSku,
+            configCode,
+            productTypeValue: null,
+            matchedBy: "manual",
+            sizeValue: vcc.vendor_size,
+            colorValue: vcc.vendor_color,
+            manualVcc: vcc,
+            vendorId: vId,
+          });
+          // For manual selection, we "fake" a candidate set containing only this vendor
+          // so that the intersection logic still works (or we can just skip it if forced)
+          candidateSetsPerItem.push(new Set([vId]));
+          continue;
+        } else {
+          console.warn(
+            `Manual VCC ${item.manual_vendor_cost_center_id} not found or has 0 cost. Falling back to auto.`
+          );
+        }
+      }
+
       const labelValueMap = extractLabelValueMapFromItem(item);
       const {
         cfg,
@@ -3208,33 +3239,6 @@ const computeBaseCostForOrder = async (req, res) => {
               "[EBM/EBMA] Không tìm thấy item có order===5 và cũng không đủ 5 items để fallback."
             );
           }
-        }
-      }
-
-      // (NEW) Check manual override first
-      if (item.manual_vendor_cost_center_id) {
-        const vcc = await VendorCostCenter.findById(item.manual_vendor_cost_center_id).lean();
-        if (vcc && Number(vcc.base_cost || 0) > 0) {
-          const vId = await cachedGetVendorId(vcc.vendor_product);
-          preItems.push({
-            item,
-            sku: originalSku,
-            mapped_sku: mappedSku,
-            used_sku: usedSku,
-            configCode,
-            productTypeValue,
-            matchedBy,
-            sizeValue: vcc.vendor_size,
-            colorValue: vcc.vendor_color,
-            manualVcc: vcc,
-            vendorId: vId,
-          });
-          // For manual selection, we "fake" a candidate set containing only this vendor
-          // so that the intersection logic still works (or we can just skip it if forced)
-          candidateSetsPerItem.push(new Set([vId]));
-          continue;
-        } else {
-          console.warn(`Manual VCC ${item.manual_vendor_cost_center_id} not found or has 0 cost. Falling back to auto.`);
         }
       }
 
