@@ -228,6 +228,39 @@ const iso = (d) => d.toISOString();
 const pad2 = (n) => String(n).padStart(2, "0");
 const labelDDMM = (d) => `${pad2(d.getUTCDate())}-${pad2(d.getUTCMonth() + 1)}`;
 
+/** role từ JWT có thể là string hoặc array */
+function hasRoleMatch(userRole, target) {
+  const norm = (s) =>
+    String(s || "")
+      .trim()
+      .toLowerCase();
+  const wanted = norm(target);
+  if (Array.isArray(userRole)) {
+    return userRole.some((r) => norm(r) === wanted);
+  }
+  return norm(userRole) === wanted;
+}
+
+/** Gom sellerId trong team: userIds + leaderId (theo team.model.js) */
+function collectTeamMemberObjectIds(teamDocs) {
+  const uniq = new Map();
+  for (const teamDoc of teamDocs || []) {
+    const rawIds = [
+      ...(teamDoc.userIds || []),
+      ...(teamDoc.leaderId ? [teamDoc.leaderId] : []),
+    ];
+    for (const id of rawIds) {
+      const sid = String(id || "");
+      if (!mongoose.Types.ObjectId.isValid(sid)) continue;
+      uniq.set(sid, new mongoose.Types.ObjectId(sid));
+    }
+  }
+  return {
+    objectIds: Array.from(uniq.values()),
+    idStrSet: new Set(uniq.keys()),
+  };
+}
+
 const getReportMatrix = async (req, res) => {
   try {
     const { from, to, seller, userNull, team } = req.query;
@@ -241,8 +274,8 @@ const getReportMatrix = async (req, res) => {
     // ===== 0) Quyền hạn =====
     const role = req.user?.role || "";
     const userId = req.user?.userId || "";
-    const isAdmin = /^admin$/i.test(role);
-    const isSeller = /^seller$/i.test(role);
+    const isAdmin = hasRoleMatch(role, "Admin");
+    const isSeller = hasRoleMatch(role, "Seller");
 
     if (!isAdmin && !isSeller) {
       return res
@@ -276,7 +309,7 @@ const getReportMatrix = async (req, res) => {
 
     let sellerIdSet = null;
 
-    // ✅ NEW: team filter (chỉ áp dụng khi admin; seller vẫn chỉ xem chính họ)
+    // team filter: admin + ?team= ; seller-leader xem team mình dẫn (Team.leaderId)
     let teamUserObjectIds = null;
     if (isAdmin && team) {
       if (!mongoose.Types.ObjectId.isValid(team)) {
@@ -309,9 +342,78 @@ const getReportMatrix = async (req, res) => {
       sellerIdSet = new Set(Array.from(uniq.keys())); // dùng cho ADS filter
     }
 
+    let sellerLedTeams = null;
+    if (isSeller && !isAdmin) {
+      sellerLedTeams = await Team.find({
+        leaderId: new mongoose.Types.ObjectId(userId),
+        active: { $ne: false },
+      })
+        .select({ _id: 1, userIds: 1, leaderId: 1 })
+        .lean();
+    }
+    const isSellerTeamLeader = !!(sellerLedTeams && sellerLedTeams.length);
+
     if (isSeller) {
-      matchStage.sellerId = new mongoose.Types.ObjectId(userId);
-      sellerIdSet = new Set([String(userId)]);
+      if (isSellerTeamLeader) {
+        let teamsForScope = sellerLedTeams;
+        if (team) {
+          if (!mongoose.Types.ObjectId.isValid(team)) {
+            return res.status(400).json({ message: "Invalid team id" });
+          }
+          const teamStr = String(team);
+          const ledOnly = sellerLedTeams.filter((t) => String(t._id) === teamStr);
+          if (!ledOnly.length) {
+            return res.status(403).json({
+              message: "You can only view teams you lead",
+            });
+          }
+          teamsForScope = ledOnly;
+        }
+
+        const { objectIds: memberIds, idStrSet: memberSet } =
+          collectTeamMemberObjectIds(teamsForScope);
+
+        const applyMemberFilter = () => {
+          if (!memberIds.length) {
+            matchStage.sellerId = { $in: [] };
+            sellerIdSet = new Set();
+            return;
+          }
+          if (seller) {
+            const reqIds = seller
+              .split(",")
+              .map((s) => s.trim())
+              .filter(Boolean)
+              .filter((id) => mongoose.Types.ObjectId.isValid(id))
+              .map((id) => new mongoose.Types.ObjectId(id));
+            if (reqIds.length) {
+              const allowed = new Set(memberIds.map(String));
+              const intersect = reqIds.filter((id) =>
+                allowed.has(String(id)),
+              );
+              if (!intersect.length) {
+                matchStage.sellerId = { $in: [] };
+                sellerIdSet = new Set();
+              } else if (intersect.length === 1) {
+                matchStage.sellerId = intersect[0];
+                sellerIdSet = new Set(intersect.map(String));
+              } else {
+                matchStage.sellerId = { $in: intersect };
+                sellerIdSet = new Set(intersect.map(String));
+              }
+              return;
+            }
+          }
+          matchStage.sellerId =
+            memberIds.length === 1 ? memberIds[0] : { $in: memberIds };
+          sellerIdSet = memberSet;
+        };
+
+        applyMemberFilter();
+      } else {
+        matchStage.sellerId = new mongoose.Types.ObjectId(userId);
+        sellerIdSet = new Set([String(userId)]);
+      }
     } else {
       // Admin flow: ưu tiên lọc theo team nếu có
       if (teamUserObjectIds && teamUserObjectIds.length) {
