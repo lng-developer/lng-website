@@ -1072,6 +1072,7 @@ const checkOrdersStatus = async (req, res, next) => {
     // 1. Build query filter cho orders
     const orderFilter = {
       status: { $in: Array.isArray(status) ? status : [status] },
+      shopId: machineId, // ✅ Filter orders theo shopId = machineId
     };
 
     // Filter theo ngày tạo nếu có
@@ -1087,19 +1088,24 @@ const checkOrdersStatus = async (req, res, next) => {
       }
     }
 
-    // 2. Query tất cả orders theo filter
+    // 2. Query tất cả orders theo filter (shopId = machineId)
     const allOrders = await OrderCustomProduct.find(orderFilter)
       .populate('shopId', 'name store') // ✅ Populate shop info
       .sort({ createdAt: -1 })
       .limit(Number(limit))
       .lean();
 
+    console.log(`🔍 [CHECK_ORDERS] Filtering orders for shopId: ${machineId}`);
+    console.log(`📊 [CHECK_ORDERS] Found ${allOrders.length} orders for shop ${machineId}`);
+
     if (!allOrders.length) {
+      console.log(`⚠️ [CHECK_ORDERS] No orders found for shopId: ${machineId}`);
       return res.json({
         orders: [],
         totalCount: 0,
         filter: {
           machineId,
+          shopId: machineId, // ✅ Thêm shopId vào response để rõ ràng
           limit: Number(limit),
           fromDate,
           toDate,
@@ -1221,6 +1227,7 @@ const checkOrdersStatus = async (req, res, next) => {
       stats, // Thống kê tham khảo
       filter: {
         machineId,
+        shopId: machineId, // ✅ Thêm shopId vào response
         limit: Number(limit),
         fromDate,
         toDate,
@@ -1464,6 +1471,8 @@ module.exports = {
  */
 const manualUploadTask = async (req, res, next) => {
   try {
+    console.log('🚀 [DEBUG] manualUploadTask called with body:', JSON.stringify(req.body, null, 2));
+    
     const { 
       batchId, 
       machineId, 
@@ -1475,6 +1484,7 @@ const manualUploadTask = async (req, res, next) => {
     } = req.body;
 
     if (!batchId) {
+      console.log('❌ [DEBUG] Missing batchId');
       return res.status(400).json({
         ok: false,
         message: "batchId is required"
@@ -1900,6 +1910,19 @@ const createBatchFromOrders = async (req, res, next) => {
           try {
             const io = req.app.get("io");
             if (io) {
+              console.log(`🔌 [DEBUG] Socket.IO available, total clients: ${io.of("/").sockets.size}`);
+              
+              // ✅ Kiểm tra room trước khi gửi
+              const roomName = `machine:${machineId}`;
+              const roomSockets = await io.in(roomName).fetchSockets();
+              console.log(`🏠 [DEBUG] Room ${roomName} has ${roomSockets.length} sockets:`);
+              roomSockets.forEach((sock, index) => {
+                console.log(`  Socket ${index + 1}: ${sock.id} (machine: ${sock.data?.machineId}, shop: ${sock.data?.shopId})`);
+              });
+
+              if (roomSockets.length === 0) {
+                console.log(`⚠️ [DEBUG] No sockets in room ${roomName} - task will not be received!`);
+              }
               // Tạo file content
               const shipDateStr = buildShipDateString(new Date());
               const fileContent = buildCompletedShippingFile(completed, {
@@ -1946,7 +1969,17 @@ const createBatchFromOrders = async (req, res, next) => {
               };
 
               // Gửi task
+              console.log(`📡 [DEBUG] Emitting task to room: ${roomName}`);
+              console.log(`📦 [DEBUG] Task payload:`, {
+                type: task.type,
+                batchId: task.payload.batchId.toString(),
+                machineId: task.payload.machineId,
+                shopId: task.payload.shopId,
+                trackingCount: task.payload.trackingData.length
+              });
+              
               io.to(`machine:${machineId}`).emit("server:task", task);
+              console.log(`✅ [DEBUG] Task emitted to ${roomSockets.length} sockets in room ${roomName}`);
 
               // Đánh dấu đã gửi
               batch.uploadTaskSent = true;
