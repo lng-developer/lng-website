@@ -5,8 +5,8 @@ const upload = multer({ storage: multer.memoryStorage() });
 const { shippingBatchController } = require("../controllers");
 
 // ✅ Debug endpoint
-const { debugSocketRooms } = require("../../debug-socket-rooms");
-router.get("/debug/socket-rooms", debugSocketRooms);
+// const { debugSocketRooms } = require("../../debug-socket-rooms");
+// router.get("/debug/socket-rooms", debugSocketRooms);
 
 router.post(
   "/",
