@@ -30,9 +30,15 @@ module.exports = function registerSocketHandlers({ app, io }) {
       socket.handshake.address ||
       "";
 
+    console.log(`🔌 [SOCKET] New connection: ${socket.id}`);
+    console.log(`📋 [SOCKET] Auth data:`, { shopId, machineId, label, version });
+
     // Join room để REST có thể emit đúng client nếu cần
     socket.join(`shop:${shopId}`);
     socket.join(`machine:${machineId}`);
+
+    console.log(`🏠 [SOCKET] Socket ${socket.id} joined rooms:`, [`shop:${shopId}`, `machine:${machineId}`]);
+    console.log(`📊 [SOCKET] Room machine:${machineId} now has ${io.sockets.adapter.rooms.get(`machine:${machineId}`)?.size || 0} sockets`);
 
     // ONLINE
     presence.online({
