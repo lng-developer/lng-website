@@ -238,6 +238,7 @@ function normalizeProviderKey(vendorDoc) {
   if (ft.includes("mangotee") || nm.includes("mangotee")) return "mangotee";
   if (ft.includes("ss88") || nm.includes("ss88")) return "ss88";
   if (ft.includes("lenful") || nm.includes("lenful")) return "lenful";
+  if (ft.includes("pgprint") || nm.includes("pgprint")) return "pgprint";
   if (ft.includes("lng") || nm.includes("lng")) return "lng";
   // có thể bổ sung thêm provider khác ở đây
   return null;
@@ -769,7 +770,7 @@ const retrySendFulfillment = async (req, res) => {
     );
     const providersHint = AVAILABLE_PROVIDERS.length
       ? AVAILABLE_PROVIDERS.join(" | ")
-      : "grabink | merchfox | merchize | printway | mangotee | lng | lenful | ss88";
+      : "grabink | merchfox | merchize | printway | mangotee | lng | lenful | ss88 | pgprint";
 
     // 1) Nếu không truyền provider, auto-resolve từ VendorProduct → Vendor
     if (!providerKey) {
