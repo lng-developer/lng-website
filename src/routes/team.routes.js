@@ -24,7 +24,7 @@ router.put(
 router.get(
     "/",
     authenticateToken,
-    authorizeRoles("Admin"),
+    authorizeRoles("Admin", "Seller"),
     teamController.getTeams
 );
 

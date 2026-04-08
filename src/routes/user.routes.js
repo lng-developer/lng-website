@@ -25,7 +25,7 @@ router.get("/employee-code", userController.getAllEmployeeCodes);
 router.get(
   "/sellers",
   authenticateToken,
-  authorizeRoles("Admin"),
+  authorizeRoles("Admin", "Seller"),
   userController.getAllSeller
 );
 
