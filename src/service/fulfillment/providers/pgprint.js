@@ -35,20 +35,14 @@ function computeHmac(secretKey, bodyObject) {
 
 /* -------------------- Builders -------------------- */
 /**
- * Build files array cho một line item từ fulfillment_file.
- * PGPrint format: [{ id, name, fileUrl: [url] }]
+ * Build fileUrls array cho một line item từ fulfillment_file.
+ * PGPrint format: fileUrls: ["url1", "url2"]
  */
-function buildFiles(item) {
+function buildFileUrls(item) {
     const ff = item.fulfillment_file;
-    if (!ff) {
-        // Fallback sang baseImage
-        const base = item?.baseImage?.imageUrl || '';
-        if (!base) return [];
-        return [{ id: 'main', name: 'Main', fileUrl: [String(base)] }];
-    }
 
-    const result = [];
     const getEntries = () => {
+        if (!ff) return [];
         if (ff instanceof Map) return [...ff.entries()];
         if (Array.isArray(ff)) return ff.map((x, i) => [x?.key || String(i), x?.url || x]);
         if (typeof ff === 'object') return Object.entries(ff);
@@ -56,43 +50,31 @@ function buildFiles(item) {
         return [];
     };
 
-    const nameMap = {
-        front: 'Main',
-        back: 'Back',
-        left_sleeve: 'Left Sleeve',
-        right_sleeve: 'Right Sleeve',
-        collar: 'Collar',
-        neck: 'Neck Label',
-    };
-
-    getEntries().forEach(([key, url], idx) => {
+    const urls = [];
+    getEntries().forEach(([, url]) => {
         const urlStr = String(url || '').trim();
-        if (!urlStr || !/^https?:\/\//i.test(urlStr)) return;
-        result.push({
-            id: safeStr(key) || `file_${idx}`,
-            name: nameMap[key] || (safeStr(key) || 'Main'),
-            fileUrl: [urlStr],
-        });
+        if (urlStr && /^https?:\/\//i.test(urlStr)) urls.push(urlStr);
     });
 
-    if (result.length === 0) {
+    // Fallback sang baseImage
+    if (urls.length === 0) {
         const base = item?.baseImage?.imageUrl || '';
-        if (base) result.push({ id: 'main', name: 'Main', fileUrl: [String(base)] });
+        if (base && /^https?:\/\//i.test(base)) urls.push(String(base));
     }
 
-    return result;
+    return urls;
 }
 
 /**
  * Build một line item theo schema PGPrint:
- * { name, sku, quantity, files, mockupImages }
+ * { name, sku, quantity, fileUrls, mockupImages }
  */
 function buildLineItem(item) {
     const cost = item.cost_breakdown || {};
     const sku = safeStr(cost.matchedSku || item.sku || '');
     const name = safeStr(cost.itemDisplayName || item.title || item.name || sku);
     const quantity = Number(item.quantity || 1);
-    const files = buildFiles(item);
+    const fileUrls = buildFileUrls(item);
 
     const mockupImages = [];
     const mockup = item?.baseImage?.imageUrl || item?.snapshotImage || '';
@@ -100,7 +82,7 @@ function buildLineItem(item) {
         mockupImages.push(String(mockup));
     }
 
-    return { name, sku, quantity, files, mockupImages };
+    return { name, sku, quantity, fileUrls, mockupImages };
 }
 
 /**
@@ -157,8 +139,8 @@ function validatePayload(p) {
         p.line_items.forEach((it, idx) => {
             if (!it.sku) errors.push(`line_items[${idx}] missing sku`);
             if (!(Number(it.quantity) > 0)) errors.push(`line_items[${idx}].quantity must be > 0`);
-            if (!Array.isArray(it.files) || it.files.length === 0) {
-                errors.push(`line_items[${idx}] has no files (design images)`);
+            if (!Array.isArray(it.fileUrls) || it.fileUrls.length === 0) {
+                errors.push(`line_items[${idx}] has no fileUrls (design images)`);
             }
         });
     }
