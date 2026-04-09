@@ -531,11 +531,87 @@ class CronJobService {
   }
 
   /**
-   * Thực thi uploadTracking job (placeholder)
+   * Thực thi uploadTracking job
    */
-  async executeUploadTracking(config) {
-    // TODO: Implement upload tracking logic
-    return { message: "Upload tracking not implemented yet" };
+  async executeUploadTracking(config, jobLog = null) {
+    if (jobLog) {
+      await jobLog.addLog('info', `Executing uploadTracking job`, { configId: config.id });
+    }
+    
+    console.log(`🤖 [AUTO-CRON] Executing uploadTracking auto job`);
+    console.log(`📋 [AUTO-CRON] Config ID: ${config.id}`);
+    console.log(`⚙️  [AUTO-CRON] Settings:`, {
+      maxBatches: config.config?.maxBatches || 10,
+      dryRun: config.config?.dryRun || false,
+      carrierCode: config.config?.carrierCode || "USPS",
+      shipMethod: config.config?.shipMethod || "USPS First Class"
+    });
+    
+    const { shippingBatchController } = require("../controllers");
+    
+    // Tạo mock req/res objects
+    const mockReq = {
+      body: {
+        maxBatches: config.config?.maxBatches || 10,
+        dryRun: config.config?.dryRun || false,
+        carrierCode: config.config?.carrierCode || "USPS",
+        shipMethod: config.config?.shipMethod || "USPS First Class"
+      },
+      headers: {}, // Không có user-agent để đánh dấu là auto call
+      app: {
+        get: (key) => {
+          if (key === 'io') {
+            console.log(`🔍 [AUTO-CRON] Requesting Socket.IO instance: ${!!this.io}`);
+            return this.io; // Trả về Socket.IO instance thực tế
+          }
+          return null;
+        }
+      }
+    };
+    
+    let result = null;
+    const mockRes = {
+      status: (code) => ({
+        json: (data) => {
+          result = { statusCode: code, ...data };
+          return mockRes;
+        }
+      }),
+      json: (data) => {
+        result = { statusCode: 200, ...data };
+        return mockRes;
+      }
+    };
+    
+    const mockNext = (err) => {
+      throw err;
+    };
+    
+    if (jobLog) {
+      await jobLog.addLog('info', `Calling autoUploadTracking function`);
+    }
+    
+    // Gọi hàm autoUploadTracking thực tế
+    await shippingBatchController.autoUploadTracking(mockReq, mockRes, mockNext);
+    
+    if (jobLog) {
+      await jobLog.addLog('info', `uploadTracking completed`, { 
+        statusCode: result?.statusCode,
+        processed: result?.processed,
+        success: result?.success,
+        failed: result?.failed
+      });
+    }
+    
+    console.log(`✅ [AUTO-CRON] uploadTracking completed with status ${result?.statusCode}`);
+    console.log(`📊 [AUTO-CRON] Summary:`, {
+      ok: result?.ok,
+      processed: result?.processed || 0,
+      success: result?.success || 0,
+      failed: result?.failed || 0
+    });
+    
+    return result;
   }
 
   /**
