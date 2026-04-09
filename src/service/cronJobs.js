@@ -6,6 +6,15 @@ class CronJobService {
   constructor() {
     this.jobs = new Map();
     this.autoJobs = new Map(); // Map để lưu các auto jobs từ ConfigAuto
+    this.io = null; // Lưu Socket.IO instance
+  }
+
+  /**
+   * Set Socket.IO instance để sử dụng trong auto jobs
+   */
+  setSocketIO(io) {
+    this.io = io;
+    console.log('🔌 [CRON] Socket.IO instance set for cron jobs');
   }
 
   /**
@@ -286,13 +295,19 @@ class CronJobService {
    * Thực thi một auto job
    */
   async executeAutoJob(config) {
-    const startTime = new Date();
-    console.log(`🤖 [CRON][${startTime.toISOString()}] Executing auto job: ${config.id} (${config.type})`);
+    const AutoJobLog = require("../models/autoJobLog.model");
+    let jobLog = null;
     
     try {
+      // Tạo log entry
+      jobLog = await AutoJobLog.createExecution(config.id, config.type, config.config);
+      await jobLog.addLog('info', `Starting auto job: ${config.id} (${config.type})`);
+      
+      console.log(`🤖 [CRON][${jobLog.startTime.toISOString()}] Executing auto job: ${config.id} (${config.type})`);
+      
       // Cập nhật trạng thái đang chạy
       await this.updateConfigStats(config.id, {
-        lastRunAt: startTime,
+        lastRunAt: jobLog.startTime,
         lastRunStatus: "running"
       });
 
@@ -300,51 +315,73 @@ class CronJobService {
       
       switch (config.type) {
         case "vendorSyncBatch":
-          result = await this.executeVendorSyncBatch(config);
+          result = await this.executeVendorSyncBatch(config, jobLog);
           break;
         case "autoRequestExtension":
-          result = await this.executeAutoRequestExtension(config);
+          result = await this.executeAutoRequestExtension(config, jobLog);
           break;
         case "uploadTracking":
-          result = await this.executeUploadTracking(config);
+          result = await this.executeUploadTracking(config, jobLog);
           break;
         default:
           throw new Error(`Unknown auto job type: ${config.type}`);
       }
 
-      const endTime = new Date();
-      const duration = endTime - startTime;
+      // Log thành công
+      const stats = {
+        processed: result?.processed || result?.processedOrders || 0,
+        success: result?.success || result?.ok || 0,
+        failed: result?.failed || result?.fail || 0,
+        details: result
+      };
       
+      await jobLog.setSuccess(result, stats);
+      await jobLog.addLog('info', `Job completed successfully`, { result, stats });
+
       // Cập nhật thống kê thành công
       await this.updateConfigStats(config.id, {
-        lastRunAt: endTime,
+        lastRunAt: jobLog.endTime,
         lastRunStatus: "success",
         lastRunResult: result,
         $inc: { "stats.totalRuns": 1 }
       });
 
-      console.log(`✅ [CRON][${endTime.toISOString()}] Auto job '${config.id}' completed successfully`);
-      console.log(`📊 [CRON][${config.id}] Duration: ${duration}ms, Result:`, result);
+      console.log(`✅ [CRON][${jobLog.endTime.toISOString()}] Auto job '${config.id}' completed successfully`);
+      console.log(`📊 [CRON][${config.id}] Duration: ${jobLog.duration}ms, Result:`, result);
+      
+      return result;
       
     } catch (error) {
-      const endTime = new Date();
-      
+      // Log lỗi
+      if (jobLog) {
+        await jobLog.setError(error);
+        await jobLog.addLog('error', `Job failed: ${error.message}`, { 
+          error: error.message, 
+          stack: error.stack 
+        });
+      }
+
       // Cập nhật thống kê lỗi
       await this.updateConfigStats(config.id, {
-        lastRunAt: endTime,
+        lastRunAt: new Date(),
         lastRunStatus: "error",
         lastRunResult: { error: error.message },
         $inc: { "stats.totalRuns": 1 }
       });
 
-      console.error(`❌ [CRON][${endTime.toISOString()}] Auto job '${config.id}' failed:`, error.message);
+      console.error(`❌ [CRON] Auto job '${config.id}' failed:`, error.message);
+      throw error;
     }
   }
 
   /**
    * Thực thi autoRequestExtension job
    */
-  async executeAutoRequestExtension(config) {
+  async executeAutoRequestExtension(config, jobLog = null) {
+    if (jobLog) {
+      await jobLog.addLog('info', `Executing autoRequestExtension job`, { configId: config.id });
+    }
+    
     console.log(`🤖 [AUTO-CRON] Executing autoRequestExtension auto job`);
     console.log(`📋 [AUTO-CRON] Config ID: ${config.id}`);
     console.log(`⚙️  [AUTO-CRON] Settings:`, {
@@ -354,7 +391,7 @@ class CronJobService {
     
     const { extController } = require("../controllers");
     
-    // Tạo mock req/res objects giống như API call
+    // Tạo mock req/res objects với Socket.IO thực tế
     const mockReq = {
       body: {
         type: config.config?.taskType || 'IMPORT_ORDERS',
@@ -366,8 +403,9 @@ class CronJobService {
       app: {
         get: (key) => {
           if (key === 'io') {
-            // Trả về null để skip socket.io trong test mode
-            return null;
+            // Không log ở đây để tránh parallel save
+            console.log(`🔍 [AUTO-CRON] Requesting Socket.IO instance: ${!!this.io}`);
+            return this.io; // Trả về Socket.IO instance thực tế
           }
           return null;
         }
@@ -392,8 +430,21 @@ class CronJobService {
       throw err;
     };
     
+    if (jobLog) {
+      await jobLog.addLog('info', `Calling autoRequestExtensionAll function`);
+    }
+    
     // Gọi hàm autoRequestExtensionAll thực tế
     await extController.autoRequestExtensionAll(mockReq, mockRes, mockNext);
+    
+    if (jobLog) {
+      await jobLog.addLog('info', `autoRequestExtension completed`, { 
+        statusCode: result?.statusCode,
+        processed: result?.processed,
+        success: result?.success,
+        failed: result?.failed
+      });
+    }
     
     console.log(`✅ [AUTO-CRON] autoRequestExtension completed with status ${result?.statusCode}`);
     console.log(`📊 [AUTO-CRON] Summary:`, {
@@ -409,7 +460,11 @@ class CronJobService {
   /**
    * Thực thi vendorSyncBatch job
    */
-  async executeVendorSyncBatch(config) {
+  async executeVendorSyncBatch(config, jobLog = null) {
+    if (jobLog) {
+      await jobLog.addLog('info', `Executing vendorSyncBatch job`, { configId: config.id });
+    }
+    
     console.log(`🤖 [AUTO-CRON] Executing vendorSyncBatch auto job`);
     console.log(`📋 [AUTO-CRON] Config ID: ${config.id}`);
     console.log(`⚙️  [AUTO-CRON] Settings:`, {
@@ -446,8 +501,22 @@ class CronJobService {
       throw err;
     };
     
+    if (jobLog) {
+      await jobLog.addLog('info', `Calling vendorSyncBatch function`);
+    }
+    
     // Gọi hàm vendorSyncBatch thực tế
     await extController.vendorSyncBatch(mockReq, mockRes, mockNext);
+    
+    if (jobLog) {
+      await jobLog.addLog('info', `vendorSyncBatch completed`, { 
+        statusCode: result?.statusCode,
+        processedOrders: result?.processedOrders,
+        scanned: result?.scanned,
+        success: result?.ok,
+        failed: result?.fail
+      });
+    }
     
     console.log(`✅ [AUTO-CRON] vendorSyncBatch completed with status ${result?.statusCode}`);
     console.log(`📊 [AUTO-CRON] Summary:`, {

@@ -56,7 +56,8 @@ const {
   EtsyOrderRoutes,
   EtsyListingRoutes,
   cronJobRoutes,
-  configAutoRoutes
+  configAutoRoutes,
+  autoJobLogRoutes
 } = require("./src/routes");
 
 app.use("/api/role", roleRoutes);
@@ -92,6 +93,7 @@ app.use("/api/etsy", EtsyOrderRoutes);
 app.use("/api/etsy-listing", EtsyListingRoutes);
 app.use("/api/cron-jobs", cronJobRoutes);
 app.use("/api/config-auto", configAutoRoutes);
+app.use("/api/auto-job-logs", autoJobLogRoutes);
 
 
 // ===== HTTP server
@@ -138,6 +140,7 @@ app.use("/api/ext", extRoutes);
 
 // ===== Khởi tạo Cron Jobs
 const cronJobService = require("./src/service/cronJobs");
+cronJobService.setSocketIO(io); // Truyền Socket.IO instance vào cron jobs
 cronJobService.initializeJobs();
 
 // Graceful shutdown cho cron jobs
