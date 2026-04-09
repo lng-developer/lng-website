@@ -30,6 +30,7 @@ const Notification = require("./notification.model")
 const Issue = require("./issue.model")
 const EtsyOrder = require("./etsyOrder.model")
 const ConfigAuto = require("./configAuto.model")
+const AutoJobLog = require("./autoJobLog.model")
 
 // Cau hinh mongoose dang global
 mongoose.Promise = global.Promise;
@@ -68,6 +69,7 @@ db.Notification = Notification
 db.Issue = Issue
 db.EtsyOrder = EtsyOrder
 db.ConfigAuto = ConfigAuto
+db.AutoJobLog = AutoJobLog
 db.connectDB = async () => {
   await mongoose
     .connect(process.env.MONGO_URI, {

@@ -966,6 +966,9 @@ async function requestExtension(req, res) {
   const isAutoCall = !req.headers['user-agent']; // Auto calls không có user-agent
   
   try {
+    console.log(`🚀 [REQUEST-EXT][${startTime.toISOString()}] Starting requestExtension`);
+    console.log(`📋 [REQUEST-EXT] Type: ${isAutoCall ? '🤖 AUTO' : '👤 MANUAL'}`);
+    
     const {
       shopId,
       machineId,
@@ -975,9 +978,6 @@ async function requestExtension(req, res) {
       payload,
     } = req.body || {};
     
-    // Log bắt đầu
-    console.log(`🚀 [REQUEST-EXT][${startTime.toISOString()}] Starting requestExtension`);
-    console.log(`📋 [REQUEST-EXT] Type: ${isAutoCall ? '🤖 AUTO' : '👤 MANUAL'}`);
     console.log(`📋 [REQUEST-EXT] Shop: ${shopId}, Machine: ${machineId}, Task: ${type}`);
     
     if (!shopId || !machineId) {
@@ -994,9 +994,11 @@ async function requestExtension(req, res) {
     }
 
     const task = { type: type, payload: payload };
-
     console.log(`📤 [REQUEST-EXT] Sending task to machine:${machineId}`, { type, payload });
+    
+    // Emit task
     io.to(`machine:${machineId}`).emit("server:task", task);
+    console.log(`✅ [REQUEST-EXT] Task emitted successfully`);
 
     let message = "";
 
@@ -1015,7 +1017,6 @@ async function requestExtension(req, res) {
         break;
     }
 
-    console.log(`📝 [REQUEST-EXT] Creating RealtimeLog: ${message}`);
     await RealtimeLog.create({
       shopId,
       machineId,
