@@ -5,21 +5,119 @@ const ShippingBatch = require("../models/shippingBatch.model");
 class CronJobService {
   constructor() {
     this.jobs = new Map();
+    this.autoJobs = new Map(); // Map để lưu các auto jobs từ ConfigAuto
   }
 
   /**
    * Khởi tạo tất cả cron jobs
    */
-  initializeJobs() {
-    // Job 1: Update fake tracking mỗi 1 tiếng
-    this.scheduleUpdateFakeTracking();
+  async initializeJobs() {
+    // Job 1: Update fake tracking mỗi 1 tiếng (COMMENTED OUT - removed fake tracking)
+    // this.scheduleUpdateFakeTracking();
+    
+    // Job 2: Load và khởi tạo các auto jobs từ ConfigAuto
+    await this.loadAutoJobsFromDatabase();
     
     console.log('⏰ [CRON] All cron jobs initialized successfully');
   }
 
   /**
-   * Schedule job update fake tracking mỗi 1 tiếng
+   * Schedule auto upload jobs - only uploads orders with real tracking
    */
+  scheduleAutoUploadJobs() {
+    if (!this.autoUploadConfig.enabled) {
+      console.log('⏸️ [CRON] Auto upload is disabled globally');
+      return;
+    }
+
+    // Regular auto upload (every 30 minutes)
+    if (this.autoUploadConfig.jobs.regular.enabled) {
+      this.scheduleAutoUploadJob('regular', this.autoUploadConfig.jobs.regular.cronPattern);
+    }
+
+    // Morning auto upload (8 AM daily)
+    if (this.autoUploadConfig.jobs.morning.enabled) {
+      this.scheduleAutoUploadJob('morning', this.autoUploadConfig.jobs.morning.cronPattern);
+    }
+
+    // Afternoon auto upload (2 PM daily)
+    if (this.autoUploadConfig.jobs.afternoon.enabled) {
+      this.scheduleAutoUploadJob('afternoon', this.autoUploadConfig.jobs.afternoon.cronPattern);
+    }
+  }
+
+  /**
+   * Schedule a specific auto upload job
+   */
+  scheduleAutoUploadJob(jobType, cronPattern) {
+    const jobName = `autoUpload_${jobType}`;
+    
+    const job = cron.schedule(cronPattern, async () => {
+      await this.runAutoUploadJob(jobType);
+    }, {
+      scheduled: false,
+      timezone: "Asia/Ho_Chi_Minh"
+    });
+
+    this.jobs.set(jobName, job);
+    job.start();
+    
+    console.log(`⏰ [CRON] ${jobName} scheduled with pattern: ${cronPattern}`);
+  }
+
+  /**
+   * Execute auto upload job - only processes orders with real tracking
+   */
+  async runAutoUploadJob(jobType) {
+    const startTime = new Date();
+    console.log(`🤖 [CRON][${startTime.toISOString()}] Starting auto upload job: ${jobType}`);
+    
+    try {
+      // Find uploadable batches with real tracking only
+      const uploadableBatches = await ShippingBatch.find({
+        type: 'CONFIRM',
+        status: 'CONFIRM_FILE_READY',
+        uploadTaskSent: { $ne: true },
+        'completed.0': { $exists: true }, // Has at least one completed item
+        $or: [
+          { 'completed.isFake': { $ne: true } }, // Not fake
+          { 'completed.isFake': { $exists: false } }, // isFake field doesn't exist
+          { 'completed.source': { $ne: 'fake' } } // Source is not fake
+        ]
+      }).limit(10); // Limit to prevent overload
+
+      console.log(`📋 [CRON][${jobType}] Found ${uploadableBatches.length} uploadable batches`);
+      
+      if (uploadableBatches.length === 0) {
+        console.log(`✅ [CRON][${jobType}] No uploadable batches found`);
+        return;
+      }
+
+      // Extract batch IDs
+      const batchIds = uploadableBatches.map(batch => batch._id.toString());
+      
+      // Call the auto upload function
+      const result = await shippingBatchController.autoUploadTask(batchIds);
+      
+      const endTime = new Date();
+      const duration = endTime - startTime;
+      
+      console.log(`✅ [CRON][${endTime.toISOString()}] Auto upload job ${jobType} completed`);
+      console.log(`📊 [CRON][${jobType}] Result:`, {
+        success: result.success,
+        processedBatches: result.processedBatches,
+        successfulBatches: result.successfulBatches,
+        duration: `${duration}ms`
+      });
+      
+    } catch (error) {
+      console.error(`❌ [CRON][${jobType}] Auto upload job failed:`, error.message);
+    }
+  }
+  /**
+   * Schedule job update fake tracking mỗi 1 tiếng (COMMENTED OUT - removed fake tracking)
+   */
+  /*
   scheduleUpdateFakeTracking() {
     const jobName = 'updateFakeTracking';
     
@@ -36,10 +134,12 @@ class CronJobService {
     
     console.log(`⏰ [CRON] ${jobName} scheduled to run every hour`);
   }
+  */
 
   /**
-   * Thực thi job update fake tracking
+   * Thực thi job update fake tracking (COMMENTED OUT - removed fake tracking)
    */
+  /*
   async runUpdateFakeTrackingJob() {
     const startTime = new Date();
     console.log(`🔄 [CRON][${startTime.toISOString()}] Starting updateAllFakeTracking job...`);
@@ -107,6 +207,347 @@ class CronJobService {
       console.error('❌ [CRON] updateAllFakeTracking job failed:', error.message);
     }
   }
+  */
+
+  /**
+   * Load các auto jobs từ database và khởi tạo cron jobs
+   */
+  async loadAutoJobsFromDatabase() {
+    try {
+      const ConfigAuto = require("../models/configAuto.model");
+      const activeConfigs = await ConfigAuto.find({ status: true }); // status: true thay vì "active"
+      
+      console.log(`📋 [CRON] Loading ${activeConfigs.length} active auto jobs from database`);
+      
+      for (const config of activeConfigs) {
+        await this.addAutoJob(config);
+      }
+      
+      console.log(`✅ [CRON] Loaded ${activeConfigs.length} auto jobs successfully`);
+    } catch (error) {
+      console.error('❌ [CRON] Failed to load auto jobs from database:', error.message);
+    }
+  }
+
+  /**
+   * Thêm một auto job mới
+   */
+  async addAutoJob(config) {
+    try {
+      const jobName = `auto_${config.id}`;
+      
+      // Nếu job đã tồn tại, xóa trước
+      if (this.autoJobs.has(jobName)) {
+        await this.removeAutoJob(config.id);
+      }
+      
+      const job = cron.schedule(config.autoTime, async () => {
+        await this.executeAutoJob(config);
+      }, {
+        scheduled: false,
+        timezone: "Asia/Ho_Chi_Minh"
+      });
+
+      this.autoJobs.set(jobName, {
+        job,
+        config: config.toObject ? config.toObject() : config
+      });
+      
+      job.start();
+      
+      console.log(`⏰ [CRON] Auto job '${config.id}' (${config.type}) scheduled with pattern: ${config.autoTime}`);
+      
+    } catch (error) {
+      console.error(`❌ [CRON] Failed to add auto job '${config.id}':`, error.message);
+      throw error;
+    }
+  }
+
+  /**
+   * Xóa một auto job
+   */
+  async removeAutoJob(configId) {
+    try {
+      const jobName = `auto_${configId}`;
+      const jobData = this.autoJobs.get(jobName);
+      
+      if (jobData) {
+        jobData.job.stop();
+        this.autoJobs.delete(jobName);
+        console.log(`⏹️ [CRON] Auto job '${configId}' stopped and removed`);
+      }
+      
+    } catch (error) {
+      console.error(`❌ [CRON] Failed to remove auto job '${configId}':`, error.message);
+    }
+  }
+
+  /**
+   * Thực thi một auto job
+   */
+  async executeAutoJob(config) {
+    const startTime = new Date();
+    console.log(`🤖 [CRON][${startTime.toISOString()}] Executing auto job: ${config.id} (${config.type})`);
+    
+    try {
+      // Cập nhật trạng thái đang chạy
+      await this.updateConfigStats(config.id, {
+        lastRunAt: startTime,
+        lastRunStatus: "running"
+      });
+
+      let result;
+      
+      switch (config.type) {
+        case "vendorSyncBatch":
+          result = await this.executeVendorSyncBatch(config);
+          break;
+        case "autoRequestExtension":
+          result = await this.executeAutoRequestExtension(config);
+          break;
+        case "uploadTracking":
+          result = await this.executeUploadTracking(config);
+          break;
+        default:
+          throw new Error(`Unknown auto job type: ${config.type}`);
+      }
+
+      const endTime = new Date();
+      const duration = endTime - startTime;
+      
+      // Cập nhật thống kê thành công
+      await this.updateConfigStats(config.id, {
+        lastRunAt: endTime,
+        lastRunStatus: "success",
+        lastRunResult: result,
+        $inc: { "stats.totalRuns": 1 }
+      });
+
+      console.log(`✅ [CRON][${endTime.toISOString()}] Auto job '${config.id}' completed successfully`);
+      console.log(`📊 [CRON][${config.id}] Duration: ${duration}ms, Result:`, result);
+      
+    } catch (error) {
+      const endTime = new Date();
+      
+      // Cập nhật thống kê lỗi
+      await this.updateConfigStats(config.id, {
+        lastRunAt: endTime,
+        lastRunStatus: "error",
+        lastRunResult: { error: error.message },
+        $inc: { "stats.totalRuns": 1 }
+      });
+
+      console.error(`❌ [CRON][${endTime.toISOString()}] Auto job '${config.id}' failed:`, error.message);
+    }
+  }
+
+  /**
+   * Thực thi autoRequestExtension job
+   */
+  async executeAutoRequestExtension(config) {
+    console.log(`🤖 [AUTO-CRON] Executing autoRequestExtension auto job`);
+    console.log(`📋 [AUTO-CRON] Config ID: ${config.id}`);
+    console.log(`⚙️  [AUTO-CRON] Settings:`, {
+      taskType: config.config?.taskType || 'IMPORT_ORDERS',
+      payload: config.config?.payload || null
+    });
+    
+    const { extController } = require("../controllers");
+    
+    // Tạo mock req/res objects giống như API call
+    const mockReq = {
+      body: {
+        type: config.config?.taskType || 'IMPORT_ORDERS',
+        payload: config.config?.payload || null,
+        action: 'auto',
+        label: 'Auto Request Extension'
+      },
+      headers: {}, // Không có user-agent để đánh dấu là auto call
+      app: {
+        get: (key) => {
+          if (key === 'io') {
+            // Trả về null để skip socket.io trong test mode
+            return null;
+          }
+          return null;
+        }
+      }
+    };
+    
+    let result = null;
+    const mockRes = {
+      status: (code) => ({
+        json: (data) => {
+          result = { statusCode: code, ...data };
+          return mockRes;
+        }
+      }),
+      json: (data) => {
+        result = { statusCode: 200, ...data };
+        return mockRes;
+      }
+    };
+    
+    const mockNext = (err) => {
+      throw err;
+    };
+    
+    // Gọi hàm autoRequestExtensionAll thực tế
+    await extController.autoRequestExtensionAll(mockReq, mockRes, mockNext);
+    
+    console.log(`✅ [AUTO-CRON] autoRequestExtension completed with status ${result?.statusCode}`);
+    console.log(`📊 [AUTO-CRON] Summary:`, {
+      ok: result?.ok,
+      processed: result?.processed || 0,
+      success: result?.success || 0,
+      failed: result?.failed || 0
+    });
+    
+    return result;
+  }
+
+  /**
+   * Thực thi vendorSyncBatch job
+   */
+  async executeVendorSyncBatch(config) {
+    console.log(`🤖 [AUTO-CRON] Executing vendorSyncBatch auto job`);
+    console.log(`📋 [AUTO-CRON] Config ID: ${config.id}`);
+    console.log(`⚙️  [AUTO-CRON] Settings:`, {
+      maxOrders: config.config?.maxOrders || 100,
+      dryRun: config.config?.dryRun || false
+    });
+    
+    const { extController } = require("../controllers");
+    
+    // Tạo mock req/res objects giống như API call
+    const mockReq = {
+      body: {
+        max: config.config?.maxOrders || 100,
+        dryRun: config.config?.dryRun || false
+      },
+      headers: {} // Không có user-agent để đánh dấu là auto call
+    };
+    
+    let result = null;
+    const mockRes = {
+      status: (code) => ({
+        json: (data) => {
+          result = { statusCode: code, ...data };
+          return mockRes;
+        }
+      }),
+      json: (data) => {
+        result = { statusCode: 200, ...data };
+        return mockRes;
+      }
+    };
+    
+    const mockNext = (err) => {
+      throw err;
+    };
+    
+    // Gọi hàm vendorSyncBatch thực tế
+    await extController.vendorSyncBatch(mockReq, mockRes, mockNext);
+    
+    console.log(`✅ [AUTO-CRON] vendorSyncBatch completed with status ${result?.statusCode}`);
+    console.log(`📊 [AUTO-CRON] Summary:`, {
+      ok: result?.ok,
+      processedOrders: result?.processedOrders || 0,
+      scanned: result?.scanned || 0,
+      success: result?.ok || 0,
+      failed: result?.fail || 0
+    });
+    
+    return result;
+  }
+
+  /**
+   * Thực thi uploadTracking job (placeholder)
+   */
+  async executeUploadTracking(config) {
+    // TODO: Implement upload tracking logic
+    return { message: "Upload tracking not implemented yet" };
+  }
+
+  /**
+   * Cập nhật thống kê config
+   */
+  async updateConfigStats(configId, updateData) {
+    try {
+      const ConfigAuto = require("../models/configAuto.model");
+      await ConfigAuto.updateOne({ id: configId }, updateData);
+    } catch (error) {
+      console.error(`❌ [CRON] Failed to update stats for config '${configId}':`, error.message);
+    }
+  }
+
+  /**
+   * Chạy auto job thủ công
+   */
+  async runAutoJobManually(config) {
+    console.log(`🔧 [CRON] Running auto job '${config.id}' manually`);
+    await this.executeAutoJob(config);
+    return { message: `Auto job '${config.id}' executed manually` };
+  }
+
+  /**
+   * Lấy trạng thái tất cả jobs (bao gồm auto jobs)
+   */
+  getJobsStatus() {
+    const status = {};
+    
+    // Regular jobs
+    this.jobs.forEach((job, name) => {
+      status[name] = {
+        type: "regular",
+        running: job.running,
+        scheduled: job.scheduled
+      };
+    });
+    
+    // Auto jobs
+    this.autoJobs.forEach((jobData, name) => {
+      status[name] = {
+        type: "auto",
+        configType: jobData.config.type,
+        running: jobData.job.running,
+        scheduled: jobData.job.scheduled,
+        cronPattern: jobData.config.autoTime
+      };
+    });
+    
+    return status;
+  }
+
+  /**
+   * Update auto upload configuration
+   */
+  updateAutoUploadConfig(newConfig) {
+    this.autoUploadConfig = { ...this.autoUploadConfig, ...newConfig };
+    console.log('🔧 [CRON] Auto upload config updated:', this.autoUploadConfig);
+  }
+
+  /**
+   * Get current auto upload configuration
+   */
+  getAutoUploadConfig() {
+    return this.autoUploadConfig;
+  }
+
+  /**
+   * Restart auto upload jobs with new configuration
+   */
+  restartAutoUploadJobs() {
+    // Stop existing auto upload jobs
+    ['autoUpload_regular', 'autoUpload_morning', 'autoUpload_afternoon'].forEach(jobName => {
+      this.stopJob(jobName);
+      this.jobs.delete(jobName);
+    });
+
+    // Restart with new config
+    this.scheduleAutoUploadJobs();
+    console.log('🔄 [CRON] Auto upload jobs restarted with new configuration');
+  }
 
   /**
    * Dừng một job cụ thể
@@ -160,7 +601,17 @@ class CronJobService {
   async runJobManually(jobName) {
     switch (jobName) {
       case 'updateFakeTracking':
-        await this.runUpdateFakeTrackingJob();
+        // await this.runUpdateFakeTrackingJob(); // COMMENTED OUT
+        console.log('⚠️ [CRON] Fake tracking job is disabled');
+        break;
+      case 'autoUpload_regular':
+        await this.runAutoUploadJob('regular');
+        break;
+      case 'autoUpload_morning':
+        await this.runAutoUploadJob('morning');
+        break;
+      case 'autoUpload_afternoon':
+        await this.runAutoUploadJob('afternoon');
         break;
       default:
         throw new Error(`Unknown job: ${jobName}`);

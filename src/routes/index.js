@@ -30,6 +30,7 @@ const ToDoListRoutes = require("./todoList.routes");
 const EtsyOrderRoutes = require("./etsyOrder.routes")
 const EtsyListingRoutes = require("./etsyListing.routes")
 const cronJobRoutes = require("./cronJob.routes");
+const configAutoRoutes = require("./configAuto.routes");
 module.exports = {
   roleRoutes,
   userRoutes,
@@ -62,5 +63,6 @@ module.exports = {
   ToDoListRoutes,
   EtsyOrderRoutes,
   EtsyListingRoutes,
-  cronJobRoutes
+  cronJobRoutes,
+  configAutoRoutes
 };

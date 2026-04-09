@@ -55,7 +55,8 @@ const {
   ToDoListRoutes,
   EtsyOrderRoutes,
   EtsyListingRoutes,
-  cronJobRoutes
+  cronJobRoutes,
+  configAutoRoutes
 } = require("./src/routes");
 
 app.use("/api/role", roleRoutes);
@@ -90,6 +91,7 @@ app.use("/api/to-do", ToDoListRoutes);
 app.use("/api/etsy", EtsyOrderRoutes);
 app.use("/api/etsy-listing", EtsyListingRoutes);
 app.use("/api/cron-jobs", cronJobRoutes);
+app.use("/api/config-auto", configAutoRoutes);
 
 
 // ===== HTTP server

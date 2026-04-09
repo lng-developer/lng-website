@@ -1,6 +1,7 @@
 const db = require("../models");
 const ShippingBatch = db.ShippingBatch;
 const OrderCustomProduct = db.orderCustomProduct;
+const RealtimeLog = db.RealtimeLog;
 
 async function getRealTrackingForOrder(orderId) {
   const order = await OrderCustomProduct.findOne({ orderId: orderId });
@@ -8,9 +9,10 @@ async function getRealTrackingForOrder(orderId) {
 }
 
 /**
- * TODO: Hàm gen tracking fake cho 1 order
+ * TODO: Hàm gen tracking fake cho 1 order (COMMENTED OUT - removed fake tracking)
  * Bạn tự thay logic cho phù hợp.
  */
+/*
 function generateFakeTracking() {
   let tracking = "92";
 
@@ -21,6 +23,7 @@ function generateFakeTracking() {
 
   return tracking;
 }
+*/
 
 /**
  * Build nội dung file confirm / update
@@ -603,6 +606,8 @@ function buildGlobalUpdateFile(rows, options = {}) {
   return content;
 }
 
+// COMMENTED OUT - removed fake tracking logic
+/*
 const updateAllFakeTracking = async (req, res, next) => {
   try {
     const { machineId } = req.body;
@@ -773,6 +778,7 @@ const updateAllFakeTracking = async (req, res, next) => {
     next(err);
   }
 };
+*/
 
 const downloadAllUpdatedFakeFile = async (req, res, next) => {
   try {
@@ -1246,7 +1252,7 @@ module.exports = {
   listShippingBatches,
   createUpdateBatchFromSystem,
   downloadCompletedFile,
-  updateAllFakeTracking,
+  // updateAllFakeTracking, // COMMENTED OUT - removed fake tracking
   downloadAllUpdatedFakeFile,
   exportOrdersWithTracking,
   checkOrdersStatus, // ✅ Thêm function mới
@@ -1438,7 +1444,7 @@ module.exports = {
   listShippingBatches,
   createUpdateBatchFromSystem,
   downloadCompletedFile,
-  updateAllFakeTracking,
+  // updateAllFakeTracking, // COMMENTED OUT - removed fake tracking
   downloadAllUpdatedFakeFile,
   exportOrdersWithTracking,
   checkOrdersStatus,
@@ -1451,7 +1457,7 @@ module.exports = {
   listShippingBatches,
   createUpdateBatchFromSystem,
   downloadCompletedFile,
-  updateAllFakeTracking,
+  // updateAllFakeTracking, // COMMENTED OUT - removed fake tracking
   downloadAllUpdatedFakeFile,
   exportOrdersWithTracking,
   checkOrdersStatus,
@@ -1734,7 +1740,7 @@ module.exports = {
   listShippingBatches,
   createUpdateBatchFromSystem,
   downloadCompletedFile,
-  updateAllFakeTracking,
+  // updateAllFakeTracking, // COMMENTED OUT - removed fake tracking
   downloadAllUpdatedFakeFile,
   exportOrdersWithTracking,
   checkOrdersStatus,
@@ -1856,7 +1862,8 @@ const createBatchFromOrders = async (req, res, next) => {
             });
             totalReal++;
           } else {
-            // ❌ Không có tracking → tạo fake
+            // ❌ Không có tracking → chỉ lưu vào tracking_fakes để theo dõi, không tạo fake tracking
+            /* COMMENTED OUT - removed fake tracking logic
             const fakeTracking = generateFakeTracking();
             
             // Thêm vào completed với fake tracking
@@ -1867,12 +1874,13 @@ const createBatchFromOrders = async (req, res, next) => {
               source: "fake",
               createdAt: new Date()
             });
+            */
             
-            // Thêm vào tracking_fakes để theo dõi
+            // Thêm vào tracking_fakes để theo dõi (không có tracking)
             tracking_fakes.push({
               orderId,
-              tracking: fakeTracking,
-              note: "Generated fake tracking",
+              // tracking: fakeTracking, // REMOVED
+              note: "No real tracking available", // Updated note
               createdAt: new Date()
             });
             
@@ -2060,7 +2068,7 @@ module.exports = {
   listShippingBatches,
   createUpdateBatchFromSystem,
   downloadCompletedFile,
-  updateAllFakeTracking,
+  // updateAllFakeTracking, // COMMENTED OUT - removed fake tracking
   downloadAllUpdatedFakeFile,
   exportOrdersWithTracking,
   checkOrdersStatus,
