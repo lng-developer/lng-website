@@ -1083,11 +1083,11 @@ const autoRequestExtensionAll = async (req, res) => {
       });
     }
 
-    const io = req.app?.get?.("io");
-    if (!io) {
-      console.error(`❌ [AUTO-REQUEST] Socket.IO not available`);
-      return res.status(500).json({ ok: false, message: "Socket.IO not available" });
-    }
+    // const io = req.app?.get?.("io");
+    // if (!io) {
+    //   console.error(`❌ [AUTO-REQUEST] Socket.IO not available`);
+    //   return res.status(500).json({ ok: false, message: "Socket.IO not available" });
+    // }
 
     const task = { type, payload };
     const results = [];
