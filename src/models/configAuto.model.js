@@ -66,6 +66,21 @@ const ConfigAutoSchema = new mongoose.Schema(
         type: mongoose.Schema.Types.Mixed, // Có thể là object hoặc null
         default: null
       },
+      // Cho uploadTracking
+      maxBatches: {
+        type: Number,
+        default: 10,
+        min: 1,
+        max: 100
+      },
+      carrierCode: {
+        type: String,
+        default: "USPS"
+      },
+      shipMethod: {
+        type: String,
+        default: "USPS First Class"
+      },
       // Có thể thêm các config khác tùy theo type
     },
     // Thống kê

@@ -59,4 +59,10 @@ router.post(
   shippingBatchController.createBatchFromOrders
 );
 
+// ✅ Route mới: Auto upload tracking
+router.post(
+  "/auto-upload-tracking",
+  shippingBatchController.autoUploadTracking
+);
+
 module.exports = router;
