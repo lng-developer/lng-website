@@ -1124,8 +1124,7 @@ const autoRequestExtensionAll = async (req, res) => {
           })
         };
         
-        // Gọi requestExtension trực tiếp
-        const { requestExtension } = require("../controllers/ext.controller");
+        // Gọi requestExtension trực tiếp (không require lại)
         const result = await requestExtension(mockReq, mockRes);
         
         if (result.ok) {
