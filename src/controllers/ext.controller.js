@@ -749,6 +749,8 @@ async function updateOrderByVendors(orderId, vpidToVendorPrefetched = null) {
 }
 
 async function runBatch({ max = 100, dryRun = false } = {}) {
+  console.log(`🔍 [BATCH] Starting batch processing with max=${max}, dryRun=${dryRun}`);
+  
   const candidates = await OrderCustomProduct.find({
     status: { $ne: "Shipped" },
     "items.cost_breakdown.vendorProductId": { $exists: true, $ne: null },
@@ -757,6 +759,8 @@ async function runBatch({ max = 100, dryRun = false } = {}) {
     .limit(max)
     .lean();
 
+  console.log(`📋 [BATCH] Found ${candidates.length} candidate orders`);
+
   const vpidSet = new Set();
   for (const o of candidates) {
     for (const it of o.items || []) {
@@ -764,6 +768,8 @@ async function runBatch({ max = 100, dryRun = false } = {}) {
       if (vpid) vpidSet.add(String(vpid));
     }
   }
+  
+  console.log(`🔗 [BATCH] Building vendor maps for ${vpidSet.size} vendor products`);
   const vpidToVendor = await buildVendorMapsFromVpidSet(vpidSet);
 
   const knownKeys = new Set([
@@ -779,7 +785,10 @@ async function runBatch({ max = 100, dryRun = false } = {}) {
     return Object.keys(groups).some((k) => knownKeys.has(k));
   });
 
+  console.log(`✅ [BATCH] Filtered to ${filtered.length} orders with known vendors`);
+
   if (dryRun) {
+    console.log(`🧪 [BATCH] DRY RUN mode - returning order list without processing`);
     return {
       ok: true,
       mode: "dry-run",
@@ -795,6 +804,7 @@ async function runBatch({ max = 100, dryRun = false } = {}) {
     };
   }
 
+  console.log(`🚀 [BATCH] Processing ${filtered.length} orders...`);
   let ok = 0,
     fail = 0;
   for (const o of filtered) {
@@ -802,15 +812,17 @@ async function runBatch({ max = 100, dryRun = false } = {}) {
       const r = await updateOrderByVendors(o.orderId, vpidToVendor);
       if (DEBUG || NODE_ENV !== "test") {
         console.log(
-          `[OK] ${o.orderId} | itemsChanged=${r.updatedItems} | orderStatusChanged=${r.orderStatusChanged}`
+          `✅ [BATCH] ${o.orderId} | itemsChanged=${r.updatedItems} | orderStatusChanged=${r.orderStatusChanged}`
         );
       }
       ok++;
     } catch (err) {
-      console.error(`[FAIL] ${o.orderId}:`, err.message);
+      console.error(`❌ [BATCH] ${o.orderId}: ${err.message}`);
       fail++;
     }
   }
+  
+  console.log(`🏁 [BATCH] Completed: ${ok} success, ${fail} failed, ${filtered.length} total`);
   return { ok, fail, scanned: filtered.length };
 }
 
@@ -876,14 +888,44 @@ const vendorSyncList = async (req, res) => {
  * body: { max?: number, dryRun?: boolean }
  */
 const vendorSyncBatch = async (req, res) => {
+  const startTime = new Date();
+  const isAutoCall = !req.headers['user-agent']; // Auto calls không có user-agent
+  
   try {
     const { max = 100, dryRun = false } = req.body || {};
+    
+    // Log bắt đầu
+    console.log(`🚀 [VENDOR-SYNC][${startTime.toISOString()}] Starting vendorSyncBatch`);
+    console.log(`📋 [VENDOR-SYNC] Type: ${isAutoCall ? '🤖 AUTO' : '👤 MANUAL'}`);
+    console.log(`📋 [VENDOR-SYNC] Config: max=${max}, dryRun=${dryRun}`);
+    
     const result = await runBatch({
       max: Number(max) || 100,
       dryRun: Boolean(dryRun),
     });
-    return res.json({ ok: true, ...result });
+    
+    const endTime = new Date();
+    const duration = endTime - startTime;
+    
+    // Log kết quả
+    console.log(`✅ [VENDOR-SYNC][${endTime.toISOString()}] Completed successfully`);
+    console.log(`📊 [VENDOR-SYNC] Results: ok=${result.ok}, fail=${result.fail}, scanned=${result.scanned}`);
+    console.log(`⏱️  [VENDOR-SYNC] Duration: ${duration}ms`);
+    
+    if (result.mode === 'dry-run') {
+      console.log(`🧪 [VENDOR-SYNC] DRY RUN - Orders found: ${result.orderIds?.length || 0}`);
+    }
+    
+    return res.json({ ok: true, processedOrders: result.scanned, ...result });
   } catch (e) {
+    const endTime = new Date();
+    const duration = endTime - startTime;
+    
+    // Log lỗi
+    console.error(`❌ [VENDOR-SYNC][${endTime.toISOString()}] Failed after ${duration}ms`);
+    console.error(`❌ [VENDOR-SYNC] Error: ${e.message}`);
+    console.error(`❌ [VENDOR-SYNC] Stack:`, e.stack);
+    
     return res.status(500).json({ ok: false, message: e.message });
   }
 };
@@ -920,6 +962,9 @@ const pullAllOrder = async (req, res) => {
 };
 
 async function requestExtension(req, res) {
+  const startTime = new Date();
+  const isAutoCall = !req.headers['user-agent']; // Auto calls không có user-agent
+  
   try {
     const {
       shopId,
@@ -929,17 +974,28 @@ async function requestExtension(req, res) {
       type,
       payload,
     } = req.body || {};
+    
+    // Log bắt đầu
+    console.log(`🚀 [REQUEST-EXT][${startTime.toISOString()}] Starting requestExtension`);
+    console.log(`📋 [REQUEST-EXT] Type: ${isAutoCall ? '🤖 AUTO' : '👤 MANUAL'}`);
+    console.log(`📋 [REQUEST-EXT] Shop: ${shopId}, Machine: ${machineId}, Task: ${type}`);
+    
     if (!shopId || !machineId) {
+      console.log(`❌ [REQUEST-EXT] Missing required fields: shopId=${shopId}, machineId=${machineId}`);
       return res
         .status(400)
         .json({ ok: false, message: "shopId & machineId required" });
     }
 
     const io = req.app.get("io");
-    if (!io) return res.status(500).json({ ok: false, message: "io missing" });
+    if (!io) {
+      console.error(`❌ [REQUEST-EXT] Socket.IO not available`);
+      return res.status(500).json({ ok: false, message: "io missing" });
+    }
 
     const task = { type: type, payload: payload };
 
+    console.log(`📤 [REQUEST-EXT] Sending task to machine:${machineId}`, { type, payload });
     io.to(`machine:${machineId}`).emit("server:task", task);
 
     let message = "";
@@ -955,9 +1011,11 @@ async function requestExtension(req, res) {
         message = "Start import FBM orders ...";
         break;
       default:
+        message = `Start ${type} ...`;
         break;
     }
 
+    console.log(`📝 [REQUEST-EXT] Creating RealtimeLog: ${message}`);
     await RealtimeLog.create({
       shopId,
       machineId,
@@ -968,11 +1026,163 @@ async function requestExtension(req, res) {
       ts: new Date(),
     });
 
+    const endTime = new Date();
+    const duration = endTime - startTime;
+    
+    console.log(`✅ [REQUEST-EXT][${endTime.toISOString()}] Completed successfully`);
+    console.log(`⏱️  [REQUEST-EXT] Duration: ${duration}ms`);
+
     return res.json({ ok: true });
   } catch (e) {
+    const endTime = new Date();
+    const duration = endTime - startTime;
+    
+    console.error(`❌ [REQUEST-EXT][${endTime.toISOString()}] Failed after ${duration}ms`);
+    console.error(`❌ [REQUEST-EXT] Error: ${e.message}`);
+    console.error(`❌ [REQUEST-EXT] Stack:`, e.stack);
+    
     return res.status(500).json({ ok: false, message: e.message });
   }
 }
+
+/**
+ * POST /api/request-extension/auto-all
+ * body: { type, payload, action?, label? }
+ * Auto request extension cho tất cả shops
+ */
+const autoRequestExtensionAll = async (req, res) => {
+  const startTime = new Date();
+  const isAutoCall = !req.headers['user-agent']; // Auto calls không có user-agent
+  
+  try {
+    const { type, payload, action = "auto", label = "Auto Request" } = req.body || {};
+    
+    if (!type) {
+      return res.status(400).json({ ok: false, message: "type required" });
+    }
+
+    // Log bắt đầu
+    console.log(`🚀 [AUTO-REQUEST][${startTime.toISOString()}] Starting autoRequestExtensionAll`);
+    console.log(`📋 [AUTO-REQUEST] Type: ${isAutoCall ? '🤖 AUTO' : '👤 MANUAL'}`);
+    console.log(`📋 [AUTO-REQUEST] Task: type=${type}, action=${action}`);
+    
+    // Lấy tất cả shops từ database
+    const shops = await Shop.find({ status: { $ne: 'inactive' } })
+      .select({ _id: 1, name: 1, store: 1 })
+      .lean();
+    
+    console.log(`📊 [AUTO-REQUEST] Found ${shops.length} active shops`);
+    
+    if (shops.length === 0) {
+      console.log(`⚠️  [AUTO-REQUEST] No active shops found`);
+      return res.json({ 
+        ok: true, 
+        message: "No active shops found",
+        processed: 0,
+        results: []
+      });
+    }
+
+    const io = req.app?.get?.("io");
+    if (!io) {
+      console.error(`❌ [AUTO-REQUEST] Socket.IO not available`);
+      return res.status(500).json({ ok: false, message: "Socket.IO not available" });
+    }
+
+    const task = { type, payload };
+    const results = [];
+    let successCount = 0;
+    let failCount = 0;
+
+    // Gửi task cho từng shop (shopId = machineId)
+    for (const shop of shops) {
+      const shopId = String(shop._id);
+      const machineId = shopId; // shopId và machineId giống nhau
+      const shopName = shop.name || shop.store || `Shop ${shopId}`;
+      
+      try {
+        console.log(`📤 [AUTO-REQUEST] Processing shop: ${shopName} (${shopId})`);
+        
+        // Gọi requestExtension cho từng shop
+        const mockReq = {
+          body: {
+            shopId,
+            machineId,
+            action: "auto",
+            label,
+            type,
+            payload
+          },
+          headers: {}, // Không có user-agent để đánh dấu là auto call
+          app: req.app // Truyền app object để có thể get io
+        };
+        
+        const mockRes = {
+          json: (data) => data,
+          status: (code) => ({
+            json: (data) => ({ statusCode: code, ...data })
+          })
+        };
+        
+        // Gọi requestExtension trực tiếp
+        const { requestExtension } = require("../controllers/ext.controller");
+        const result = await requestExtension(mockReq, mockRes);
+        
+        if (result.ok) {
+          results.push({
+            shopId,
+            shopName,
+            success: true,
+            message: `Task sent successfully`
+          });
+          successCount++;
+          console.log(`✅ [AUTO-REQUEST] Success: ${shopName}`);
+        } else {
+          throw new Error(result.message || 'Unknown error');
+        }
+        
+      } catch (error) {
+        console.error(`❌ [AUTO-REQUEST] Failed for shop ${shopName}:`, error.message);
+        
+        results.push({
+          shopId,
+          shopName,
+          success: false,
+          message: error.message
+        });
+        
+        failCount++;
+      }
+    }
+
+    const endTime = new Date();
+    const duration = endTime - startTime;
+    
+    // Log kết quả
+    console.log(`✅ [AUTO-REQUEST][${endTime.toISOString()}] Completed`);
+    console.log(`📊 [AUTO-REQUEST] Results: success=${successCount}, failed=${failCount}, total=${shops.length}`);
+    console.log(`⏱️  [AUTO-REQUEST] Duration: ${duration}ms`);
+    
+    return res.json({ 
+      ok: true,
+      processed: shops.length,
+      success: successCount,
+      failed: failCount,
+      results,
+      duration: `${duration}ms`
+    });
+    
+  } catch (e) {
+    const endTime = new Date();
+    const duration = endTime - startTime;
+    
+    // Log lỗi
+    console.error(`❌ [AUTO-REQUEST][${endTime.toISOString()}] Failed after ${duration}ms`);
+    console.error(`❌ [AUTO-REQUEST] Error: ${e.message}`);
+    
+    return res.status(500).json({ ok: false, message: e.message });
+  }
+};
 
 const getClientOnline = async (req, res) => {
   try {
@@ -1092,6 +1302,9 @@ module.exports = {
   vendorSyncOne,
   vendorSyncList,
   vendorSyncBatch,
+
+  // auto request extension
+  autoRequestExtensionAll,
 
   // nếu cần dùng nội bộ
   updateOrderByVendors,

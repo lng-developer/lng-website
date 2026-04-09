@@ -20,12 +20,14 @@ router.post(
 );
 router.get("/:batchId/download", shippingBatchController.downloadCompletedFile);
 
-router.post("/update-all-fake", shippingBatchController.updateAllFakeTracking);
+// COMMENTED OUT - removed fake tracking logic
+// router.post("/update-all-fake", shippingBatchController.updateAllFakeTracking);
 
-router.get(
-  "/download-all-updated",
-  shippingBatchController.downloadAllUpdatedFakeFile
-);
+// COMMENTED OUT - removed fake tracking logic
+// router.get(
+//   "/download-all-updated",
+//   shippingBatchController.downloadAllUpdatedFakeFile
+// );
 
 // ✅ Route mới: Export orders có tracking trực tiếp
 router.post(

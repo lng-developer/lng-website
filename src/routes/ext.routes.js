@@ -14,6 +14,12 @@ router.post("/pull-all", extController.pullAllOrder);
 // List client online
 router.get("/online", extController.getClientOnline);
 
+// ================= AUTO REQUEST EXTENSION =================
+
+// Auto request extension cho tất cả shops
+// body: { type: "IMPORT_ORDERS", payload?: any, action?: string, label?: string }
+router.post("/request-extension/auto-all", extController.autoRequestExtensionAll);
+
 // ================= VENDOR SYNC TRACKING =================
 
 // Sync tracking cho 1 đơn cụ thể

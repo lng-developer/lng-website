@@ -29,6 +29,7 @@ const Category = require("./category.model")
 const Notification = require("./notification.model")
 const Issue = require("./issue.model")
 const EtsyOrder = require("./etsyOrder.model")
+const ConfigAuto = require("./configAuto.model")
 
 // Cau hinh mongoose dang global
 mongoose.Promise = global.Promise;
@@ -66,6 +67,7 @@ db.Category = Category
 db.Notification = Notification
 db.Issue = Issue
 db.EtsyOrder = EtsyOrder
+db.ConfigAuto = ConfigAuto
 db.connectDB = async () => {
   await mongoose
     .connect(process.env.MONGO_URI, {
