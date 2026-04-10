@@ -1056,16 +1056,34 @@ const autoRequestExtensionAll = async (req, res) => {
   const isAutoCall = !req.headers['user-agent']; // Auto calls không có user-agent
   
   try {
-    const { type, payload, action = "auto", label = "Auto Request" } = req.body || {};
+    let { type, payload, action = "auto", label = "Auto Request" } = req.body || {};
     
     if (!type) {
       return res.status(400).json({ ok: false, message: "type required" });
+    }
+
+    // ✅ Tự động thêm date cho IMPORT_ADS_SPEND (ngày hôm qua)
+    if (type === "IMPORT_ADS_SPEND") {
+      const yesterday = new Date();
+      yesterday.setDate(yesterday.getDate() - 1);
+      const dateString = yesterday.toISOString().split('T')[0]; // Format: YYYY-MM-DD
+      
+      // Merge payload với date
+      payload = {
+        ...payload,
+        date: dateString
+      };
+      
+      console.log(`� [AUTO-REQUEST] Added date for IMPORT_ADS_SPEND: ${dateString}`);
     }
 
     // Log bắt đầu
     console.log(`🚀 [AUTO-REQUEST][${startTime.toISOString()}] Starting autoRequestExtensionAll`);
     console.log(`📋 [AUTO-REQUEST] Type: ${isAutoCall ? '🤖 AUTO' : '👤 MANUAL'}`);
     console.log(`📋 [AUTO-REQUEST] Task: type=${type}, action=${action}`);
+    if (payload) {
+      console.log(`📋 [AUTO-REQUEST] Payload:`, payload);
+    }
     
     // Lấy tất cả shops từ database
     const shops = await Shop.find({ status: { $ne: 'inactive' } })
