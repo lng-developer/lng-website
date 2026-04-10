@@ -2132,7 +2132,7 @@ const autoUploadTracking = async (req, res, next) => {
 
     // 3. Process từng machine
     for (const [machineId, batches] of Object.entries(batchesByMachine)) {
-      console.log(`🔄 [AUTO-UPLOAD] Processing ${batches.length} batches for machine: ${machineId}`);
+      console.log(`🔄 [AUTO-UPLOAD123] Processing ${batches.length} batches for machine: ${machineId}`);
 
       for (const batch of batches) {
         try {
