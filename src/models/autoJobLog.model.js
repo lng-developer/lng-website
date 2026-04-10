@@ -11,7 +11,7 @@ const autoJobLogSchema = new mongoose.Schema(
     jobType: {
       type: String,
       required: true,
-      enum: ['vendorSyncBatch', 'autoRequestExtension', 'uploadTracking']
+      enum: ['vendorSyncBatch', 'autoRequestExtension', 'uploadTracking', 'debugAutoUploadTracking']
     },
     
     // Thông tin execution
@@ -57,7 +57,7 @@ const autoJobLogSchema = new mongoose.Schema(
       },
       level: {
         type: String,
-        enum: ['info', 'warn', 'error', 'debug'],
+        enum: ['info', 'warn', 'error', 'debug', 'warning'],
         default: 'info'
       },
       message: String,

@@ -2689,6 +2689,323 @@ const autoUploadTracking = async (req, res, next) => {
   }
 };
 
+// ✅ Debug version với logs chi tiết về Socket.IO
+debugAutoUploadTracking = async (req, res, next) => {
+  const startTime = new Date();
+  const isAutoCall = !req.headers['user-agent']; // Auto calls không có user-agent
+
+  // Tạo AutoJobLog entry với jobType debug
+  let jobLog = null;
+  try {
+    jobLog = await AutoJobLog.createExecution(
+      'debugAutoUploadTracking',
+      'debugAutoUploadTracking',
+      {
+        isAutoCall,
+        requestHeaders: Object.keys(req.headers),
+        requestBody: req.body
+      }
+    );
+    await jobLog.addLog('info', `Starting DEBUG auto upload tracking`, {
+      startTime: startTime.toISOString(),
+      isAutoCall,
+      userAgent: req.headers['user-agent'] || 'none'
+    });
+  } catch (logError) {
+    console.error('❌ Failed to create debug job log:', logError.message);
+  }
+
+  try {
+    const {
+      maxBatches = 5,
+      dryRun = false,
+      carrierCode = "USPS",
+      shipMethod = "USPS First Class"
+    } = req.body || {};
+
+    console.log(`🔍 [DEBUG-AUTO-UPLOAD][${startTime.toISOString()}] Starting debug auto upload tracking`);
+
+    if (jobLog) {
+      await jobLog.addLog('info', 'Debug configuration loaded', {
+        maxBatches,
+        dryRun,
+        carrierCode,
+        shipMethod
+      });
+    }
+
+    // 1. Kiểm tra Socket.IO instance chi tiết
+    const io = req.app.get("io");
+    console.log(`🔍 [DEBUG-AUTO-UPLOAD] Socket.IO Debug Info:`);
+    console.log(`   - IO available: ${!!io}`);
+    console.log(`   - IO type: ${typeof io}`);
+    
+    if (io) {
+      console.log(`   - Engine clients: ${io.engine?.clientsCount || 'N/A'}`);
+      console.log(`   - Sockets count: ${io.sockets?.sockets?.size || 0}`);
+      
+      // Liệt kê tất cả rooms
+      if (io.sockets?.adapter?.rooms) {
+        const allRooms = Array.from(io.sockets.adapter.rooms.keys());
+        console.log(`   - Total rooms: ${allRooms.length}`);
+        console.log(`   - All rooms:`, allRooms);
+        
+        // Kiểm tra từng room có client
+        const roomsWithClients = [];
+        allRooms.forEach(roomName => {
+          const clients = io.sockets.adapter.rooms.get(roomName);
+          if (clients && clients.size > 0) {
+            roomsWithClients.push({
+              room: roomName,
+              clients: clients.size,
+              socketIds: Array.from(clients)
+            });
+          }
+        });
+        console.log(`   - Rooms with clients:`, roomsWithClients);
+
+        if (jobLog) {
+          await jobLog.addLog('info', 'Socket.IO detailed analysis', {
+            ioAvailable: !!io,
+            engineClients: io.engine?.clientsCount || 0,
+            socketsCount: io.sockets?.sockets?.size || 0,
+            totalRooms: allRooms.length,
+            allRooms: allRooms.slice(0, 20), // Limit to first 20
+            roomsWithClients
+          });
+        }
+      }
+    }
+
+    // 2. Tìm uploadable batches
+    const query = {
+      status: 'CONFIRM_FILE_READY',
+      completed: { $exists: true, $ne: [] },
+      uploadTaskSent: { $ne: true },
+      machineId: { $exists: true, $ne: null }
+    };
+
+    const uploadableBatches = await ShippingBatch.find(query)
+      .sort({ createdAt: 1 })
+      .limit(maxBatches)
+      .lean();
+
+    console.log(`📊 [DEBUG-AUTO-UPLOAD] Found ${uploadableBatches.length} uploadable batches`);
+
+    if (jobLog) {
+      await jobLog.addLog('info', `Found ${uploadableBatches.length} uploadable batches`, {
+        query,
+        batchCount: uploadableBatches.length,
+        maxBatches
+      });
+    }
+
+    if (uploadableBatches.length === 0) {
+      console.log(`✅ [DEBUG-AUTO-UPLOAD] No batches to debug`);
+      
+      if (jobLog) {
+        await jobLog.setSuccess({
+          message: "No batches found for debug upload",
+          processed: 0,
+          results: []
+        }, {
+          processed: 0,
+          success: 0,
+          failed: 0
+        });
+      }
+
+      return res.json({
+        ok: true,
+        message: "No batches found for debug upload",
+        processed: 0,
+        results: []
+      });
+    }
+
+    // 3. Group batches theo machineId và debug từng shop
+    const batchesByMachine = {};
+    uploadableBatches.forEach(batch => {
+      const machineId = batch.machineId;
+      if (!batchesByMachine[machineId]) {
+        batchesByMachine[machineId] = [];
+      }
+      batchesByMachine[machineId].push(batch);
+    });
+
+    console.log(`📊 [DEBUG-AUTO-UPLOAD] Batches grouped by ${Object.keys(batchesByMachine).length} machines`);
+
+    const debugResults = [];
+
+    // 4. Debug từng machine/shop
+    for (const [machineId, batches] of Object.entries(batchesByMachine)) {
+      console.log(`\n🔍 [DEBUG-AUTO-UPLOAD] === DEBUGGING SHOP: ${machineId} ===`);
+      
+      // Kiểm tra room cho shop này
+      const targetRoom = `machine:${machineId}`;
+      const roomClients = io?.sockets?.adapter?.rooms?.get(targetRoom);
+      const clientCount = roomClients ? roomClients.size : 0;
+      const socketIds = roomClients ? Array.from(roomClients) : [];
+
+      console.log(`🏠 [DEBUG-AUTO-UPLOAD] Room: ${targetRoom}`);
+      console.log(`👥 [DEBUG-AUTO-UPLOAD] Clients in room: ${clientCount}`);
+      console.log(`🆔 [DEBUG-AUTO-UPLOAD] Socket IDs: ${socketIds.join(', ') || 'none'}`);
+
+      // Kiểm tra từng socket trong room
+      const socketDetails = [];
+      if (socketIds.length > 0) {
+        socketIds.forEach(socketId => {
+          const socket = io.sockets.sockets.get(socketId);
+          if (socket) {
+            socketDetails.push({
+              id: socketId,
+              connected: socket.connected,
+              rooms: Array.from(socket.rooms),
+              data: socket.data || {},
+              handshake: {
+                address: socket.handshake.address,
+                headers: Object.keys(socket.handshake.headers)
+              }
+            });
+            console.log(`   Socket ${socketId}:`, {
+              connected: socket.connected,
+              rooms: Array.from(socket.rooms),
+              shopId: socket.data?.shopId,
+              machineId: socket.data?.machineId
+            });
+          }
+        });
+      }
+
+      const shopDebugInfo = {
+        machineId,
+        targetRoom,
+        clientCount,
+        socketIds,
+        socketDetails,
+        batchCount: batches.length,
+        batchIds: batches.map(b => b._id)
+      };
+
+      debugResults.push(shopDebugInfo);
+
+      if (jobLog) {
+        await jobLog.addLog('info', `Shop debug analysis: ${machineId}`, shopDebugInfo);
+      }
+
+      // Test emit (dry run)
+      if (clientCount > 0) {
+        console.log(`📡 [DEBUG-AUTO-UPLOAD] Testing emit to ${targetRoom}...`);
+        
+        const testTask = {
+          type: "DEBUG_TEST",
+          payload: {
+            message: "Debug test from auto upload tracking",
+            timestamp: new Date().toISOString(),
+            machineId,
+            batchCount: batches.length
+          }
+        };
+
+        const emitResult = io.to(targetRoom).emit("server:task", testTask);
+        console.log(`📡 [DEBUG-AUTO-UPLOAD] Test emit result: ${emitResult}`);
+
+        if (jobLog) {
+          await jobLog.addLog('info', `Test emit sent to ${targetRoom}`, {
+            targetRoom,
+            clientCount,
+            emitResult: typeof emitResult,
+            testTask
+          });
+        }
+      } else {
+        console.log(`⚠️  [DEBUG-AUTO-UPLOAD] No clients to test emit`);
+        
+        if (jobLog) {
+          await jobLog.addLog('warning', `No clients in room ${targetRoom}`, {
+            targetRoom,
+            clientCount: 0,
+            reason: 'Extension not connected or not joined correct room'
+          });
+        }
+      }
+    }
+
+    const endTime = new Date();
+    const duration = endTime - startTime;
+
+    console.log(`✅ [DEBUG-AUTO-UPLOAD][${endTime.toISOString()}] Debug completed`);
+    console.log(`⏱️  [DEBUG-AUTO-UPLOAD] Duration: ${duration}ms`);
+
+    if (jobLog) {
+      await jobLog.addLog('info', 'Debug auto upload tracking completed', {
+        endTime: endTime.toISOString(),
+        duration,
+        shopsAnalyzed: Object.keys(batchesByMachine).length,
+        totalBatches: uploadableBatches.length
+      });
+
+      await jobLog.setSuccess({
+        message: `Debug completed: analyzed ${Object.keys(batchesByMachine).length} shops`,
+        processed: uploadableBatches.length,
+        results: debugResults,
+        duration: `${duration}ms`
+      }, {
+        processed: uploadableBatches.length,
+        success: debugResults.length,
+        failed: 0,
+        details: {
+          shopsAnalyzed: Object.keys(batchesByMachine).length,
+          socketsFound: debugResults.reduce((sum, shop) => sum + shop.clientCount, 0)
+        }
+      });
+    }
+
+    return res.json({
+      ok: true,
+      message: `Debug completed: analyzed ${Object.keys(batchesByMachine).length} shops`,
+      processed: uploadableBatches.length,
+      results: debugResults,
+      duration: `${duration}ms`,
+      summary: {
+        shopsAnalyzed: Object.keys(batchesByMachine).length,
+        totalBatches: uploadableBatches.length,
+        socketsFound: debugResults.reduce((sum, shop) => sum + shop.clientCount, 0)
+      }
+    });
+
+  } catch (error) {
+    const endTime = new Date();
+    const duration = endTime - startTime;
+
+    console.error(`❌ [DEBUG-AUTO-UPLOAD][${endTime.toISOString()}] Failed after ${duration}ms`);
+    console.error(`❌ [DEBUG-AUTO-UPLOAD] Error: ${error.message}`);
+
+    if (jobLog) {
+      try {
+        await jobLog.addLog('error', 'Debug auto upload tracking failed', {
+          endTime: endTime.toISOString(),
+          duration,
+          error: {
+            message: error.message,
+            stack: error.stack
+          }
+        });
+        
+        await jobLog.setError(error);
+      } catch (logError) {
+        console.error('❌ Failed to log debug error to database:', logError.message);
+      }
+    }
+
+    return res.status(500).json({
+      ok: false,
+      message: error.message,
+      duration: `${duration}ms`
+    });
+  }
+};
+
 // ✅ Cập nhật exports
 module.exports = {
   createBatchFromFile,
@@ -2702,5 +3019,6 @@ module.exports = {
   manualUploadTask,
   getUploadableBatches,
   createBatchFromOrders, // ✅ API mới cho FE
-  autoUploadTracking // ✅ API mới cho auto upload
+  autoUploadTracking, // ✅ API mới cho auto upload
+  debugAutoUploadTracking // ✅ API debug với logs chi tiết
 };
