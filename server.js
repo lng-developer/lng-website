@@ -57,7 +57,8 @@ const {
   EtsyListingRoutes,
   cronJobRoutes,
   configAutoRoutes,
-  autoJobLogRoutes
+  autoJobLogRoutes,
+  extensionLogRoutes
 } = require("./src/routes");
 
 app.use("/api/role", roleRoutes);
@@ -94,6 +95,7 @@ app.use("/api/etsy-listing", EtsyListingRoutes);
 app.use("/api/cron-jobs", cronJobRoutes);
 app.use("/api/config-auto", configAutoRoutes);
 app.use("/api/auto-job-logs", autoJobLogRoutes);
+app.use("/api/ext/logs", extensionLogRoutes);
 
 
 // ===== HTTP server
