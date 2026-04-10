@@ -2690,13 +2690,16 @@ const autoUploadTracking = async (req, res, next) => {
 };
 
 // ✅ Debug version với logs chi tiết về Socket.IO
-debugAutoUploadTracking = async (req, res, next) => {
+const debugAutoUploadTracking = async (req, res, next) => {
+  console.log('🚀 [DEBUG-AUTO-UPLOAD] Function started');
   const startTime = new Date();
   const isAutoCall = !req.headers['user-agent']; // Auto calls không có user-agent
+  console.log('🔍 [DEBUG-AUTO-UPLOAD] About to create AutoJobLog...');
 
   // Tạo AutoJobLog entry với jobType debug
   let jobLog = null;
   try {
+    console.log('🔍 [DEBUG-AUTO-UPLOAD] Creating AutoJobLog entry...');
     jobLog = await AutoJobLog.createExecution(
       'debugAutoUploadTracking',
       'debugAutoUploadTracking',
@@ -2706,13 +2709,16 @@ debugAutoUploadTracking = async (req, res, next) => {
         requestBody: req.body
       }
     );
+    console.log('✅ [DEBUG-AUTO-UPLOAD] AutoJobLog created:', jobLog._id);
     await jobLog.addLog('info', `Starting DEBUG auto upload tracking`, {
       startTime: startTime.toISOString(),
       isAutoCall,
       userAgent: req.headers['user-agent'] || 'none'
     });
+    console.log('✅ [DEBUG-AUTO-UPLOAD] Initial log added');
   } catch (logError) {
-    console.error('❌ Failed to create debug job log:', logError.message);
+    console.error('❌ [DEBUG-AUTO-UPLOAD] Failed to create debug job log:', logError.message);
+    console.error('❌ [DEBUG-AUTO-UPLOAD] Error stack:', logError.stack);
   }
 
   try {
