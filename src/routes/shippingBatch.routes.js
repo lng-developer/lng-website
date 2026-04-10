@@ -65,4 +65,10 @@ router.post(
   shippingBatchController.autoUploadTracking
 );
 
+// ✅ Route mới: Debug auto upload tracking với logs chi tiết
+router.post(
+  "/debug-auto-upload-tracking",
+  shippingBatchController.debugAutoUploadTracking
+);
+
 module.exports = router;
