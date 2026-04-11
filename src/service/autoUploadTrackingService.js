@@ -1,0 +1,469 @@
+/**
+ * Auto Upload Tracking Service
+ * Query orders từ orderStatusSnapshots, nhóm theo shop và gửi task upload tracking
+ */
+
+const OrderStatusSnapshot = require("../models/orderStatusSnapshot.model");
+const ShippingBatch = require("../models/shippingBatch.model");
+const RealtimeLog = require("../models/realtimeLog.model");
+
+class AutoUploadTrackingService {
+  
+  /**
+   * Tạo file content cho upload tracking (giống logic trong manualUploadTask)
+   */
+  static buildShipDateString(baseDate) {
+    const ref = baseDate ? new Date(baseDate) : new Date();
+    const shipDate = new Date(
+      Date.UTC(
+        ref.getUTCFullYear(),
+        ref.getUTCMonth(),
+        ref.getUTCDate(),
+        0,
+        22,
+        22,
+      ),
+    );
+    return shipDate.toISOString().replace(".000Z", "+00:00");
+  }
+
+  static normalizeField(value) {
+    if (value === null || value === undefined) return "";
+    return String(value)
+      .trim()
+      .replace(/^"+|"+$/g, "")
+      .replace(/,+$/g, "");
+  }
+
+  static buildCompletedShippingFile(orders, options = {}) {
+    const {
+      carrierCode = "USPS",
+      shipMethod = "USPS First Class",
+      shipDate,
+    } = options;
+
+    let content = "order-id\tship-date\tcarrier-code\ttracking-number\tship-method\n";
+
+    for (const order of orders) {
+      if (!order.orderId || !order.tracking) continue;
+
+      const orderId = this.normalizeField(order.orderId);
+      const tracking = this.normalizeField(order.tracking);
+
+      if (!orderId || !tracking) continue;
+
+      let finalCarrierCode = carrierCode;
+      let finalShipMethod = shipMethod;
+
+      // Auto-detect carrier từ tracking prefix
+      if (tracking.startsWith("UK") || tracking.startsWith("UL")) {
+        finalCarrierCode = "Yanwen";
+        finalShipMethod = "Yanwen Air Economy Mail General";
+      } else if (tracking.startsWith("YT")) {
+        finalCarrierCode = "Yun Express";
+        finalShipMethod = "YunExpress Global Direct line (standard )-Tracked";
+      }
+
+      content += [
+        orderId,
+        shipDate,
+        finalCarrierCode,
+        tracking,
+        finalShipMethod,
+      ].join("\t");
+
+      content += "\n";
+    }
+
+    return content;
+  }
+
+  /**
+   * Query orders từ snapshots và nhóm theo shop
+   */
+  static async getOrdersGroupedByShop(options = {}) {
+    try {
+      const {
+        maxOrdersPerShop = 50,
+        onlyWithTracking = true,
+        onlyNotSubmitted = false,
+        excludeShops = [],
+        includeShops = []
+      } = options;
+
+      console.log(`🔍 [AUTO_UPLOAD] Querying orders from snapshots...`);
+
+      // Lấy snapshots mới nhất của từng shop
+      const latestSnapshots = await OrderStatusSnapshot.aggregate([
+        {
+          $match: {
+            isSuccess: true,
+            ...(includeShops.length > 0 ? { machineId: { $in: includeShops } } : {}),
+            ...(excludeShops.length > 0 ? { machineId: { $nin: excludeShops } } : {})
+          }
+        },
+        {
+          $sort: { machineId: 1, createdAt: -1 }
+        },
+        {
+          $group: {
+            _id: "$machineId",
+            latestSnapshot: { $first: "$$ROOT" }
+          }
+        }
+      ]);
+
+      console.log(`📊 [AUTO_UPLOAD] Found ${latestSnapshots.length} shops with snapshots`);
+
+      const shopOrdersMap = new Map();
+
+      for (const item of latestSnapshots) {
+        const snapshot = item.latestSnapshot;
+        const machineId = snapshot.machineId;
+
+        // Filter orders theo criteria
+        let eligibleOrders = snapshot.orders.filter(order => {
+          // Có tracking nếu yêu cầu
+          if (onlyWithTracking && !order.hasTracking) return false;
+          
+          // Chưa submit nếu yêu cầu
+          if (onlyNotSubmitted && order.submittedToAmazon) return false;
+          
+          // Có tracking hợp lệ
+          if (!order.tracking || order.tracking === '-' || order.tracking === '---') return false;
+          
+          return true;
+        });
+
+        // Limit số orders per shop
+        if (eligibleOrders.length > maxOrdersPerShop) {
+          eligibleOrders = eligibleOrders.slice(0, maxOrdersPerShop);
+        }
+
+        if (eligibleOrders.length > 0) {
+          shopOrdersMap.set(machineId, {
+            machineId,
+            shopName: snapshot.orders[0]?.shopName || `Shop ${machineId}`,
+            snapshotId: snapshot.snapshotId,
+            snapshotCreatedAt: snapshot.createdAt,
+            orders: eligibleOrders,
+            totalOrders: eligibleOrders.length
+          });
+        }
+      }
+
+      console.log(`✅ [AUTO_UPLOAD] Processed ${shopOrdersMap.size} shops with eligible orders`);
+
+      return shopOrdersMap;
+
+    } catch (error) {
+      console.error(`❌ [AUTO_UPLOAD] Error querying orders:`, error.message);
+      throw error;
+    }
+  }
+
+  /**
+   * Tạo batch từ orders của một shop
+   */
+  static async createBatchForShop(machineId, orders, options = {}) {
+    try {
+      const { label, batchType = "AUTO_UPLOAD" } = options;
+
+      console.log(`📦 [AUTO_UPLOAD] Creating batch for shop ${machineId} with ${orders.length} orders`);
+
+      // Chuẩn bị completed orders
+      const completed = orders.map(order => ({
+        orderId: order.orderId,
+        tracking: order.tracking,
+        isFake: false,
+        source: "system",
+        createdAt: new Date()
+      }));
+
+      // Tạo batch
+      const batch = await ShippingBatch.create({
+        machineId,
+        label: label || `Auto Upload - ${new Date().toISOString().split('T')[0]} - ${orders.length} orders`,
+        type: "CONFIRM", // Sử dụng type hợp lệ
+        status: "CONFIRM_FILE_READY",
+        completed,
+        tracking_fakes: [],
+        stats: {
+          totalOrders: completed.length,
+          totalReal: completed.length,
+          totalFake: 0
+        },
+        // Metadata cho auto upload
+        autoUploadInfo: {
+          createdByAutoUpload: true,
+          sourceType: "orderStatusSnapshots",
+          createdAt: new Date()
+        }
+      });
+
+      console.log(`✅ [AUTO_UPLOAD] Created batch ${batch._id} for shop ${machineId}`);
+
+      return batch;
+
+    } catch (error) {
+      console.error(`❌ [AUTO_UPLOAD] Error creating batch for shop ${machineId}:`, error.message);
+      throw error;
+    }
+  }
+
+  /**
+   * Gửi upload task đến extension (giống logic manualUploadTask)
+   */
+  static async sendUploadTaskToExtension(batch, orders, io, options = {}) {
+    try {
+      const {
+        carrierCode = "USPS",
+        shipMethod = "USPS First Class",
+        shipDate
+      } = options;
+
+      const machineId = batch.machineId;
+
+      console.log(`📡 [AUTO_UPLOAD] Sending upload task for batch ${batch._id} to machine:${machineId}`);
+
+      // Tạo file content
+      const shipDateBase = shipDate ? new Date(shipDate) : (batch.createdAt ? new Date(batch.createdAt) : new Date());
+      const shipDateStr = this.buildShipDateString(shipDateBase);
+      
+      const fileContent = this.buildCompletedShippingFile(orders, {
+        carrierCode,
+        shipMethod,
+        shipDate: shipDateStr,
+      });
+
+      const filename = `auto_upload_${machineId}_${batch._id}.txt`;
+
+      // Chuẩn bị tracking data
+      const trackingData = orders.map(order => ({
+        orderId: order.orderId,
+        tracking: order.tracking,
+        isFake: false,
+        source: 'system'
+      }));
+
+      // Tạo task
+      const task = {
+        type: "UPLOAD_TRACKING",
+        payload: {
+          batchId: batch._id,
+          machineId,
+          label: batch.label,
+          trackingData,
+          stats: batch.stats,
+
+          // File information
+          file: {
+            filename,
+            content: fileContent,
+            contentType: "text/tab-separated-values; charset=utf-8",
+            size: Buffer.byteLength(fileContent, 'utf8')
+          },
+
+          // Upload parameters
+          uploadParams: {
+            carrierCode,
+            shipMethod,
+            shipDate: shipDateStr
+          },
+
+          autoGenerated: true, // Đánh dấu là auto generated
+          reason: "auto_upload_from_snapshots",
+          requestedBy: "auto_service",
+          timestamp: new Date().toISOString()
+        }
+      };
+
+      // Gửi task qua Socket.IO
+      const roomName = `machine:${machineId}`;
+      io.to(roomName).emit("server:task", task);
+
+      // Đánh dấu batch đã gửi task
+      batch.uploadTaskSent = true;
+      batch.uploadTaskSentAt = new Date();
+      batch.uploadTaskSentBy = "auto"; // Sử dụng enum value hợp lệ
+      await batch.save();
+
+      // Log task
+      await RealtimeLog.create({
+        machineId,
+        label: batch.label,
+        action: "auto", // Sử dụng enum value hợp lệ
+        level: "info",
+        message: `Auto UPLOAD_TRACKING task sent: ${trackingData.length} orders, file: ${filename}`,
+        ts: new Date(),
+      });
+
+      console.log(`✅ [AUTO_UPLOAD] Sent task for batch ${batch._id} to ${roomName}`);
+
+      return {
+        success: true,
+        batchId: batch._id,
+        filename,
+        fileSize: Buffer.byteLength(fileContent, 'utf8'),
+        trackingCount: trackingData.length,
+        target: roomName
+      };
+
+    } catch (error) {
+      console.error(`❌ [AUTO_UPLOAD] Error sending task for batch ${batch._id}:`, error.message);
+      throw error;
+    }
+  }
+
+  /**
+   * Main function: Auto upload tracking cho tất cả shops
+   */
+  static async autoUploadTrackingForAllShops(io, options = {}) {
+    try {
+      const startTime = new Date();
+      console.log(`🚀 [AUTO_UPLOAD] Starting auto upload tracking at ${startTime.toISOString()}`);
+
+      const {
+        maxOrdersPerShop = 50,
+        onlyWithTracking = true,
+        onlyNotSubmitted = true, // Chỉ upload orders chưa submit
+        excludeShops = [],
+        includeShops = [],
+        carrierCode = "USPS",
+        shipMethod = "USPS First Class",
+        dryRun = false
+      } = options;
+
+      // 1. Query orders nhóm theo shop
+      const shopOrdersMap = await this.getOrdersGroupedByShop({
+        maxOrdersPerShop,
+        onlyWithTracking,
+        onlyNotSubmitted,
+        excludeShops,
+        includeShops
+      });
+
+      if (shopOrdersMap.size === 0) {
+        console.log(`⚠️ [AUTO_UPLOAD] No eligible orders found for upload`);
+        return {
+          success: true,
+          totalShops: 0,
+          totalOrders: 0,
+          results: [],
+          message: "No eligible orders found"
+        };
+      }
+
+      const results = [];
+      let totalOrders = 0;
+
+      // 2. Process từng shop
+      for (const [machineId, shopData] of shopOrdersMap) {
+        try {
+          console.log(`🔄 [AUTO_UPLOAD] Processing shop ${machineId} (${shopData.totalOrders} orders)`);
+
+          if (dryRun) {
+            console.log(`🧪 [DRY_RUN] Would create batch and send task for shop ${machineId}`);
+            results.push({
+              machineId,
+              shopName: shopData.shopName,
+              success: true,
+              dryRun: true,
+              ordersCount: shopData.totalOrders,
+              message: "Dry run - no actual upload"
+            });
+            totalOrders += shopData.totalOrders;
+            continue;
+          }
+
+          // Tạo batch cho shop
+          const batch = await this.createBatchForShop(machineId, shopData.orders, {
+            label: `Auto Upload - ${shopData.shopName} - ${shopData.totalOrders} orders`
+          });
+
+          // Gửi upload task
+          const taskResult = await this.sendUploadTaskToExtension(batch, shopData.orders, io, {
+            carrierCode,
+            shipMethod
+          });
+
+          results.push({
+            machineId,
+            shopName: shopData.shopName,
+            success: true,
+            batchId: batch._id,
+            ordersCount: shopData.totalOrders,
+            filename: taskResult.filename,
+            fileSize: taskResult.fileSize,
+            target: taskResult.target,
+            snapshotId: shopData.snapshotId
+          });
+
+          totalOrders += shopData.totalOrders;
+
+        } catch (shopError) {
+          console.error(`❌ [AUTO_UPLOAD] Error processing shop ${machineId}:`, shopError.message);
+          results.push({
+            machineId,
+            shopName: shopData.shopName,
+            success: false,
+            error: shopError.message,
+            ordersCount: shopData.totalOrders
+          });
+        }
+      }
+
+      const successCount = results.filter(r => r.success).length;
+      const endTime = new Date();
+      const duration = endTime - startTime;
+
+      console.log(`🎉 [AUTO_UPLOAD] Completed: ${successCount}/${shopOrdersMap.size} shops, ${totalOrders} total orders in ${duration}ms`);
+
+      return {
+        success: true,
+        totalShops: shopOrdersMap.size,
+        successfulShops: successCount,
+        failedShops: shopOrdersMap.size - successCount,
+        totalOrders,
+        duration,
+        results,
+        message: `Auto upload completed: ${successCount} shops, ${totalOrders} orders`
+      };
+
+    } catch (error) {
+      console.error(`❌ [AUTO_UPLOAD] Auto upload failed:`, error.message);
+      throw error;
+    }
+  }
+
+  /**
+   * Auto upload cho một shop cụ thể
+   */
+  static async autoUploadTrackingForShop(machineId, io, options = {}) {
+    try {
+      console.log(`🎯 [AUTO_UPLOAD] Auto upload for specific shop: ${machineId}`);
+
+      const result = await this.autoUploadTrackingForAllShops(io, {
+        ...options,
+        includeShops: [machineId]
+      });
+
+      const shopResult = result.results.find(r => r.machineId === machineId);
+
+      return {
+        success: shopResult?.success || false,
+        machineId,
+        ...shopResult,
+        message: shopResult ? 
+          `Auto upload for shop ${machineId}: ${shopResult.success ? 'success' : 'failed'}` :
+          `No eligible orders found for shop ${machineId}`
+      };
+
+    } catch (error) {
+      console.error(`❌ [AUTO_UPLOAD] Auto upload failed for shop ${machineId}:`, error.message);
+      throw error;
+    }
+  }
+}
+
+module.exports = AutoUploadTrackingService;

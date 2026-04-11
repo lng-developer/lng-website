@@ -1,6 +1,8 @@
 const cron = require("node-cron");
 const { shippingBatchController } = require("../controllers");
 const ShippingBatch = require("../models/shippingBatch.model");
+const OrderStatusSyncService = require("./orderStatusSync");
+const SnapshotAutoSyncService = require("./snapshotAutoSync");
 
 class CronJobService {
   constructor() {
@@ -26,6 +28,12 @@ class CronJobService {
     
     // Job 2: Load và khởi tạo các auto jobs từ ConfigAuto
     await this.loadAutoJobsFromDatabase();
+    
+    // Job 3: Order Status Sync - chạy mỗi giờ
+    this.scheduleOrderStatusSync();
+    
+    // Job 4: Snapshot Auto Sync - chạy mỗi 15 phút
+    this.scheduleSnapshotAutoSync();
     
     console.log('⏰ [CRON] All cron jobs initialized successfully');
   }
@@ -531,7 +539,7 @@ class CronJobService {
   }
 
   /**
-   * Thực thi uploadTracking job
+   * Thực thi uploadTracking job - sử dụng AutoUploadTrackingService mới
    */
   async executeUploadTracking(config, jobLog = null) {
     if (jobLog) {
@@ -541,77 +549,66 @@ class CronJobService {
     console.log(`🤖 [AUTO-CRON] Executing uploadTracking auto job`);
     console.log(`📋 [AUTO-CRON] Config ID: ${config.id}`);
     console.log(`⚙️  [AUTO-CRON] Settings:`, {
-      maxBatches: config.config?.maxBatches || 10,
-      dryRun: config.config?.dryRun || false,
+      maxOrdersPerShop: config.config?.maxOrdersPerShop || 50,
+      onlyWithTracking: config.config?.onlyWithTracking !== false, // default true
+      onlyNotSubmitted: config.config?.onlyNotSubmitted !== false, // default true
+      excludeShops: config.config?.excludeShops || [],
+      includeShops: config.config?.includeShops || [],
       carrierCode: config.config?.carrierCode || "USPS",
-      shipMethod: config.config?.shipMethod || "USPS First Class"
+      shipMethod: config.config?.shipMethod || "USPS First Class",
+      dryRun: config.config?.dryRun || false
     });
     
-    const { shippingBatchController } = require("../controllers");
-    
-    // Tạo mock req/res objects
-    const mockReq = {
-      body: {
-        maxBatches: config.config?.maxBatches || 10,
-        dryRun: config.config?.dryRun || false,
-        carrierCode: config.config?.carrierCode || "USPS",
-        shipMethod: config.config?.shipMethod || "USPS First Class"
-      },
-      headers: {}, // Không có user-agent để đánh dấu là auto call
-      app: {
-        get: (key) => {
-          if (key === 'io') {
-            console.log(`🔍 [AUTO-CRON] Requesting Socket.IO instance: ${!!this.io}`);
-            return this.io; // Trả về Socket.IO instance thực tế
-          }
-          return null;
-        }
-      }
-    };
-    
-    let result = null;
-    const mockRes = {
-      status: (code) => ({
-        json: (data) => {
-          result = { statusCode: code, ...data };
-          return mockRes;
-        }
-      }),
-      json: (data) => {
-        result = { statusCode: 200, ...data };
-        return mockRes;
-      }
-    };
-    
-    const mockNext = (err) => {
-      throw err;
-    };
+    // Import AutoUploadTrackingService
+    const AutoUploadTrackingService = require("./autoUploadTrackingService");
     
     if (jobLog) {
-      await jobLog.addLog('info', `Calling autoUploadTracking function`);
+      await jobLog.addLog('info', `Calling AutoUploadTrackingService.autoUploadTrackingForAllShops`);
     }
     
-    // Gọi hàm autoUploadTracking thực tế
-    await shippingBatchController.autoUploadTracking(mockReq, mockRes, mockNext);
+    // Gọi service trực tiếp với Socket.IO instance
+    const result = await AutoUploadTrackingService.autoUploadTrackingForAllShops(this.io, {
+      maxOrdersPerShop: config.config?.maxOrdersPerShop || 50,
+      onlyWithTracking: config.config?.onlyWithTracking !== false,
+      onlyNotSubmitted: config.config?.onlyNotSubmitted !== false,
+      excludeShops: config.config?.excludeShops || [],
+      includeShops: config.config?.includeShops || [],
+      carrierCode: config.config?.carrierCode || "USPS",
+      shipMethod: config.config?.shipMethod || "USPS First Class",
+      dryRun: config.config?.dryRun || false
+    });
     
     if (jobLog) {
       await jobLog.addLog('info', `uploadTracking completed`, { 
-        statusCode: result?.statusCode,
-        processed: result?.processed,
         success: result?.success,
-        failed: result?.failed
+        totalShops: result?.totalShops,
+        successfulShops: result?.successfulShops,
+        failedShops: result?.failedShops,
+        totalOrders: result?.totalOrders
       });
     }
     
-    console.log(`✅ [AUTO-CRON] uploadTracking completed with status ${result?.statusCode}`);
+    console.log(`✅ [AUTO-CRON] uploadTracking completed`);
     console.log(`📊 [AUTO-CRON] Summary:`, {
-      ok: result?.ok,
-      processed: result?.processed || 0,
-      success: result?.success || 0,
-      failed: result?.failed || 0
+      success: result?.success,
+      totalShops: result?.totalShops || 0,
+      successfulShops: result?.successfulShops || 0,
+      failedShops: result?.failedShops || 0,
+      totalOrders: result?.totalOrders || 0,
+      duration: result?.duration || 0
     });
     
-    return result;
+    // Format result để match với expected format
+    return {
+      ok: result?.success,
+      statusCode: result?.success ? 200 : 500,
+      processed: result?.totalOrders || 0,
+      success: result?.successfulShops || 0,
+      failed: result?.failedShops || 0,
+      totalShops: result?.totalShops || 0,
+      message: result?.message || 'Upload tracking completed',
+      results: result?.results || []
+    };
   }
 
   /**
@@ -758,8 +755,183 @@ class CronJobService {
       case 'autoUpload_afternoon':
         await this.runAutoUploadJob('afternoon');
         break;
+      case 'orderStatusSync':
+        await this.runOrderStatusSyncJob();
+        break;
       default:
         throw new Error(`Unknown job: ${jobName}`);
+    }
+  }
+
+  /**
+   * Schedule Order Status Sync Job - chạy mỗi 15 phút
+   */
+  scheduleOrderStatusSync() {
+    const jobName = 'orderStatusSync';
+    
+    // Chạy mỗi 15 phút (thay vì 5 phút để tránh ghi đè auto upload test)
+    const cronPattern = '*/15 * * * *';
+    
+    const job = cron.schedule(cronPattern, async () => {
+      await this.runOrderStatusSyncJob();
+    }, {
+      scheduled: false,
+      timezone: "Asia/Ho_Chi_Minh"
+    });
+
+    this.jobs.set(jobName, job);
+    job.start();
+    
+    console.log(`⏰ [CRON] Order Status Sync job scheduled: ${cronPattern} (every 15 minutes)`);
+  }
+
+  /**
+   * Chạy Order Status Sync Job
+   */
+  async runOrderStatusSyncJob() {
+    try {
+      const timestamp = new Date().toISOString();
+      console.log('🔄 [CRON] ===== Order Status Sync Job Started =====');
+      console.log(`🔄 [CRON] Timestamp: ${timestamp}`);
+      console.log(`🔄 [CRON] Job Type: Automatic (every 5 minutes)`);
+      
+      const startTime = Date.now();
+      
+      // Sync tất cả shops active
+      const result = await OrderStatusSyncService.syncAllActiveShops({
+        limit: 1000,
+        status: ["New", "Processing", "Shipped"],
+        filterType: "all"
+      });
+      
+      const duration = Date.now() - startTime;
+      
+      console.log(`✅ [CRON] ===== Order Status Sync Job Completed =====`);
+      console.log(`✅ [CRON] Duration: ${duration}ms (${(duration/1000).toFixed(2)}s)`);
+      console.log(`✅ [CRON] Total shops: ${result.totalShops}`);
+      console.log(`✅ [CRON] Successful: ${result.successCount}`);
+      console.log(`✅ [CRON] Failed: ${result.failedCount}`);
+      console.log(`✅ [CRON] Success rate: ${result.totalShops > 0 ? ((result.successCount/result.totalShops)*100).toFixed(1) : 0}%`);
+      console.log(`✅ [CRON] Next run: ${new Date(Date.now() + 15*60*1000).toISOString()}`);
+      console.log(`✅ [CRON] ============================================`);
+      
+      // Emit socket event nếu có
+      if (this.io) {
+        this.io.emit('orderStatusSyncCompleted', {
+          timestamp: new Date(),
+          duration,
+          result,
+          nextRun: new Date(Date.now() + 15*60*1000) // Next run in 15 minutes
+        });
+        console.log(`📡 [CRON] Socket event emitted: orderStatusSyncCompleted`);
+      }
+      
+      return result;
+      
+    } catch (error) {
+      const timestamp = new Date().toISOString();
+      console.error('❌ [CRON] ===== Order Status Sync Job Failed =====');
+      console.error(`❌ [CRON] Timestamp: ${timestamp}`);
+      console.error(`❌ [CRON] Error message:`, error.message);
+      console.error(`❌ [CRON] Stack trace:`, error.stack);
+      console.error(`❌ [CRON] Next retry: ${new Date(Date.now() + 15*60*1000).toISOString()}`);
+      console.error(`❌ [CRON] ==========================================`);
+      
+      // Emit error event
+      if (this.io) {
+        this.io.emit('orderStatusSyncError', {
+          timestamp: new Date(),
+          error: error.message,
+          nextRetry: new Date(Date.now() + 15*60*1000)
+        });
+        console.log(`📡 [CRON] Socket error event emitted: orderStatusSyncError`);
+      }
+      
+      throw error;
+    }
+  }
+
+  /**
+   * Schedule Snapshot Auto Sync Job - chạy mỗi 15 phút
+   */
+  scheduleSnapshotAutoSync() {
+    const jobName = 'snapshotAutoSync';
+    
+    // Chạy mỗi 15 phút
+    const cronPattern = '*/15 * * * *';
+    
+    const job = cron.schedule(cronPattern, async () => {
+      await this.runSnapshotAutoSyncJob();
+    }, {
+      scheduled: false,
+      timezone: "Asia/Ho_Chi_Minh"
+    });
+
+    this.jobs.set(jobName, job);
+    job.start();
+    
+    console.log(`⏰ [CRON] Snapshot Auto Sync job scheduled: ${cronPattern} (every 15 minutes)`);
+  }
+
+  /**
+   * Chạy Snapshot Auto Sync Job
+   */
+  async runSnapshotAutoSyncJob() {
+    try {
+      const timestamp = new Date().toISOString();
+      console.log('🔄 [CRON] ===== Snapshot Auto Sync Job Started =====');
+      console.log(`🔄 [CRON] Timestamp: ${timestamp}`);
+      console.log(`🔄 [CRON] Job Type: Automatic (every 15 minutes)`);
+      
+      const startTime = Date.now();
+      
+      // Sync tất cả shops có snapshots
+      const result = await SnapshotAutoSyncService.scheduledSyncAllShops();
+      
+      const duration = Date.now() - startTime;
+      
+      console.log(`✅ [CRON] ===== Snapshot Auto Sync Job Completed =====`);
+      console.log(`✅ [CRON] Duration: ${duration}ms (${(duration/1000).toFixed(2)}s)`);
+      console.log(`✅ [CRON] Total shops: ${result.totalShops}`);
+      console.log(`✅ [CRON] Successful: ${result.successCount}`);
+      console.log(`✅ [CRON] Failed: ${result.totalShops - result.successCount}`);
+      console.log(`✅ [CRON] Success rate: ${result.totalShops > 0 ? ((result.successCount/result.totalShops)*100).toFixed(1) : 0}%`);
+      console.log(`✅ [CRON] Next run: ${new Date(Date.now() + 15*60*1000).toISOString()}`);
+      console.log(`✅ [CRON] ============================================`);
+      
+      // Emit socket event nếu có
+      if (this.io) {
+        this.io.emit('snapshotAutoSyncCompleted', {
+          timestamp: new Date(),
+          duration,
+          result,
+          nextRun: new Date(Date.now() + 15*60*1000)
+        });
+        console.log(`📡 [CRON] Socket event emitted: snapshotAutoSyncCompleted`);
+      }
+      
+      return result;
+      
+    } catch (error) {
+      const timestamp = new Date().toISOString();
+      console.error('❌ [CRON] ===== Snapshot Auto Sync Job Failed =====');
+      console.error(`❌ [CRON] Timestamp: ${timestamp}`);
+      console.error(`❌ [CRON] Error message:`, error.message);
+      console.error(`❌ [CRON] Stack trace:`, error.stack);
+      console.error(`❌ [CRON] Next retry: ${new Date(Date.now() + 15*60*1000).toISOString()}`);
+      console.error(`❌ [CRON] ==========================================`);
+      
+      // Emit error event
+      if (this.io) {
+        this.io.emit('snapshotAutoSyncError', {
+          timestamp: new Date(),
+          error: error.message,
+          nextRetry: new Date(Date.now() + 15*60*1000)
+        });
+        console.log(`📡 [CRON] Socket error event emitted: snapshotAutoSyncError`);
+      }
+      
+      throw error;
     }
   }
 }

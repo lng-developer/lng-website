@@ -3,6 +3,10 @@ const ShippingBatch = db.ShippingBatch;
 const OrderCustomProduct = db.orderCustomProduct;
 const RealtimeLog = db.RealtimeLog;
 const AutoJobLog = db.AutoJobLog;
+const OrderStatusSnapshot = db.OrderStatusSnapshot;
+const OrderStatusSyncService = require("../service/orderStatusSync");
+const SnapshotAutoSyncService = require("../service/snapshotAutoSync");
+const AutoUploadTrackingService = require("../service/autoUploadTrackingService");
 
 async function getRealTrackingForOrder(orderId) {
   const order = await OrderCustomProduct.findOne({ orderId: orderId });
@@ -173,6 +177,15 @@ const createBatchFromFile = async (req, res, next) => {
       tracking_fakes,
       stats,
     });
+
+    // 🔄 AUTO SYNC: Tự động cập nhật snapshots
+    try {
+      console.log(`🔄 [AUTO_SYNC] Triggering auto sync for batch: ${batch._id}`);
+      await SnapshotAutoSyncService.updateBatchSubmissionStatus(batch._id, machineId);
+    } catch (syncError) {
+      console.error(`⚠️ [AUTO_SYNC] Failed to auto sync snapshots:`, syncError.message);
+      // Không throw error để không ảnh hưởng đến flow chính
+    }
 
     // 6) Build file confirm ship từ "completed"
     const rowsForFile = completed.map((r) => ({
@@ -1070,193 +1083,38 @@ const checkOrdersStatus = async (req, res, next) => {
       toDate,
       status = ["New", "Processing", "Shipped"],
       filterType = "all", // "all", "with-tracking", "without-tracking", "submitted", "not-submitted"
+      useSnapshot = "auto", // "auto", "hybrid", "snapshot-only", "real-time", "snapshot-priority"
     } = req.query;
 
     if (!machineId) {
       return res.status(400).json({ message: "machineId is required" });
     }
 
-    // 1. Build query filter cho orders
-    const orderFilter = {
-      status: { $in: Array.isArray(status) ? status : [status] },
-      shopId: machineId, // ✅ Filter orders theo shopId = machineId
-    };
+    console.log(`🔍 [CHECK_ORDERS] Mode: ${useSnapshot} for shop: ${machineId}`);
 
-    // Filter theo ngày tạo nếu có
-    if (fromDate || toDate) {
-      orderFilter.createdAt = {};
-      if (fromDate) {
-        const from = new Date(fromDate);
-        if (!isNaN(from.getTime())) orderFilter.createdAt.$gte = from;
-      }
-      if (toDate) {
-        const to = new Date(toDate);
-        if (!isNaN(to.getTime())) orderFilter.createdAt.$lte = to;
-      }
-    }
-
-    // 2. Query tất cả orders theo filter (shopId = machineId)
-    const allOrders = await OrderCustomProduct.find(orderFilter)
-      .populate('shopId', 'name store') // ✅ Populate shop info
-      .sort({ createdAt: -1 })
-      .limit(Number(limit))
-      .lean();
-
-    console.log(`🔍 [CHECK_ORDERS] Filtering orders for shopId: ${machineId}`);
-    console.log(`📊 [CHECK_ORDERS] Found ${allOrders.length} orders for shop ${machineId}`);
-
-    if (!allOrders.length) {
-      console.log(`⚠️ [CHECK_ORDERS] No orders found for shopId: ${machineId}`);
-      return res.json({
-        orders: [],
-        totalCount: 0,
-        filter: {
-          machineId,
-          shopId: machineId, // ✅ Thêm shopId vào response để rõ ràng
-          limit: Number(limit),
-          fromDate,
-          toDate,
-          status: Array.isArray(status) ? status : [status],
-          filterType,
-        },
-      });
-    }
-
-    // 3. Phân loại và build chi tiết orders
-    const ordersWithDetails = [];
-
-    for (const order of allOrders) {
-      let hasValidTracking = false;
-      let tracking = "";
-      let trackingInfo = null;
-
-      // Kiểm tra tracking trong items
-      for (const item of order.items || []) {
-        const itemTracking = normalizeField(item?.tracking_info?.tracking);
-        if (itemTracking && itemTracking !== "-" && itemTracking !== "---") {
-          hasValidTracking = true;
-          tracking = itemTracking;
-          trackingInfo = {
-            tracking: itemTracking,
-            fulfillment: item.tracking_info?.fulfillment || "",
-            status: item.tracking_info?.status || "",
-            carrier: item.tracking_info?.note || "",
-            updated_at: item.tracking_info?.updated_at || null,
-          };
-          break;
-        }
-      }
-
-      ordersWithDetails.push({
-        orderId: order.orderId,
-        shopId: order.shopId?._id || order.shopId, // ✅ Handle populated vs non-populated
-        shopName: order.shopId?.name || null, // ✅ Thêm shop name
-        shopStore: order.shopId?.store || null, // ✅ Thêm shop store (seller ID)
-        status: order.status,
-        createdAt: order.createdAt,
-        updatedAt: order.updatedAt,
-        hasTracking: hasValidTracking,
-        tracking: tracking || null,
-        trackingInfo: trackingInfo,
-        itemsCount: (order.items || []).length,
-        // Thêm thông tin khác nếu cần
-        customerEmail: order.customer?.email || null,
-        totalAmount: order.total_amount || 0,
-      });
-    }
-
-    // 4. Kiểm tra orders nào đã được submit lên Amazon
-    const allOrderIds = ordersWithDetails.map(o => o.orderId);
-
-    const submittedBatches = await ShippingBatch.find({
-      machineId,
-      "completed.orderId": { $in: allOrderIds },
-    }).lean();
-
-    // Tạo Map để track submission info
-    const submissionMap = new Map();
-    for (const batch of submittedBatches) {
-      for (const completed of batch.completed || []) {
-        if (allOrderIds.includes(completed.orderId)) {
-          submissionMap.set(completed.orderId, {
-            submittedToAmazon: true,
-            batchId: batch._id,
-            batchType: batch.type,
-            submittedAt: batch.createdAt,
-            batchLabel: batch.label,
-          });
-        }
-      }
-    }
-
-    // 5. Merge submission info vào orders
-    const finalOrders = ordersWithDetails.map(order => ({
-      ...order,
-      submittedToAmazon: submissionMap.has(order.orderId),
-      submissionInfo: submissionMap.get(order.orderId) || null,
-    }));
-
-    // 6. Apply filterType để lọc kết quả
-    let filteredOrders = finalOrders;
-
-    switch (filterType) {
-      case "with-tracking":
-        filteredOrders = finalOrders.filter(o => o.hasTracking);
+    // Route to different processing modes
+    let result;
+    switch (useSnapshot) {
+      case "snapshot-only":
+        result = await this.checkOrdersStatusFromSnapshot(machineId, { limit, fromDate, toDate, status, filterType });
         break;
-      case "without-tracking":
-        filteredOrders = finalOrders.filter(o => !o.hasTracking);
+      case "hybrid":
+        result = await this.checkOrdersStatusHybrid(machineId, { limit, fromDate, toDate, status, filterType });
         break;
-      case "submitted":
-        filteredOrders = finalOrders.filter(o => o.submittedToAmazon);
+      case "snapshot-priority":
+        result = await this.checkOrdersStatusSnapshotPriority(machineId, { limit, fromDate, toDate, status, filterType });
         break;
-      case "not-submitted":
-        filteredOrders = finalOrders.filter(o => o.hasTracking && !o.submittedToAmazon);
-        break;
-      case "all":
+      case "real-time":
       default:
-        filteredOrders = finalOrders;
+        result = await this.checkOrdersStatusRealTime(machineId, { limit, fromDate, toDate, status, filterType });
         break;
     }
 
-    // 7. Tính toán summary statistics cho reference
-    const stats = {
-      totalScanned: allOrders.length,
-      totalWithTracking: finalOrders.filter(o => o.hasTracking).length,
-      totalWithoutTracking: finalOrders.filter(o => !o.hasTracking).length,
-      totalSubmitted: finalOrders.filter(o => o.submittedToAmazon).length,
-      totalNotSubmitted: finalOrders.filter(o => o.hasTracking && !o.submittedToAmazon).length,
-      filteredCount: filteredOrders.length,
-    };
-
-    return res.json({
-      orders: filteredOrders,
-      totalCount: filteredOrders.length,
-      stats, // Thống kê tham khảo
-      filter: {
-        machineId,
-        shopId: machineId, // ✅ Thêm shopId vào response
-        limit: Number(limit),
-        fromDate,
-        toDate,
-        status: Array.isArray(status) ? status : [status],
-        filterType,
-      },
-    });
+    return res.json(result);
 
   } catch (err) {
     next(err);
   }
-};
-
-module.exports = {
-  createBatchFromFile,
-  listShippingBatches,
-  createUpdateBatchFromSystem,
-  downloadCompletedFile,
-  // updateAllFakeTracking, // COMMENTED OUT - removed fake tracking
-  downloadAllUpdatedFakeFile,
-  exportOrdersWithTracking,
-  checkOrdersStatus, // ✅ Thêm function mới
 };
 
 /**
@@ -1439,30 +1297,6 @@ const sendUploadTrackingTask = async (req, res, next) => {
   }
 };
 
-// ✅ Cập nhật exports
-module.exports = {
-  createBatchFromFile,
-  listShippingBatches,
-  createUpdateBatchFromSystem,
-  downloadCompletedFile,
-  // updateAllFakeTracking, // COMMENTED OUT - removed fake tracking
-  downloadAllUpdatedFakeFile,
-  exportOrdersWithTracking,
-  checkOrdersStatus,
-  sendUploadTrackingTask, // ✅ Thêm function mới
-};
-
-// ✅ Cập nhật exports - chỉ giữ các function cần thiết
-module.exports = {
-  createBatchFromFile,
-  listShippingBatches,
-  createUpdateBatchFromSystem,
-  downloadCompletedFile,
-  // updateAllFakeTracking, // COMMENTED OUT - removed fake tracking
-  downloadAllUpdatedFakeFile,
-  exportOrdersWithTracking,
-  checkOrdersStatus,
-};
 /**
  * API cho FE để chủ động gửi task UPLOAD_TRACKING
  * POST /api/shipping-batch/manual-upload-task
@@ -1734,20 +1568,6 @@ const getUploadableBatches = async (req, res, next) => {
     next(err);
   }
 };
-
-// ✅ Cập nhật exports với API mới cho FE
-module.exports = {
-  createBatchFromFile,
-  listShippingBatches,
-  createUpdateBatchFromSystem,
-  downloadCompletedFile,
-  // updateAllFakeTracking, // COMMENTED OUT - removed fake tracking
-  downloadAllUpdatedFakeFile,
-  exportOrdersWithTracking,
-  checkOrdersStatus,
-  manualUploadTask, // ✅ API manual cho FE
-  getUploadableBatches, // ✅ API lấy danh sách batch có thể upload
-};
 /**
  * API tạo batch từ danh sách orders (nhóm theo shopId)
  * POST /api/shipping-batch/create-from-orders
@@ -1909,6 +1729,15 @@ const createBatchFromOrders = async (req, res, next) => {
           }
         });
 
+        // 🔄 AUTO SYNC: Tự động cập nhật snapshots
+        try {
+          console.log(`🔄 [AUTO_SYNC] Triggering auto sync for batch: ${batch._id}`);
+          await SnapshotAutoSyncService.updateBatchSubmissionStatus(batch._id, machineId);
+        } catch (syncError) {
+          console.error(`⚠️ [AUTO_SYNC] Failed to auto sync snapshots:`, syncError.message);
+          // Không throw error để không ảnh hưởng đến flow chính
+        }
+
         createdBatches.push(batch);
 
         console.log(`✅ [CREATE_BATCH] Created batch ${batch._id} for shop ${shopId} with ${completed.length} orders (${totalReal} real, ${totalFake} fake)`);
@@ -2064,628 +1893,162 @@ const createBatchFromOrders = async (req, res, next) => {
 };
 
 /**
- * Auto upload tracking - Tự động upload batches có tracking lên Amazon
- * Dựa trên logic checkOrdersStatus để tìm batches cần upload
+ * Auto Upload Tracking - Tự động upload tracking từ orderStatusSnapshots
+ * POST /api/shipping-batch/auto-upload-tracking
+ * Body: {
+ *   maxOrdersPerShop?: number (default: 50),
+ *   onlyWithTracking?: boolean (default: true),
+ *   onlyNotSubmitted?: boolean (default: true),
+ *   excludeShops?: string[],
+ *   includeShops?: string[],
+ *   carrierCode?: string (default: "USPS"),
+ *   shipMethod?: string (default: "USPS First Class"),
+ *   dryRun?: boolean (default: false)
+ * }
  */
 const autoUploadTracking = async (req, res, next) => {
-  const startTime = new Date();
-  const isAutoCall = !req.headers['user-agent']; // Auto calls không có user-agent
-
-  // Tạo AutoJobLog entry để ghi log vào DB
-  let jobLog = null;
   try {
-    jobLog = await AutoJobLog.createExecution(
-      'uploadTracking_manual',
-      'uploadTracking',
-      {
-        isAutoCall,
-        requestHeaders: Object.keys(req.headers),
-        requestBody: req.body
-      }
-    );
-    await jobLog.addLog('info', `Starting ${isAutoCall ? 'AUTO' : 'MANUAL'} upload tracking`, {
-      startTime: startTime.toISOString(),
-      isAutoCall,
-      userAgent: req.headers['user-agent'] || 'none'
-    });
-  } catch (logError) {
-    console.error('❌ Failed to create job log:', logError.message);
-  }
+    console.log('🚀 [AUTO_UPLOAD_API] Auto upload tracking called with body:', JSON.stringify(req.body, null, 2));
 
-  try {
     const {
-      maxBatches = 10,
-      dryRun = false,
+      maxOrdersPerShop = 50,
+      onlyWithTracking = true,
+      onlyNotSubmitted = true,
+      excludeShops = [],
+      includeShops = [],
       carrierCode = "USPS",
-      shipMethod = "USPS First Class"
-    } = req.body || {};
+      shipMethod = "USPS First Class",
+      dryRun = false,
+      shopId // Nếu có shopId thì chỉ upload cho shop đó
+    } = req.body;
 
-    console.log(`🚀 [AUTO-UPLOAD][${startTime.toISOString()}] Starting auto upload tracking`);
-    console.log(`📋 [AUTO-UPLOAD] Type: ${isAutoCall ? '🤖 AUTO' : '👤 MANUAL'}`);
-    console.log(`⚙️  [AUTO-UPLOAD] Settings: maxBatches=${maxBatches}, dryRun=${dryRun}, carrierCode=${carrierCode}, shipMethod=${shipMethod}`);
-    console.log(`🔍 [AUTO-UPLOAD] Request headers:`, Object.keys(req.headers));
-    console.log(`🔍 [AUTO-UPLOAD] Request body:`, req.body);
-
-    if (jobLog) {
-      await jobLog.addLog('info', 'Configuration loaded', {
-        maxBatches,
-        dryRun,
-        carrierCode,
-        shipMethod
-      });
-    }
-
-    // 1. Debug: Kiểm tra database connection
-    console.log(`🔍 [AUTO-UPLOAD] Checking database connection...`);
-    const dbStats = await ShippingBatch.db.db.stats();
-    console.log(`✅ [AUTO-UPLOAD] Database connected: ${dbStats.db}`);
-
-    if (jobLog) {
-      await jobLog.addLog('info', 'Database connection verified', {
-        database: dbStats.db,
-        collections: dbStats.collections
-      });
-    }
-
-    // 2. Debug: Đếm tổng số batches trong database
-    const totalBatches = await ShippingBatch.countDocuments();
-    console.log(`📊 [AUTO-UPLOAD] Total batches in database: ${totalBatches}`);
-
-    // 3. Debug: Đếm batches theo từng điều kiện
-    const statusCount = await ShippingBatch.countDocuments({ status: 'CONFIRM_FILE_READY' });
-    console.log(`📊 [AUTO-UPLOAD] Batches with status CONFIRM_FILE_READY: ${statusCount}`);
-
-    const completedCount = await ShippingBatch.countDocuments({
-      status: 'CONFIRM_FILE_READY',
-      completed: { $exists: true, $ne: [] }
-    });
-    console.log(`📊 [AUTO-UPLOAD] Batches with completed data: ${completedCount}`);
-
-    const notSentCount = await ShippingBatch.countDocuments({
-      status: 'CONFIRM_FILE_READY',
-      completed: { $exists: true, $ne: [] },
-      uploadTaskSent: { $ne: true }
-    });
-    console.log(`📊 [AUTO-UPLOAD] Batches not yet sent: ${notSentCount}`);
-
-    const withMachineIdCount = await ShippingBatch.countDocuments({
-      status: 'CONFIRM_FILE_READY',
-      completed: { $exists: true, $ne: [] },
-      uploadTaskSent: { $ne: true },
-      machineId: { $exists: true, $ne: null }
-    });
-    console.log(`📊 [AUTO-UPLOAD] Batches with machineId: ${withMachineIdCount}`);
-
-    if (jobLog) {
-      await jobLog.addLog('info', 'Batch statistics collected', {
-        totalBatches,
-        statusCount,
-        completedCount,
-        notSentCount,
-        withMachineIdCount
-      });
-    }
-
-    // 4. Tìm tất cả batches có thể upload với logging chi tiết
-    console.log(`🔍 [AUTO-UPLOAD] Searching for uploadable batches...`);
-    const query = {
-      status: 'CONFIRM_FILE_READY',
-      completed: { $exists: true, $ne: [] },
-      uploadTaskSent: { $ne: true }, // Chưa gửi task
-      machineId: { $exists: true, $ne: null } // Phải có machineId
-    };
-    console.log(`🔍 [AUTO-UPLOAD] Query:`, JSON.stringify(query, null, 2));
-
-    const uploadableBatches = await ShippingBatch.find(query)
-      .sort({ createdAt: 1 }) // Upload batches cũ trước
-      .limit(maxBatches)
-      .lean();
-
-    console.log(`📊 [AUTO-UPLOAD] Found ${uploadableBatches.length} uploadable batches`);
-
-    if (jobLog) {
-      await jobLog.addLog('info', `Found ${uploadableBatches.length} uploadable batches`, {
-        query,
-        batchCount: uploadableBatches.length,
-        maxBatches
-      });
-    }
-
-    // 5. Debug: Log chi tiết về từng batch tìm được
-    if (uploadableBatches.length > 0) {
-      console.log(`🔍 [AUTO-UPLOAD] Batch details:`);
-      uploadableBatches.forEach((batch, index) => {
-        console.log(`   ${index + 1}. Batch ${batch._id}:`);
-        console.log(`      - Label: ${batch.label}`);
-        console.log(`      - Status: ${batch.status}`);
-        console.log(`      - MachineId: ${batch.machineId}`);
-        console.log(`      - Completed orders: ${batch.completed?.length || 0}`);
-        console.log(`      - UploadTaskSent: ${batch.uploadTaskSent}`);
-        console.log(`      - CreatedAt: ${batch.createdAt}`);
-        console.log(`      - FileName: ${batch.fileName}`);
-      });
-    } else {
-      // Debug: Tìm hiểu tại sao không có batches
-      console.log(`🔍 [AUTO-UPLOAD] No uploadable batches found. Investigating...`);
-
-      // Kiểm tra batches có status khác
-      const allStatuses = await ShippingBatch.aggregate([
-        { $group: { _id: '$status', count: { $sum: 1 } } },
-        { $sort: { count: -1 } }
-      ]);
-      console.log(`📊 [AUTO-UPLOAD] All batch statuses:`, allStatuses);
-
-      // Kiểm tra batches có uploadTaskSent = true
-      const sentBatches = await ShippingBatch.countDocuments({ uploadTaskSent: true });
-      console.log(`📊 [AUTO-UPLOAD] Batches already sent: ${sentBatches}`);
-
-      // Kiểm tra batches không có machineId
-      const noMachineIdBatches = await ShippingBatch.countDocuments({
-        status: 'CONFIRM_FILE_READY',
-        $or: [
-          { machineId: { $exists: false } },
-          { machineId: null },
-          { machineId: '' }
-        ]
-      });
-      console.log(`📊 [AUTO-UPLOAD] Batches without machineId: ${noMachineIdBatches}`);
-
-      // Lấy sample batches để debug
-      const sampleBatches = await ShippingBatch.find({ status: 'CONFIRM_FILE_READY' })
-        .limit(3)
-        .lean();
-      console.log(`🔍 [AUTO-UPLOAD] Sample CONFIRM_FILE_READY batches:`,
-        sampleBatches.map(b => ({
-          id: b._id,
-          label: b.label,
-          machineId: b.machineId,
-          completedCount: b.completed?.length || 0,
-          uploadTaskSent: b.uploadTaskSent
-        }))
-      );
-
-      console.log(`✅ [AUTO-UPLOAD] No batches to upload`);
-
-      if (jobLog) {
-        await jobLog.addLog('info', 'No uploadable batches found', {
-          allStatuses,
-          sentBatches,
-          noMachineIdBatches,
-          sampleBatches: sampleBatches.map(b => ({
-            id: b._id,
-            label: b.label,
-            machineId: b.machineId,
-            completedCount: b.completed?.length || 0,
-            uploadTaskSent: b.uploadTaskSent
-          }))
-        });
-
-        await jobLog.setSuccess({
-          message: "No batches found for auto upload",
-          processed: 0,
-          results: []
-        }, {
-          processed: 0,
-          success: 0,
-          failed: 0,
-          details: {
-            totalBatches,
-            statusCount,
-            completedCount,
-            notSentCount,
-            withMachineIdCount,
-            allStatuses,
-            sentBatches,
-            noMachineIdBatches
-          }
-        });
-      }
-
-      return res.json({
-        ok: true,
-        message: "No batches found for auto upload",
-        processed: 0,
-        results: [],
-        debug: {
-          totalBatches,
-          statusCount,
-          completedCount,
-          notSentCount,
-          withMachineIdCount,
-          allStatuses,
-          sentBatches,
-          noMachineIdBatches
-        }
-      });
-    }
-
-    // 6. Group batches theo machineId (shopId)
-    const batchesByMachine = {};
-    uploadableBatches.forEach(batch => {
-      const machineId = batch.machineId;
-      if (!batchesByMachine[machineId]) {
-        batchesByMachine[machineId] = [];
-      }
-      batchesByMachine[machineId].push(batch);
-    });
-
-    console.log(`📊 [AUTO-UPLOAD] Batches grouped by ${Object.keys(batchesByMachine).length} machines`);
-    Object.entries(batchesByMachine).forEach(([machineId, batches]) => {
-      console.log(`   - Machine ${machineId}: ${batches.length} batches`);
-    });
-
-    if (jobLog) {
-      await jobLog.addLog('info', `Batches grouped by machines`, {
-        machineCount: Object.keys(batchesByMachine).length,
-        batchesByMachine: Object.fromEntries(
-          Object.entries(batchesByMachine).map(([machineId, batches]) => [
-            machineId,
-            batches.map(b => ({ id: b._id, label: b.label }))
-          ])
-        )
-      });
-    }
-
-    const results = [];
-    let successCount = 0;
-    let failCount = 0;
-
-    // 7. Debug: Kiểm tra Socket.IO
+    // Kiểm tra Socket.IO
     const io = req.app.get("io");
-    console.log(`🔍 [AUTO-UPLOAD] Socket.IO available: ${!!io}`);
     if (!io) {
-      console.error(`❌ [AUTO-UPLOAD] Socket.IO not available`);
-
-      if (jobLog) {
-        await jobLog.addLog('error', 'Socket.IO not available');
-        await jobLog.setError(new Error('Socket.IO not available'));
-      }
-
       return res.status(500).json({
         ok: false,
         message: "Socket.IO not available"
       });
     }
 
-    if (jobLog) {
-      await jobLog.addLog('info', 'Socket.IO verified and ready');
-    }
+    let result;
 
-    // 8. Process từng machine
-    for (const [machineId, batches] of Object.entries(batchesByMachine)) {
-      console.log(`🔄 [AUTO-UPLOAD] Processing ${batches.length} batches for machine: ${machineId}`);
-
-      if (jobLog) {
-        await jobLog.addLog('info', `Processing batches for machine: ${machineId}`, {
-          machineId,
-          batchCount: batches.length,
-          batchIds: batches.map(b => b._id)
-        });
-      }
-
-      for (const batch of batches) {
-        try {
-          console.log(`� [AUTO-UPLOAD] Processing batch: ${batch._id} (${batch.label})`);
-          console.log(`🔍 [AUTO-UPLOAD] Batch completed orders: ${batch.completed?.length || 0}`);
-
-          if (jobLog) {
-            await jobLog.addLog('info', `Processing batch: ${batch._id}`, {
-              batchId: batch._id,
-              label: batch.label,
-              completedCount: batch.completed?.length || 0,
-              machineId
-            });
-          }
-
-          // Debug: Kiểm tra completed data
-          if (!batch.completed || batch.completed.length === 0) {
-            throw new Error('Batch has no completed orders');
-          }
-
-          // Tạo file content
-          const shipDateBase = batch.createdAt ? new Date(batch.createdAt) : new Date();
-          const shipDateStr = buildShipDateString(shipDateBase);
-          console.log(`🔍 [AUTO-UPLOAD] Ship date: ${shipDateStr}`);
-
-          const fileContent = buildCompletedShippingFile(batch.completed, {
-            carrierCode,
-            shipMethod,
-            shipDate: shipDateStr,
-          });
-          console.log(`🔍 [AUTO-UPLOAD] File content length: ${fileContent.length} chars`);
-
-          const filename = batch.fileName || `auto_upload_${batch._id}.txt`;
-          console.log(`🔍 [AUTO-UPLOAD] Filename: ${filename}`);
-
-          // Chuẩn bị tracking data
-          const trackingData = batch.completed.map(item => ({
-            orderId: item.orderId,
-            tracking: item.tracking,
-            isFake: item.isFake || false,
-            source: item.source || 'system'
-          }));
-          console.log(`🔍 [AUTO-UPLOAD] Tracking data prepared: ${trackingData.length} orders`);
-
-          // Tạo task payload
-          const task = {
-            type: "UPLOAD_TRACKING",
-            payload: {
-              batchId: batch._id,
-              machineId: machineId, // ✅ Đảm bảo gửi đúng machineId
-              shopId: machineId,    // ✅ shopId = machineId
-              label: batch.label,
-              trackingData,
-              stats: batch.stats,
-
-              file: {
-                filename,
-                content: fileContent,
-                contentType: "text/tab-separated-values; charset=utf-8",
-                size: Buffer.byteLength(fileContent, 'utf8')
-              },
-
-              uploadParams: {
-                carrierCode,
-                shipMethod,
-                shipDate: shipDateStr
-              },
-
-              autoGenerated: true,
-              reason: "auto_upload_tracking",
-              requestedBy: "cron_job",
-              timestamp: new Date().toISOString()
-            }
-          };
-
-          console.log(`🔍 [AUTO-UPLOAD] Task payload created:`, {
-            type: task.type,
-            batchId: task.payload.batchId,
-            machineId: task.payload.machineId,
-            trackingCount: task.payload.trackingData.length,
-            fileSize: task.payload.file.size
-          });
-
-          if (!dryRun) {
-            console.log(`📡 [AUTO-UPLOAD] Sending task to machine:${machineId}...`);
-
-            // Debug Socket.IO chi tiết
-            console.log(`🔍 [AUTO-UPLOAD] Socket.IO Debug:`);
-            console.log(`   - IO instance type: ${typeof io}`);
-            console.log(`   - IO engine connected: ${io.engine?.clientsCount || 'N/A'}`);
-            console.log(`   - Target room: machine:${machineId}`);
-            console.log(`   - Task type: ${task.type}`);
-            console.log(`   - Task payload keys: ${Object.keys(task.payload)}`);
-            
-            // Kiểm tra connected clients
-            if (io.sockets && io.sockets.adapter && io.sockets.adapter.rooms) {
-              const roomClients = io.sockets.adapter.rooms.get(`machine:${machineId}`);
-              console.log(`🔍 [AUTO-UPLOAD] Room 'machine:${machineId}' clients: ${roomClients ? roomClients.size : 0}`);
-              
-              if (roomClients && roomClients.size > 0) {
-                console.log(`✅ [AUTO-UPLOAD] Found ${roomClients.size} clients in room`);
-                roomClients.forEach((socketId, index) => {
-                  console.log(`   Client ${index + 1}: ${socketId}`);
-                });
-              } else {
-                console.log(`⚠️  [AUTO-UPLOAD] No clients found in room 'machine:${machineId}'`);
-              }
-              
-              // List all rooms để debug
-              const allRooms = Array.from(io.sockets.adapter.rooms.keys());
-              console.log(`🔍 [AUTO-UPLOAD] All active rooms (${allRooms.length}):`, allRooms.slice(0, 10)); // Show first 10
-            } else {
-              console.log(`❌ [AUTO-UPLOAD] Socket.IO adapter not available`);
-            }
-
-            if (jobLog) {
-              await jobLog.addLog('info', `Sending task to machine: ${machineId}`, {
-                batchId: batch._id,
-                machineId,
-                taskType: task.type,
-                trackingCount: task.payload.trackingData.length,
-                fileSize: task.payload.file.size,
-                socketDebug: {
-                  ioType: typeof io,
-                  engineClients: io.engine?.clientsCount || 0,
-                  targetRoom: `machine:${machineId}`,
-                  roomClients: io.sockets?.adapter?.rooms?.get(`machine:${machineId}`)?.size || 0,
-                  totalRooms: io.sockets?.adapter?.rooms?.size || 0
-                }
-              });
-            }
-
-            // Gửi task đến extension của shop cụ thể
-            const emitResult = io.to(`machine:${machineId}`).emit("server:task", task);
-            console.log(`📡 [AUTO-UPLOAD] Task emit result:`, emitResult);
-            console.log(`✅ [AUTO-UPLOAD] Task emitted to machine:${machineId}`);
-
-            // Đánh dấu batch đã gửi task
-            console.log(`� [AUTO-UPLOAD] Updating batch ${batch._id} as sent...`);
-            const updateResult = await ShippingBatch.updateOne(
-              { _id: batch._id },
-              {
-                uploadTaskSent: true,
-                uploadTaskSentAt: new Date(),
-                uploadTaskSentBy: "auto_cron"
-              }
-            );
-            console.log(`✅ [AUTO-UPLOAD] Batch update result:`, updateResult);
-
-            if (jobLog) {
-              await jobLog.addLog('info', `Task emitted and batch marked as sent`, {
-                batchId: batch._id,
-                machineId,
-                emitResult: typeof emitResult,
-                updateResult: {
-                  matchedCount: updateResult.matchedCount,
-                  modifiedCount: updateResult.modifiedCount
-                },
-                socketDebug: {
-                  roomClients: io.sockets?.adapter?.rooms?.get(`machine:${machineId}`)?.size || 0,
-                  totalRooms: io.sockets?.adapter?.rooms?.size || 0
-                },
-                timestamp: new Date().toISOString()
-              });
-            }
-
-            // Log vào RealtimeLog
-            console.log(`📝 [AUTO-UPLOAD] Creating RealtimeLog entry...`);
-            const realtimeLogEntry = await RealtimeLog.create({
-              shopId: machineId,
-              machineId: machineId,
-              label: batch.label,
-              action: "auto",
-              level: "info",
-              message: `Auto UPLOAD_TRACKING: ${trackingData.length} orders, file: ${filename}`,
-              ts: new Date(),
-            });
-            console.log(`✅ [AUTO-UPLOAD] RealtimeLog created: ${realtimeLogEntry._id}`);
-          } else {
-            console.log(`🔍 [AUTO-UPLOAD] DRY RUN - Task not sent, batch not updated`);
-
-            if (jobLog) {
-              await jobLog.addLog('info', 'DRY RUN - Task not sent', {
-                batchId: batch._id,
-                machineId,
-                dryRun: true
-              });
-            }
-          }
-
-          results.push({
-            batchId: batch._id,
-            machineId: machineId,
-            shopId: machineId, // ✅ Thêm shopId để rõ ràng
-            label: batch.label,
-            trackingCount: trackingData.length,
-            filename,
-            fileSize: Buffer.byteLength(fileContent, 'utf8'),
-            success: true,
-            dryRun,
-            message: dryRun ? "Dry run - task not sent" : "Task sent successfully"
-          });
-
-          successCount++;
-          console.log(`✅ [AUTO-UPLOAD] Success: ${batch._id} -> machine:${machineId}`);
-
-        } catch (error) {
-          console.error(`❌ [AUTO-UPLOAD] Failed batch ${batch._id}:`, error.message);
-          console.error(`❌ [AUTO-UPLOAD] Error stack:`, error.stack);
-
-          if (jobLog) {
-            await jobLog.addLog('error', `Failed to process batch: ${batch._id}`, {
-              batchId: batch._id,
-              machineId,
-              error: {
-                message: error.message,
-                stack: error.stack
-              }
-            });
-          }
-
-          results.push({
-            batchId: batch._id,
-            machineId: machineId,
-            shopId: machineId,
-            label: batch.label,
-            success: false,
-            error: error.message,
-            message: `Failed to process batch: ${error.message}`
-          });
-
-          failCount++;
-        }
-      }
-    }
-
-    const endTime = new Date();
-    const duration = endTime - startTime;
-
-    console.log(`✅ [AUTO-UPLOAD][${endTime.toISOString()}] Completed`);
-    console.log(`📊 [AUTO-UPLOAD] Results: success=${successCount}, failed=${failCount}, total=${uploadableBatches.length}`);
-    console.log(`⏱️  [AUTO-UPLOAD] Duration: ${duration}ms`);
-    console.log(`🔍 [AUTO-UPLOAD] Final results:`, results);
-
-    if (jobLog) {
-      await jobLog.addLog('info', 'Auto upload tracking completed', {
-        endTime: endTime.toISOString(),
-        duration,
-        successCount,
-        failCount,
-        totalProcessed: uploadableBatches.length
+    if (shopId) {
+      // Upload cho shop cụ thể
+      console.log(`🎯 [AUTO_UPLOAD_API] Uploading for specific shop: ${shopId}`);
+      
+      result = await AutoUploadTrackingService.autoUploadTrackingForShop(shopId, io, {
+        maxOrdersPerShop,
+        onlyWithTracking,
+        onlyNotSubmitted,
+        carrierCode,
+        shipMethod,
+        dryRun
       });
-
-      await jobLog.setSuccess({
-        message: `Auto upload tracking completed: ${successCount} success, ${failCount} failed`,
-        processed: uploadableBatches.length,
-        results,
-        dryRun,
-        duration: `${duration}ms`
-      }, {
-        processed: uploadableBatches.length,
-        success: successCount,
-        failed: failCount,
-        details: {
-          totalBatches,
-          statusCount,
-          completedCount,
-          notSentCount,
-          withMachineIdCount,
-          batchesByMachine: Object.keys(batchesByMachine)
-        }
+      
+    } else {
+      // Upload cho tất cả shops
+      console.log(`🌐 [AUTO_UPLOAD_API] Uploading for all eligible shops`);
+      
+      result = await AutoUploadTrackingService.autoUploadTrackingForAllShops(io, {
+        maxOrdersPerShop,
+        onlyWithTracking,
+        onlyNotSubmitted,
+        excludeShops,
+        includeShops,
+        carrierCode,
+        shipMethod,
+        dryRun
       });
     }
+
+    console.log(`✅ [AUTO_UPLOAD_API] Auto upload completed:`, {
+      success: result.success,
+      totalShops: result.totalShops || (shopId ? 1 : 0),
+      totalOrders: result.totalOrders || 0,
+      dryRun
+    });
+
+    return res.json({
+      ok: result.success,
+      ...result,
+      dryRun,
+      timestamp: new Date().toISOString()
+    });
+
+  } catch (err) {
+    console.error('❌ [AUTO_UPLOAD_API] Auto upload failed:', err.message);
+    next(err);
+  }
+};
+
+/**
+ * Get Auto Upload Status - Kiểm tra trạng thái auto upload
+ * GET /api/shipping-batch/auto-upload-status
+ * Query: {
+ *   shopId?: string,
+ *   limit?: number
+ * }
+ */
+const getAutoUploadStatus = async (req, res, next) => {
+  try {
+    const { shopId, limit = 10 } = req.query;
+
+    // Query recent auto upload batches
+    const filter = {
+      "autoUploadInfo.createdByAutoUpload": true
+    };
+
+    if (shopId) {
+      filter.machineId = shopId;
+    }
+
+    const recentBatches = await ShippingBatch.find(filter)
+      .sort({ createdAt: -1 })
+      .limit(Number(limit))
+      .select({
+        _id: 1,
+        machineId: 1,
+        label: 1,
+        createdAt: 1,
+        stats: 1,
+        uploadTaskSent: 1,
+        uploadTaskSentAt: 1,
+        uploadTaskSentBy: 1,
+        autoUploadInfo: 1
+      });
+
+    // Get eligible orders count từ snapshots
+    const shopOrdersMap = await AutoUploadTrackingService.getOrdersGroupedByShop({
+      maxOrdersPerShop: 1000, // High limit để count
+      onlyWithTracking: true,
+      onlyNotSubmitted: true,
+      ...(shopId ? { includeShops: [shopId] } : {})
+    });
+
+    const eligibleOrdersCount = Array.from(shopOrdersMap.values())
+      .reduce((sum, shop) => sum + shop.totalOrders, 0);
 
     return res.json({
       ok: true,
-      processed: uploadableBatches.length,
-      success: successCount,
-      failed: failCount,
-      results,
-      dryRun,
-      duration: `${duration}ms`,
-      message: `Auto upload tracking completed: ${successCount} success, ${failCount} failed`,
-      debug: {
-        totalBatches,
-        statusCount,
-        completedCount,
-        notSentCount,
-        withMachineIdCount,
-        batchesByMachine: Object.keys(batchesByMachine)
-      }
+      recentBatches: recentBatches.map(batch => ({
+        batchId: batch._id,
+        machineId: batch.machineId,
+        label: batch.label,
+        createdAt: batch.createdAt,
+        ordersCount: batch.stats?.totalOrders || 0,
+        uploadTaskSent: batch.uploadTaskSent || false,
+        uploadTaskSentAt: batch.uploadTaskSentAt,
+        uploadTaskSentBy: batch.uploadTaskSentBy,
+        autoUploadInfo: batch.autoUploadInfo
+      })),
+      eligibleOrdersCount,
+      eligibleShopsCount: shopOrdersMap.size,
+      timestamp: new Date().toISOString()
     });
 
-  } catch (error) {
-    const endTime = new Date();
-    const duration = endTime - startTime;
-
-    console.error(`❌ [AUTO-UPLOAD][${endTime.toISOString()}] Failed after ${duration}ms`);
-    console.error(`❌ [AUTO-UPLOAD] Error: ${error.message}`);
-    console.error(`❌ [AUTO-UPLOAD] Error stack:`, error.stack);
-
-    if (jobLog) {
-      try {
-        await jobLog.addLog('error', 'Auto upload tracking failed', {
-          endTime: endTime.toISOString(),
-          duration,
-          error: {
-            message: error.message,
-            stack: error.stack
-          }
-        });
-        
-        await jobLog.setError(error);
-      } catch (logError) {
-        console.error('❌ Failed to log error to database:', logError.message);
-      }
-    }
-
-    return res.status(500).json({
-      ok: false,
-      message: error.message,
-      duration: `${duration}ms`,
-      stack: error.stack
-    });
+  } catch (err) {
+    next(err);
   }
 };
 
@@ -3012,6 +2375,643 @@ const debugAutoUploadTracking = async (req, res, next) => {
   }
 };
 
+/**
+ * ✅ Sync order status cho một shop cụ thể và lưu vào database
+ */
+const syncOrderStatusForShop = async (req, res, next) => {
+  try {
+    const { machineId } = req.params;
+    const {
+      limit = 1000,
+      fromDate,
+      toDate,
+      status = ["New", "Processing", "Shipped"],
+      filterType = "all"
+    } = req.query;
+
+    if (!machineId) {
+      return res.status(400).json({ message: "machineId is required" });
+    }
+
+    console.log(`🔄 [SYNC_API] Starting manual sync for shop: ${machineId}`);
+
+    const result = await OrderStatusSyncService.syncOrderStatusForShop(machineId, {
+      limit: Number(limit),
+      fromDate,
+      toDate,
+      status: Array.isArray(status) ? status : [status],
+      filterType,
+      syncType: 'manual'
+    });
+
+    console.log(`✅ [SYNC_API] Manual sync completed for shop: ${machineId}`);
+
+    return res.json({
+      success: true,
+      message: `Order status synced successfully for shop ${machineId}`,
+      data: result
+    });
+
+  } catch (error) {
+    console.error(`❌ [SYNC_API] Error syncing shop ${req.params.machineId}:`, error);
+    next(error);
+  }
+};
+
+/**
+ * ✅ Lấy danh sách snapshots cho một shop
+ */
+const getOrderStatusSnapshots = async (req, res, next) => {
+  try {
+    const { machineId } = req.params;
+    const {
+      limit = 10,
+      fromDate,
+      toDate,
+      syncType,
+      includeOrders = false
+    } = req.query;
+
+    if (!machineId) {
+      return res.status(400).json({ message: "machineId is required" });
+    }
+
+    const filter = { machineId };
+    
+    if (fromDate || toDate) {
+      filter.createdAt = {};
+      if (fromDate) filter.createdAt.$gte = new Date(fromDate);
+      if (toDate) filter.createdAt.$lte = new Date(toDate);
+    }
+    
+    if (syncType) {
+      filter.syncType = syncType;
+    }
+
+    let query = OrderStatusSnapshot.find(filter)
+      .sort({ createdAt: -1 })
+      .limit(Number(limit));
+
+    // Nếu không cần orders array thì exclude để tăng performance
+    if (includeOrders !== 'true') {
+      query = query.select('-orders');
+    }
+
+    const snapshots = await query.lean();
+
+    return res.json({
+      success: true,
+      data: snapshots,
+      totalCount: snapshots.length,
+      filter: {
+        machineId,
+        limit: Number(limit),
+        fromDate,
+        toDate,
+        syncType,
+        includeOrders
+      }
+    });
+
+  } catch (error) {
+    console.error(`❌ [SNAPSHOTS_API] Error getting snapshots for shop ${req.params.machineId}:`, error);
+    next(error);
+  }
+};
+
+/**
+ * ✅ Lấy snapshot mới nhất cho một shop
+ */
+const getLatestOrderStatusSnapshot = async (req, res, next) => {
+  try {
+    const { machineId } = req.params;
+    const { filterType = 'all', includeOrders = true } = req.query;
+
+    if (!machineId) {
+      return res.status(400).json({ message: "machineId is required" });
+    }
+
+    let query = OrderStatusSnapshot.findOne({
+      machineId,
+      'filterConfig.filterType': filterType,
+      isSuccess: true
+    }).sort({ createdAt: -1 });
+
+    // Nếu không cần orders array thì exclude
+    if (includeOrders !== 'true') {
+      query = query.select('-orders');
+    }
+
+    const snapshot = await query.lean();
+
+    if (!snapshot) {
+      return res.status(404).json({
+        success: false,
+        message: `No snapshots found for shop ${machineId} with filterType ${filterType}`
+      });
+    }
+
+    return res.json({
+      success: true,
+      data: snapshot
+    });
+
+  } catch (error) {
+    console.error(`❌ [LATEST_SNAPSHOT_API] Error getting latest snapshot for shop ${req.params.machineId}:`, error);
+    next(error);
+  }
+};
+
+/**
+ * ✅ Mode 1: Snapshot Only - Chỉ lấy từ snapshot
+ */
+const checkOrdersStatusFromSnapshot = async (machineId, options) => {
+  const { limit, fromDate, toDate, status, filterType } = options;
+  
+  console.log(`📸 [SNAPSHOT_ONLY] Getting data from snapshot for shop: ${machineId}`);
+  
+  // Tìm snapshot mới nhất
+  const latestSnapshot = await OrderStatusSnapshot.findOne({
+    machineId,
+    'filterConfig.filterType': filterType,
+    isSuccess: true
+  }).sort({ createdAt: -1 }).lean();
+  
+  if (!latestSnapshot) {
+    console.log(`⚠️ [SNAPSHOT_ONLY] No snapshot found for shop: ${machineId}`);
+    return {
+      orders: [],
+      totalCount: 0,
+      dataSource: 'snapshot',
+      snapshotAge: null,
+      filter: { machineId, limit, fromDate, toDate, status, filterType },
+    };
+  }
+  
+  const snapshotAge = Date.now() - new Date(latestSnapshot.createdAt).getTime();
+  console.log(`📊 [SNAPSHOT_ONLY] Using snapshot from ${Math.round(snapshotAge/1000/60)} minutes ago`);
+  
+  // Apply additional filters if needed
+  let filteredOrders = latestSnapshot.orders;
+  
+  // Filter by date range if specified
+  if (fromDate || toDate) {
+    filteredOrders = filteredOrders.filter(order => {
+      const orderDate = new Date(order.createdAt);
+      if (fromDate && orderDate < new Date(fromDate)) return false;
+      if (toDate && orderDate > new Date(toDate)) return false;
+      return true;
+    });
+  }
+  
+  // Apply limit
+  if (limit && filteredOrders.length > limit) {
+    filteredOrders = filteredOrders.slice(0, limit);
+  }
+  
+  return {
+    orders: filteredOrders,
+    totalCount: filteredOrders.length,
+    stats: latestSnapshot.stats,
+    dataSource: 'snapshot',
+    snapshotId: latestSnapshot.snapshotId,
+    snapshotAge: Math.round(snapshotAge/1000/60), // minutes
+    snapshotCreatedAt: latestSnapshot.createdAt,
+    filter: { machineId, limit, fromDate, toDate, status, filterType },
+  };
+};
+
+/**
+ * ✅ Mode 2: Hybrid - Snapshot + Real-time cho orders mới
+ */
+const checkOrdersStatusHybrid = async (machineId, options) => {
+  const { limit, fromDate, toDate, status, filterType } = options;
+  
+  console.log(`🔄 [HYBRID] Starting hybrid mode for shop: ${machineId}`);
+  
+  // 1. Lấy snapshot mới nhất
+  const latestSnapshot = await OrderStatusSnapshot.findOne({
+    machineId,
+    'filterConfig.filterType': filterType,
+    isSuccess: true
+  }).sort({ createdAt: -1 }).lean();
+  
+  if (!latestSnapshot) {
+    console.log(`⚠️ [HYBRID] No snapshot found, falling back to real-time`);
+    return await checkOrdersStatusRealTime(machineId, options);
+  }
+  
+  const snapshotAge = Date.now() - new Date(latestSnapshot.createdAt).getTime();
+  const snapshotAgeMinutes = Math.round(snapshotAge/1000/60);
+  
+  console.log(`📊 [HYBRID] Using snapshot from ${snapshotAgeMinutes} minutes ago`);
+  
+  // 2. Nếu snapshot quá cũ (>30 phút), query real-time
+  if (snapshotAgeMinutes > 30) {
+    console.log(`⏰ [HYBRID] Snapshot too old (${snapshotAgeMinutes}min), using real-time`);
+    return await checkOrdersStatusRealTime(machineId, options);
+  }
+  
+  // 3. Lấy orders mới từ thời điểm snapshot
+  const snapshotDate = new Date(latestSnapshot.createdAt);
+  const newOrdersFilter = {
+    status: { $in: Array.isArray(status) ? status : [status] },
+    shopId: machineId,
+    createdAt: { $gt: snapshotDate }
+  };
+  
+  const newOrders = await OrderCustomProduct.find(newOrdersFilter)
+    .populate('shopId', 'name store')
+    .sort({ createdAt: -1 })
+    .lean();
+  
+  console.log(`🆕 [HYBRID] Found ${newOrders.length} new orders since snapshot`);
+  
+  // 4. Process new orders nếu có
+  let newOrdersProcessed = [];
+  if (newOrders.length > 0) {
+    newOrdersProcessed = await processOrdersForHybrid(newOrders, machineId);
+  }
+  
+  // 5. Merge snapshot orders + new orders
+  let allOrders = [...latestSnapshot.orders, ...newOrdersProcessed];
+  
+  // 6. Apply filters
+  let filteredOrders = allOrders;
+  
+  // Filter by date range
+  if (fromDate || toDate) {
+    filteredOrders = filteredOrders.filter(order => {
+      const orderDate = new Date(order.createdAt);
+      if (fromDate && orderDate < new Date(fromDate)) return false;
+      if (toDate && orderDate > new Date(toDate)) return false;
+      return true;
+    });
+  }
+  
+  // Apply limit
+  if (limit && filteredOrders.length > limit) {
+    filteredOrders = filteredOrders.slice(0, limit);
+  }
+  
+  // 7. Recalculate stats
+  const stats = {
+    totalScanned: allOrders.length,
+    totalWithTracking: allOrders.filter(o => o.hasTracking).length,
+    totalWithoutTracking: allOrders.filter(o => !o.hasTracking).length,
+    totalSubmitted: allOrders.filter(o => o.submittedToAmazon).length,
+    totalNotSubmitted: allOrders.filter(o => o.hasTracking && !o.submittedToAmazon).length,
+    filteredCount: filteredOrders.length,
+  };
+  
+  return {
+    orders: filteredOrders,
+    totalCount: filteredOrders.length,
+    stats,
+    dataSource: 'hybrid',
+    snapshotId: latestSnapshot.snapshotId,
+    snapshotAge: snapshotAgeMinutes,
+    newOrdersCount: newOrders.length,
+    filter: { machineId, limit, fromDate, toDate, status, filterType },
+  };
+};
+
+/**
+ * ✅ Mode 3: Snapshot Priority - Ưu tiên snapshot, fallback real-time
+ */
+const checkOrdersStatusSnapshotPriority = async (machineId, options) => {
+  console.log(`📸 [SNAPSHOT_PRIORITY] Trying snapshot first for shop: ${machineId}`);
+  
+  try {
+    const snapshotResult = await checkOrdersStatusFromSnapshot(machineId, options);
+    
+    if (snapshotResult.orders.length > 0) {
+      console.log(`✅ [SNAPSHOT_PRIORITY] Using snapshot data (${snapshotResult.orders.length} orders)`);
+      return { ...snapshotResult, dataSource: 'snapshot-priority' };
+    }
+  } catch (error) {
+    console.log(`⚠️ [SNAPSHOT_PRIORITY] Snapshot failed, falling back to real-time:`, error.message);
+  }
+  
+  console.log(`🔄 [SNAPSHOT_PRIORITY] Falling back to real-time`);
+  const realTimeResult = await checkOrdersStatusRealTime(machineId, options);
+  return { ...realTimeResult, dataSource: 'snapshot-priority-fallback' };
+};
+
+/**
+ * ✅ Mode 4: Real-time - Logic gốc
+ */
+const checkOrdersStatusRealTime = async (machineId, options) => {
+  const { limit, fromDate, toDate, status, filterType } = options;
+  
+  console.log(`⚡ [REAL_TIME] Using real-time query for shop: ${machineId}`);
+  
+  // Logic gốc của checkOrdersStatus
+  const orderFilter = {
+    status: { $in: Array.isArray(status) ? status : [status] },
+    shopId: machineId,
+  };
+
+  if (fromDate || toDate) {
+    orderFilter.createdAt = {};
+    if (fromDate) {
+      const from = new Date(fromDate);
+      if (!isNaN(from.getTime())) orderFilter.createdAt.$gte = from;
+    }
+    if (toDate) {
+      const to = new Date(toDate);
+      if (!isNaN(to.getTime())) orderFilter.createdAt.$lte = to;
+    }
+  }
+
+  const allOrders = await OrderCustomProduct.find(orderFilter)
+    .populate('shopId', 'name store')
+    .sort({ createdAt: -1 })
+    .limit(Number(limit))
+    .lean();
+
+  if (!allOrders.length) {
+    return {
+      orders: [],
+      totalCount: 0,
+      dataSource: 'real-time',
+      filter: { machineId, limit, fromDate, toDate, status, filterType },
+    };
+  }
+
+  // Process orders (logic gốc)
+  const ordersWithDetails = [];
+  for (const order of allOrders) {
+    let hasValidTracking = false;
+    let tracking = "";
+    let trackingInfo = null;
+
+    for (const item of order.items || []) {
+      const itemTracking = normalizeField(item?.tracking_info?.tracking);
+      if (itemTracking && itemTracking !== "-" && itemTracking !== "---") {
+        hasValidTracking = true;
+        tracking = itemTracking;
+        trackingInfo = {
+          tracking: itemTracking,
+          fulfillment: item.tracking_info?.fulfillment || "",
+          status: item.tracking_info?.status || "",
+          carrier: item.tracking_info?.note || "",
+          updated_at: item.tracking_info?.updated_at || null,
+        };
+        break;
+      }
+    }
+
+    ordersWithDetails.push({
+      orderId: order.orderId,
+      shopId: order.shopId?._id || order.shopId,
+      shopName: order.shopId?.name || null,
+      shopStore: order.shopId?.store || null,
+      status: order.status,
+      createdAt: order.createdAt,
+      updatedAt: order.updatedAt,
+      hasTracking: hasValidTracking,
+      tracking: tracking || null,
+      trackingInfo: trackingInfo,
+      itemsCount: (order.items || []).length,
+      customerEmail: order.customer?.email || null,
+      totalAmount: order.total_amount || 0,
+    });
+  }
+
+  // Check submission status
+  const allOrderIds = ordersWithDetails.map(o => o.orderId);
+  const submittedBatches = await ShippingBatch.find({
+    machineId,
+    "completed.orderId": { $in: allOrderIds },
+  }).lean();
+
+  const submissionMap = new Map();
+  for (const batch of submittedBatches) {
+    for (const completed of batch.completed || []) {
+      if (allOrderIds.includes(completed.orderId)) {
+        submissionMap.set(completed.orderId, {
+          submittedToAmazon: true,
+          batchId: batch._id,
+          batchType: batch.type,
+          submittedAt: batch.createdAt,
+          batchLabel: batch.label,
+        });
+      }
+    }
+  }
+
+  const finalOrders = ordersWithDetails.map(order => ({
+    ...order,
+    submittedToAmazon: submissionMap.has(order.orderId),
+    submissionInfo: submissionMap.get(order.orderId) || null,
+  }));
+
+  // Apply filterType
+  let filteredOrders = finalOrders;
+  switch (filterType) {
+    case "with-tracking":
+      filteredOrders = finalOrders.filter(o => o.hasTracking);
+      break;
+    case "without-tracking":
+      filteredOrders = finalOrders.filter(o => !o.hasTracking);
+      break;
+    case "submitted":
+      filteredOrders = finalOrders.filter(o => o.submittedToAmazon);
+      break;
+    case "not-submitted":
+      filteredOrders = finalOrders.filter(o => o.hasTracking && !o.submittedToAmazon);
+      break;
+  }
+
+  const stats = {
+    totalScanned: allOrders.length,
+    totalWithTracking: finalOrders.filter(o => o.hasTracking).length,
+    totalWithoutTracking: finalOrders.filter(o => !o.hasTracking).length,
+    totalSubmitted: finalOrders.filter(o => o.submittedToAmazon).length,
+    totalNotSubmitted: finalOrders.filter(o => o.hasTracking && !o.submittedToAmazon).length,
+    filteredCount: filteredOrders.length,
+  };
+
+  return {
+    orders: filteredOrders,
+    totalCount: filteredOrders.length,
+    stats,
+    dataSource: 'real-time',
+    filter: { machineId, limit, fromDate, toDate, status, filterType },
+  };
+};
+
+/**
+ * Helper function để process orders cho hybrid mode
+ */
+const processOrdersForHybrid = async (orders, machineId) => {
+  const ordersWithDetails = [];
+  
+  for (const order of orders) {
+    let hasValidTracking = false;
+    let tracking = "";
+    let trackingInfo = null;
+
+    for (const item of order.items || []) {
+      const itemTracking = normalizeField(item?.tracking_info?.tracking);
+      if (itemTracking && itemTracking !== "-" && itemTracking !== "---") {
+        hasValidTracking = true;
+        tracking = itemTracking;
+        trackingInfo = {
+          tracking: itemTracking,
+          fulfillment: item.tracking_info?.fulfillment || "",
+          status: item.tracking_info?.status || "",
+          carrier: item.tracking_info?.note || "",
+          updated_at: item.tracking_info?.updated_at || null,
+        };
+        break;
+      }
+    }
+
+    ordersWithDetails.push({
+      orderId: order.orderId,
+      shopId: order.shopId?._id || order.shopId,
+      shopName: order.shopId?.name || null,
+      shopStore: order.shopId?.store || null,
+      status: order.status,
+      createdAt: order.createdAt,
+      updatedAt: order.updatedAt,
+      hasTracking: hasValidTracking,
+      tracking: tracking || null,
+      trackingInfo: trackingInfo,
+      itemsCount: (order.items || []).length,
+      customerEmail: order.customer?.email || null,
+      totalAmount: order.total_amount || 0,
+    });
+  }
+  
+  // Check submission status for new orders
+  const allOrderIds = ordersWithDetails.map(o => o.orderId);
+  const submittedBatches = await ShippingBatch.find({
+    machineId,
+    "completed.orderId": { $in: allOrderIds },
+  }).lean();
+
+  const submissionMap = new Map();
+  for (const batch of submittedBatches) {
+    for (const completed of batch.completed || []) {
+      if (allOrderIds.includes(completed.orderId)) {
+        submissionMap.set(completed.orderId, {
+          submittedToAmazon: true,
+          batchId: batch._id,
+          batchType: batch.type,
+          submittedAt: batch.createdAt,
+          batchLabel: batch.label,
+        });
+      }
+    }
+  }
+
+  return ordersWithDetails.map(order => ({
+    ...order,
+    submittedToAmazon: submissionMap.has(order.orderId),
+    submissionInfo: submissionMap.get(order.orderId) || null,
+  }));
+};
+
+/**
+ * ✅ Chạy sync thủ công cho tất cả shops
+ */
+const runOrderStatusSyncManually = async (req, res, next) => {
+  try {
+    const {
+      limit = 1000,
+      status = ["New", "Processing", "Shipped"],
+      filterType = "all"
+    } = req.body;
+
+    console.log(`🔄 [MANUAL_SYNC_ALL] Starting manual sync for all active shops`);
+
+    const result = await OrderStatusSyncService.syncAllActiveShops({
+      limit: Number(limit),
+      status: Array.isArray(status) ? status : [status],
+      filterType,
+      syncType: 'manual'
+    });
+
+    console.log(`✅ [MANUAL_SYNC_ALL] Manual sync completed: ${result.successCount}/${result.totalShops} shops`);
+
+    return res.json({
+      success: true,
+      message: `Synced ${result.successCount}/${result.totalShops} shops successfully`,
+      data: result
+    });
+
+  } catch (error) {
+    console.error(`❌ [MANUAL_SYNC_ALL] Error in manual sync all:`, error);
+    next(error);
+  }
+};
+
+/**
+ * ✅ Bulk sync submission status cho một shop
+ */
+const bulkSyncSnapshotSubmissionStatus = async (req, res, next) => {
+  try {
+    const { machineId } = req.params;
+
+    if (!machineId) {
+      return res.status(400).json({ message: "machineId is required" });
+    }
+
+    console.log(`🔄 [BULK_SYNC_API] Starting bulk sync for shop: ${machineId}`);
+
+    const result = await SnapshotAutoSyncService.bulkSyncShopSubmissionStatus(machineId);
+
+    console.log(`✅ [BULK_SYNC_API] Bulk sync completed for shop: ${machineId}`);
+
+    return res.json({
+      success: true,
+      message: `Bulk sync completed: ${result.updated}/${result.totalSnapshots} snapshots updated`,
+      data: result
+    });
+
+  } catch (error) {
+    console.error(`❌ [BULK_SYNC_API] Error in bulk sync for shop ${req.params.machineId}:`, error);
+    next(error);
+  }
+};
+
+/**
+ * ✅ Cập nhật submission status cho một order cụ thể
+ */
+const updateOrderSubmissionStatusManually = async (req, res, next) => {
+  try {
+    const { orderId, machineId } = req.params;
+    const { submissionInfo = null } = req.body;
+
+    if (!orderId || !machineId) {
+      return res.status(400).json({ message: "orderId and machineId are required" });
+    }
+
+    console.log(`🔄 [UPDATE_ORDER_API] Updating submission status for order: ${orderId} in shop: ${machineId}`);
+
+    const result = await SnapshotAutoSyncService.updateOrderSubmissionStatus(
+      orderId, 
+      machineId, 
+      submissionInfo
+    );
+
+    console.log(`✅ [UPDATE_ORDER_API] Order submission status updated: ${orderId}`);
+
+    return res.json({
+      success: true,
+      message: `Order ${orderId} submission status updated in ${result.updated} snapshots`,
+      data: result
+    });
+
+  } catch (error) {
+    console.error(`❌ [UPDATE_ORDER_API] Error updating order ${req.params.orderId}:`, error);
+    next(error);
+  }
+};
+
 // ✅ Cập nhật exports
 module.exports = {
   createBatchFromFile,
@@ -3025,6 +3025,16 @@ module.exports = {
   manualUploadTask,
   getUploadableBatches,
   createBatchFromOrders, // ✅ API mới cho FE
-  autoUploadTracking, // ✅ API mới cho auto upload
-  debugAutoUploadTracking // ✅ API debug với logs chi tiết
+  autoUploadTracking, // ✅ API auto upload từ snapshots
+  getAutoUploadStatus, // ✅ API kiểm tra trạng thái auto upload
+  
+  // ✅ Order Status Sync APIs
+  syncOrderStatusForShop,
+  getOrderStatusSnapshots,
+  getLatestOrderStatusSnapshot,
+  runOrderStatusSyncManually,
+  
+  // ✅ Snapshot Auto Sync APIs
+  bulkSyncSnapshotSubmissionStatus,
+  updateOrderSubmissionStatusManually
 };

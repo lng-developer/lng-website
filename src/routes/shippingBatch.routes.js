@@ -65,10 +65,48 @@ router.post(
   shippingBatchController.autoUploadTracking
 );
 
-// ✅ Route mới: Debug auto upload tracking với logs chi tiết
+// ✅ Route mới: Kiểm tra trạng thái auto upload
+router.get(
+  "/auto-upload-status",
+  shippingBatchController.getAutoUploadStatus
+);
+
+// ✅ Order Status Sync Routes
+// Sync order status cho một shop cụ thể
 router.post(
-  "/debug-auto-upload-tracking",
-  shippingBatchController.debugAutoUploadTracking
+  "/sync-order-status/:machineId",
+  shippingBatchController.syncOrderStatusForShop
+);
+
+// Lấy danh sách snapshots cho một shop
+router.get(
+  "/order-status-snapshots/:machineId",
+  shippingBatchController.getOrderStatusSnapshots
+);
+
+// Lấy snapshot mới nhất cho một shop
+router.get(
+  "/latest-order-status-snapshot/:machineId",
+  shippingBatchController.getLatestOrderStatusSnapshot
+);
+
+// Chạy sync thủ công cho tất cả shops
+router.post(
+  "/sync-all-order-status",
+  shippingBatchController.runOrderStatusSyncManually
+);
+
+// ✅ Snapshot Auto Sync Routes
+// Bulk sync submission status cho một shop
+router.post(
+  "/bulk-sync-submission-status/:machineId",
+  shippingBatchController.bulkSyncSnapshotSubmissionStatus
+);
+
+// Cập nhật submission status cho một order cụ thể
+router.put(
+  "/update-order-submission/:machineId/:orderId",
+  shippingBatchController.updateOrderSubmissionStatusManually
 );
 
 module.exports = router;
