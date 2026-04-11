@@ -576,7 +576,7 @@ class CronJobService {
       carrierCode: config.config?.carrierCode || "USPS",
       shipMethod: config.config?.shipMethod || "USPS First Class",
       dryRun: config.config?.dryRun || false
-    });
+    }, jobLog); // ✅ Truyền jobLog để ghi log vào DB
     
     if (jobLog) {
       await jobLog.addLog('info', `uploadTracking completed`, { 

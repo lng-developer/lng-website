@@ -6,6 +6,7 @@
 const OrderStatusSnapshot = require("../models/orderStatusSnapshot.model");
 const ShippingBatch = require("../models/shippingBatch.model");
 const RealtimeLog = require("../models/realtimeLog.model");
+const AutoJobLog = require("../models/autoJobLog.model");
 
 class AutoUploadTrackingService {
   
@@ -318,10 +319,17 @@ class AutoUploadTrackingService {
   /**
    * Main function: Auto upload tracking cho tất cả shops
    */
-  static async autoUploadTrackingForAllShops(io, options = {}) {
+  static async autoUploadTrackingForAllShops(io, options = {}, jobLog = null) {
     try {
       const startTime = new Date();
       console.log(`🚀 [AUTO_UPLOAD] Starting auto upload tracking at ${startTime.toISOString()}`);
+
+      if (jobLog) {
+        await jobLog.addLog('info', 'Starting auto upload tracking from snapshots', {
+          startTime: startTime.toISOString(),
+          options
+        });
+      }
 
       const {
         maxOrdersPerShop = 50,
@@ -343,8 +351,22 @@ class AutoUploadTrackingService {
         includeShops
       });
 
+      if (jobLog) {
+        await jobLog.addLog('info', 'Orders queried from snapshots', {
+          totalShops: shopOrdersMap.size,
+          shopIds: Array.from(shopOrdersMap.keys())
+        });
+      }
+
       if (shopOrdersMap.size === 0) {
         console.log(`⚠️ [AUTO_UPLOAD] No eligible orders found for upload`);
+        
+        if (jobLog) {
+          await jobLog.addLog('warning', 'No eligible orders found for upload', {
+            reason: 'No shops with eligible orders in snapshots'
+          });
+        }
+
         return {
           success: true,
           totalShops: 0,
@@ -362,8 +384,26 @@ class AutoUploadTrackingService {
         try {
           console.log(`🔄 [AUTO_UPLOAD] Processing shop ${machineId} (${shopData.totalOrders} orders)`);
 
+          if (jobLog) {
+            await jobLog.addLog('info', `Processing shop ${machineId}`, {
+              machineId,
+              shopName: shopData.shopName,
+              ordersCount: shopData.totalOrders,
+              snapshotId: shopData.snapshotId
+            });
+          }
+
           if (dryRun) {
             console.log(`🧪 [DRY_RUN] Would create batch and send task for shop ${machineId}`);
+            
+            if (jobLog) {
+              await jobLog.addLog('info', `DRY RUN - Would process shop ${machineId}`, {
+                machineId,
+                ordersCount: shopData.totalOrders,
+                dryRun: true
+              });
+            }
+
             results.push({
               machineId,
               shopName: shopData.shopName,
@@ -381,11 +421,30 @@ class AutoUploadTrackingService {
             label: `Auto Upload - ${shopData.shopName} - ${shopData.totalOrders} orders`
           });
 
+          if (jobLog) {
+            await jobLog.addLog('info', `Created batch for shop ${machineId}`, {
+              batchId: batch._id,
+              machineId,
+              ordersCount: shopData.totalOrders
+            });
+          }
+
           // Gửi upload task
           const taskResult = await this.sendUploadTaskToExtension(batch, shopData.orders, io, {
             carrierCode,
             shipMethod
           });
+
+          if (jobLog) {
+            await jobLog.addLog('info', `Upload task sent for shop ${machineId}`, {
+              batchId: batch._id,
+              machineId,
+              filename: taskResult.filename,
+              fileSize: taskResult.fileSize,
+              target: taskResult.target,
+              success: taskResult.success
+            });
+          }
 
           results.push({
             machineId,
@@ -403,6 +462,15 @@ class AutoUploadTrackingService {
 
         } catch (shopError) {
           console.error(`❌ [AUTO_UPLOAD] Error processing shop ${machineId}:`, shopError.message);
+          
+          if (jobLog) {
+            await jobLog.addLog('error', `Error processing shop ${machineId}`, {
+              machineId,
+              error: shopError.message,
+              stack: shopError.stack
+            });
+          }
+
           results.push({
             machineId,
             shopName: shopData.shopName,
@@ -419,6 +487,18 @@ class AutoUploadTrackingService {
 
       console.log(`🎉 [AUTO_UPLOAD] Completed: ${successCount}/${shopOrdersMap.size} shops, ${totalOrders} total orders in ${duration}ms`);
 
+      if (jobLog) {
+        await jobLog.addLog('info', 'Auto upload tracking completed', {
+          endTime: endTime.toISOString(),
+          duration,
+          totalShops: shopOrdersMap.size,
+          successfulShops: successCount,
+          failedShops: shopOrdersMap.size - successCount,
+          totalOrders,
+          results
+        });
+      }
+
       return {
         success: true,
         totalShops: shopOrdersMap.size,
@@ -432,6 +512,14 @@ class AutoUploadTrackingService {
 
     } catch (error) {
       console.error(`❌ [AUTO_UPLOAD] Auto upload failed:`, error.message);
+      
+      if (jobLog) {
+        await jobLog.addLog('error', 'Auto upload tracking failed', {
+          error: error.message,
+          stack: error.stack
+        });
+      }
+
       throw error;
     }
   }
