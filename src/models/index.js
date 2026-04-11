@@ -32,6 +32,7 @@ const EtsyOrder = require("./etsyOrder.model")
 const ConfigAuto = require("./configAuto.model")
 const AutoJobLog = require("./autoJobLog.model")
 const ExtensionLog = require("./extensionLog.model")
+const OrderStatusSnapshot = require("./orderStatusSnapshot.model")
 
 // Cau hinh mongoose dang global
 mongoose.Promise = global.Promise;
@@ -72,6 +73,7 @@ db.EtsyOrder = EtsyOrder
 db.ConfigAuto = ConfigAuto
 db.AutoJobLog = AutoJobLog
 db.ExtensionLog = ExtensionLog
+db.OrderStatusSnapshot = OrderStatusSnapshot
 db.connectDB = async () => {
   await mongoose
     .connect(process.env.MONGO_URI, {

@@ -66,7 +66,29 @@ const ConfigAutoSchema = new mongoose.Schema(
         type: mongoose.Schema.Types.Mixed, // Có thể là object hoặc null
         default: null
       },
-      // Cho uploadTracking
+      // Cho uploadTracking - cập nhật cho AutoUploadTrackingService
+      maxOrdersPerShop: {
+        type: Number,
+        default: 50,
+        min: 1,
+        max: 200
+      },
+      onlyWithTracking: {
+        type: Boolean,
+        default: true
+      },
+      onlyNotSubmitted: {
+        type: Boolean,
+        default: true
+      },
+      excludeShops: {
+        type: [String],
+        default: []
+      },
+      includeShops: {
+        type: [String],
+        default: []
+      },
       maxBatches: {
         type: Number,
         default: 10,
