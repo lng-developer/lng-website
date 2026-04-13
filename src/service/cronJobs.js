@@ -16,7 +16,12 @@ class CronJobService {
    */
   setSocketIO(io) {
     this.io = io;
-    console.log('🔌 [CRON] Socket.IO instance set for cron jobs');
+    console.log('🔌 [CRON] Socket.IO instance set for cron jobs:', {
+      ioProvided: !!io,
+      ioType: typeof io,
+      ioSocketsCount: io?.sockets?.sockets?.size || 'unknown',
+      ioConstructorName: io?.constructor?.name || 'unknown'
+    });
   }
 
   /**
@@ -567,6 +572,13 @@ class CronJobService {
     }
     
     // Gọi service trực tiếp với Socket.IO instance
+    console.log(`🚀 [AUTO-CRON] About to call AutoUploadTrackingService with Socket.IO:`, {
+      ioAvailable: !!this.io,
+      ioType: typeof this.io,
+      ioSocketsCount: this.io?.sockets?.sockets?.size || 'unknown',
+      ioConstructorName: this.io?.constructor?.name || 'unknown'
+    });
+
     const result = await AutoUploadTrackingService.autoUploadTrackingForAllShops(this.io, {
       maxOrdersPerShop: config.config?.maxOrdersPerShop || 50,
       onlyWithTracking: config.config?.onlyWithTracking !== false,

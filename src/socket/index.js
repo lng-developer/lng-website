@@ -67,6 +67,14 @@ module.exports = function registerSocketHandlers({ app, io }) {
       },
     });
 
+    // Send welcome message với connection info
+    socket.emit("server:connected", {
+      socketId: socket.id,
+      serverTime: Date.now(),
+      message: "Connected successfully to LNG Portal",
+      rooms: [`shop:${shopId}`, `machine:${machineId}`]
+    });
+
     // Heartbeat
     socket.on("ext:heartbeat", (p = {}) => {
       presence.heartbeat(machineId, {
@@ -89,6 +97,148 @@ module.exports = function registerSocketHandlers({ app, io }) {
           status: "online",
           lastSeen: Date.now(),
         },
+      });
+    });
+
+    // Task Acknowledgment - Client xác nhận đã nhận task
+    socket.on("ext:task-ack", (data) => {
+      const { taskId, receivedAt } = data;
+      console.log(`✅ [SOCKET] Task acknowledged: ${taskId} by ${machineId} at ${new Date(receivedAt).toISOString()}`);
+      
+      // Broadcast task acknowledgment to monitoring clients
+      io.to(`shop:${shopId}`).emit("task:acknowledged", {
+        taskId,
+        machineId,
+        shopId,
+        acknowledgedAt: Date.now(),
+        receivedAt,
+        latency: Date.now() - receivedAt
+      });
+    });
+
+    // Task Result - Client gửi kết quả thực hiện task
+    socket.on("ext:task-result", (data) => {
+      const { taskId, success, result, error, duration, completedAt } = data;
+      console.log(`📊 [SOCKET] Task result: ${taskId} - Success: ${success} - Duration: ${duration}ms`);
+      
+      // Broadcast task result to monitoring clients
+      io.to(`shop:${shopId}`).emit("task:completed", {
+        taskId,
+        machineId,
+        shopId,
+        success,
+        result,
+        error,
+        duration,
+        completedAt,
+        receivedAt: Date.now()
+      });
+
+      // Log to console for debugging
+      if (!success && error) {
+        console.error(`❌ [SOCKET] Task ${taskId} failed on ${machineId}: ${error}`);
+      }
+    });
+
+    // Task Progress - Client gửi tiến độ thực hiện task
+    socket.on("ext:task-progress", (data) => {
+      const { taskId, progress, message, currentStep, totalSteps } = data;
+      console.log(`🔄 [SOCKET] Task progress: ${taskId} - ${progress}% - ${message}`);
+      
+      // Broadcast progress to monitoring clients
+      io.to(`shop:${shopId}`).emit("task:progress", {
+        taskId,
+        machineId,
+        shopId,
+        progress,
+        message,
+        currentStep,
+        totalSteps,
+        timestamp: Date.now()
+      });
+    });
+
+    // Real-time Data - Client gửi dữ liệu real-time bất kỳ
+    socket.on("ext:realtime-data", (data) => {
+      const { type, payload, timestamp } = data;
+      console.log(`📡 [SOCKET] Real-time data from ${machineId}:`, { type, timestamp });
+      
+      // Broadcast to monitoring clients and other relevant clients
+      io.to(`shop:${shopId}`).emit("client:realtime-data", {
+        machineId,
+        shopId,
+        type,
+        payload,
+        timestamp: timestamp || Date.now(),
+        receivedAt: Date.now()
+      });
+    });
+
+    // Connection Test - Ping/Pong để test kết nối
+    socket.on("ext:ping", (data) => {
+      const { timestamp, testId } = data;
+      const now = Date.now();
+      const latency = now - timestamp;
+      
+      console.log(`🏓 [SOCKET] Ping from ${machineId} - Latency: ${latency}ms`);
+      
+      // Gửi pong ngược lại client
+      socket.emit("server:pong", {
+        testId,
+        clientTimestamp: timestamp,
+        serverTimestamp: now,
+        latency
+      });
+      
+      // Broadcast connection quality to monitoring
+      io.to(`shop:${shopId}`).emit("connection:quality", {
+        machineId,
+        shopId,
+        latency,
+        timestamp: now,
+        quality: latency < 100 ? 'excellent' : latency < 300 ? 'good' : latency < 1000 ? 'fair' : 'poor'
+      });
+    });
+
+    // System Stats - Client gửi thông tin hệ thống
+    socket.on("ext:system-stats", (data) => {
+      const { cpu, memory, activeOrders, queueSize, errors, uptime } = data;
+      console.log(`📊 [SOCKET] System stats from ${machineId}:`, { cpu, memory, activeOrders });
+      
+      // Update presence with system info
+      presence.updateStats(machineId, {
+        cpu,
+        memory,
+        activeOrders,
+        queueSize,
+        errors,
+        uptime,
+        lastStatsUpdate: Date.now()
+      });
+      
+      // Broadcast to monitoring dashboard
+      io.to(`shop:${shopId}`).emit("client:stats", {
+        machineId,
+        shopId,
+        stats: { cpu, memory, activeOrders, queueSize, errors, uptime },
+        timestamp: Date.now()
+      });
+    });
+
+    // Error Report - Client báo lỗi real-time
+    socket.on("ext:error-report", (data) => {
+      const { error, context, severity, timestamp } = data;
+      console.error(`🚨 [SOCKET] Error from ${machineId}:`, { error, severity, context });
+      
+      // Broadcast error to monitoring
+      io.to(`shop:${shopId}`).emit("client:error", {
+        machineId,
+        shopId,
+        error,
+        context,
+        severity,
+        timestamp: timestamp || Date.now(),
+        receivedAt: Date.now()
       });
     });
 

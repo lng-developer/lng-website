@@ -14,6 +14,14 @@ router.post("/pull-all", extController.pullAllOrder);
 // List client online
 router.get("/online", extController.getClientOnline);
 
+// ================= TWO-WAY COMMUNICATION =================
+
+// Test connection với specific client
+router.post("/test-connection/:machineId", extController.testConnection);
+
+// Broadcast message tới tất cả clients trong shop
+router.post("/broadcast", extController.broadcastMessage);
+
 // ================= AUTO REQUEST EXTENSION =================
 
 // Auto request extension cho tất cả shops
