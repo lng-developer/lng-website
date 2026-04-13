@@ -1295,18 +1295,97 @@ const getClientOnline = async (req, res) => {
         connectedAt: lastSeenMs,
         lastSeen: lastSeenMs,
 
+        // Include system stats if available
+        stats: c.stats || null,
+
         status: stale ? "maybe-online" : "online",
         statusSummary: {
           overall: stale ? "warning" : "success",
-          lastTs: lastSeenMs,
-          onlineForSec: 0,
-          idleForSec: Math.max(0, Math.floor(staleMs / 1000)),
+          lastSeenAgo: staleMs,
+          stale,
         },
       };
     });
 
-    return res.json(out);
+    return res.json({ ok: true, clients: out });
   } catch (e) {
+    console.error("getClientOnline error:", e);
+    return res.status(500).json({ ok: false, message: e.message });
+  }
+};
+
+// Test connection với client
+const testConnection = async (req, res) => {
+  try {
+    const { machineId } = req.params;
+    const io = req.app.get("io");
+    
+    if (!io) {
+      return res.status(500).json({ ok: false, message: "Socket.IO not available" });
+    }
+
+    const testId = `test_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+    const timestamp = Date.now();
+
+    console.log(`🏓 [TEST-CONNECTION] Sending ping to machine: ${machineId}`);
+
+    // Gửi ping test tới client
+    io.to(`machine:${machineId}`).emit("server:ping", {
+      testId,
+      timestamp,
+      message: "Connection test from server"
+    });
+
+    return res.json({
+      ok: true,
+      testId,
+      message: `Ping sent to machine ${machineId}`,
+      timestamp
+    });
+
+  } catch (e) {
+    console.error("testConnection error:", e);
+    return res.status(500).json({ ok: false, message: e.message });
+  }
+};
+
+// Broadcast message tới tất cả clients trong shop
+const broadcastMessage = async (req, res) => {
+  try {
+    const { shopId, message, type = "info" } = req.body;
+    const io = req.app.get("io");
+    
+    if (!io) {
+      return res.status(500).json({ ok: false, message: "Socket.IO not available" });
+    }
+
+    if (!shopId || !message) {
+      return res.status(400).json({ ok: false, message: "shopId and message required" });
+    }
+
+    console.log(`📢 [BROADCAST] Sending message to shop: ${shopId}`);
+
+    // Broadcast message tới tất cả clients trong shop
+    io.to(`shop:${shopId}`).emit("server:broadcast", {
+      type,
+      message,
+      timestamp: Date.now(),
+      from: "server"
+    });
+
+    // Đếm số recipients
+    const room = io.of("/").adapter.rooms.get(`shop:${shopId}`);
+    const recipients = room ? room.size : 0;
+
+    return res.json({
+      ok: true,
+      message: "Message broadcasted successfully",
+      recipients,
+      shopId
+    });
+
+  } catch (e) {
+    console.error("broadcastMessage error:", e);
     return res.status(500).json({ ok: false, message: e.message });
   }
 };
@@ -1315,6 +1394,8 @@ module.exports = {
   requestExtension,
   getClientOnline,
   pullAllOrder,
+  testConnection,
+  broadcastMessage,
 
   // vendor sync APIs
   vendorSyncOne,
