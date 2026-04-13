@@ -2,7 +2,7 @@ const OrderStatusSnapshot = require("../models/orderStatusSnapshot.model");
 const OrderCustomProduct = require("../models/orderCustomProduct.model");
 const ShippingBatch = require("../models/shippingBatch.model");
 const Shop = require("../models/shop.model");
-const { v4: uuidv4 } = require('uuid');
+// const { v4: uuidv4 } = require('uuid');
 
 // Helper function để normalize field
 const normalizeField = (value) => {
