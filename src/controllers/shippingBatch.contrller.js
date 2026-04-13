@@ -1096,17 +1096,17 @@ const checkOrdersStatus = async (req, res, next) => {
     let result;
     switch (useSnapshot) {
       case "snapshot-only":
-        result = await this.checkOrdersStatusFromSnapshot(machineId, { limit, fromDate, toDate, status, filterType });
+        result = await checkOrdersStatusFromSnapshot(machineId, { limit, fromDate, toDate, status, filterType });
         break;
       case "hybrid":
-        result = await this.checkOrdersStatusHybrid(machineId, { limit, fromDate, toDate, status, filterType });
+        result = await checkOrdersStatusHybrid(machineId, { limit, fromDate, toDate, status, filterType });
         break;
       case "snapshot-priority":
-        result = await this.checkOrdersStatusSnapshotPriority(machineId, { limit, fromDate, toDate, status, filterType });
+        result = await checkOrdersStatusSnapshotPriority(machineId, { limit, fromDate, toDate, status, filterType });
         break;
       case "real-time":
       default:
-        result = await this.checkOrdersStatusRealTime(machineId, { limit, fromDate, toDate, status, filterType });
+        result = await checkOrdersStatusRealTime(machineId, { limit, fromDate, toDate, status, filterType });
         break;
     }
 
