@@ -16,7 +16,6 @@ class CronJobService {
    */
   setSocketIO(io) {
     this.io = io;
-    console.log('🔌 [CRON] Socket.IO instance set for cron jobs');
   }
 
   /**
@@ -43,7 +42,6 @@ class CronJobService {
    */
   scheduleAutoUploadJobs() {
     if (!this.autoUploadConfig.enabled) {
-      console.log('⏸️ [CRON] Auto upload is disabled globally');
       return;
     }
 
@@ -79,7 +77,6 @@ class CronJobService {
     this.jobs.set(jobName, job);
     job.start();
     
-    console.log(`⏰ [CRON] ${jobName} scheduled with pattern: ${cronPattern}`);
   }
 
   /**
@@ -87,7 +84,6 @@ class CronJobService {
    */
   async runAutoUploadJob(jobType) {
     const startTime = new Date();
-    console.log(`🤖 [CRON][${startTime.toISOString()}] Starting auto upload job: ${jobType}`);
     
     try {
       // Find uploadable batches with real tracking only
@@ -103,10 +99,9 @@ class CronJobService {
         ]
       }).limit(10); // Limit to prevent overload
 
-      console.log(`📋 [CRON][${jobType}] Found ${uploadableBatches.length} uploadable batches`);
+
       
       if (uploadableBatches.length === 0) {
-        console.log(`✅ [CRON][${jobType}] No uploadable batches found`);
         return;
       }
 
@@ -119,16 +114,8 @@ class CronJobService {
       const endTime = new Date();
       const duration = endTime - startTime;
       
-      console.log(`✅ [CRON][${endTime.toISOString()}] Auto upload job ${jobType} completed`);
-      console.log(`📊 [CRON][${jobType}] Result:`, {
-        success: result.success,
-        processedBatches: result.processedBatches,
-        successfulBatches: result.successfulBatches,
-        duration: `${duration}ms`
-      });
       
     } catch (error) {
-      console.error(`❌ [CRON][${jobType}] Auto upload job failed:`, error.message);
     }
   }
   /**
@@ -234,15 +221,15 @@ class CronJobService {
       const ConfigAuto = require("../models/configAuto.model");
       const activeConfigs = await ConfigAuto.find({ status: true }); // status: true thay vì "active"
       
-      console.log(`📋 [CRON] Loading ${activeConfigs.length} active auto jobs from database`);
+   
       
       for (const config of activeConfigs) {
         await this.addAutoJob(config);
       }
       
-      console.log(`✅ [CRON] Loaded ${activeConfigs.length} auto jobs successfully`);
+ 
     } catch (error) {
-      console.error('❌ [CRON] Failed to load auto jobs from database:', error.message);
+ 
     }
   }
 
@@ -272,10 +259,10 @@ class CronJobService {
       
       job.start();
       
-      console.log(`⏰ [CRON] Auto job '${config.id}' (${config.type}) scheduled with pattern: ${config.autoTime}`);
+
       
     } catch (error) {
-      console.error(`❌ [CRON] Failed to add auto job '${config.id}':`, error.message);
+
       throw error;
     }
   }
@@ -291,11 +278,11 @@ class CronJobService {
       if (jobData) {
         jobData.job.stop();
         this.autoJobs.delete(jobName);
-        console.log(`⏹️ [CRON] Auto job '${configId}' stopped and removed`);
+
       }
       
     } catch (error) {
-      console.error(`❌ [CRON] Failed to remove auto job '${configId}':`, error.message);
+
     }
   }
 
@@ -311,8 +298,7 @@ class CronJobService {
       jobLog = await AutoJobLog.createExecution(config.id, config.type, config.config);
       await jobLog.addLog('info', `Starting auto job: ${config.id} (${config.type})`);
       
-      console.log(`🤖 [CRON][${jobLog.startTime.toISOString()}] Executing auto job: ${config.id} (${config.type})`);
-      
+       
       // Cập nhật trạng thái đang chạy
       await this.updateConfigStats(config.id, {
         lastRunAt: jobLog.startTime,
@@ -353,10 +339,7 @@ class CronJobService {
         lastRunResult: result,
         $inc: { "stats.totalRuns": 1 }
       });
-
-      console.log(`✅ [CRON][${jobLog.endTime.toISOString()}] Auto job '${config.id}' completed successfully`);
-      console.log(`📊 [CRON][${config.id}] Duration: ${jobLog.duration}ms, Result:`, result);
-      
+    
       return result;
       
     } catch (error) {
@@ -390,13 +373,7 @@ class CronJobService {
       await jobLog.addLog('info', `Executing autoRequestExtension job`, { configId: config.id });
     }
     
-    console.log(`🤖 [AUTO-CRON] Executing autoRequestExtension auto job`);
-    console.log(`📋 [AUTO-CRON] Config ID: ${config.id}`);
-    console.log(`⚙️  [AUTO-CRON] Settings:`, {
-      taskType: config.config?.taskType || 'IMPORT_ORDERS',
-      payload: config.config?.payload || null
-    });
-    
+     
     const { extController } = require("../controllers");
     
     // Tạo mock req/res objects với Socket.IO thực tế
@@ -412,7 +389,6 @@ class CronJobService {
         get: (key) => {
           if (key === 'io') {
             // Không log ở đây để tránh parallel save
-            console.log(`🔍 [AUTO-CRON] Requesting Socket.IO instance: ${!!this.io}`);
             return this.io; // Trả về Socket.IO instance thực tế
           }
           return null;
@@ -454,14 +430,7 @@ class CronJobService {
       });
     }
     
-    console.log(`✅ [AUTO-CRON] autoRequestExtension completed with status ${result?.statusCode}`);
-    console.log(`📊 [AUTO-CRON] Summary:`, {
-      ok: result?.ok,
-      processed: result?.processed || 0,
-      success: result?.success || 0,
-      failed: result?.failed || 0
-    });
-    
+
     return result;
   }
 
@@ -473,12 +442,7 @@ class CronJobService {
       await jobLog.addLog('info', `Executing vendorSyncBatch job`, { configId: config.id });
     }
     
-    console.log(`🤖 [AUTO-CRON] Executing vendorSyncBatch auto job`);
-    console.log(`📋 [AUTO-CRON] Config ID: ${config.id}`);
-    console.log(`⚙️  [AUTO-CRON] Settings:`, {
-      maxOrders: config.config?.maxOrders || 100,
-      dryRun: config.config?.dryRun || false
-    });
+
     
     const { extController } = require("../controllers");
     
@@ -526,14 +490,7 @@ class CronJobService {
       });
     }
     
-    console.log(`✅ [AUTO-CRON] vendorSyncBatch completed with status ${result?.statusCode}`);
-    console.log(`📊 [AUTO-CRON] Summary:`, {
-      ok: result?.ok,
-      processedOrders: result?.processedOrders || 0,
-      scanned: result?.scanned || 0,
-      success: result?.ok || 0,
-      failed: result?.fail || 0
-    });
+
     
     return result;
   }
@@ -546,18 +503,7 @@ class CronJobService {
       await jobLog.addLog('info', `Executing uploadTracking job`, { configId: config.id });
     }
     
-    console.log(`🤖 [AUTO-CRON] Executing uploadTracking auto job`);
-    console.log(`📋 [AUTO-CRON] Config ID: ${config.id}`);
-    console.log(`⚙️  [AUTO-CRON] Settings:`, {
-      maxOrdersPerShop: config.config?.maxOrdersPerShop || 50,
-      onlyWithTracking: config.config?.onlyWithTracking !== false, // default true
-      onlyNotSubmitted: config.config?.onlyNotSubmitted !== false, // default true
-      excludeShops: config.config?.excludeShops || [],
-      includeShops: config.config?.includeShops || [],
-      carrierCode: config.config?.carrierCode || "USPS",
-      shipMethod: config.config?.shipMethod || "USPS First Class",
-      dryRun: config.config?.dryRun || false
-    });
+
     
     // Import AutoUploadTrackingService
     const AutoUploadTrackingService = require("./autoUploadTrackingService");
@@ -588,15 +534,7 @@ class CronJobService {
       });
     }
     
-    console.log(`✅ [AUTO-CRON] uploadTracking completed`);
-    console.log(`📊 [AUTO-CRON] Summary:`, {
-      success: result?.success,
-      totalShops: result?.totalShops || 0,
-      successfulShops: result?.successfulShops || 0,
-      failedShops: result?.failedShops || 0,
-      totalOrders: result?.totalOrders || 0,
-      duration: result?.duration || 0
-    });
+
     
     // Format result để match với expected format
     return {
@@ -619,7 +557,7 @@ class CronJobService {
       const ConfigAuto = require("../models/configAuto.model");
       await ConfigAuto.updateOne({ id: configId }, updateData);
     } catch (error) {
-      console.error(`❌ [CRON] Failed to update stats for config '${configId}':`, error.message);
+      
     }
   }
 
@@ -627,7 +565,7 @@ class CronJobService {
    * Chạy auto job thủ công
    */
   async runAutoJobManually(config) {
-    console.log(`🔧 [CRON] Running auto job '${config.id}' manually`);
+   
     await this.executeAutoJob(config);
     return { message: `Auto job '${config.id}' executed manually` };
   }
@@ -666,7 +604,6 @@ class CronJobService {
    */
   updateAutoUploadConfig(newConfig) {
     this.autoUploadConfig = { ...this.autoUploadConfig, ...newConfig };
-    console.log('🔧 [CRON] Auto upload config updated:', this.autoUploadConfig);
   }
 
   /**
@@ -688,7 +625,6 @@ class CronJobService {
 
     // Restart with new config
     this.scheduleAutoUploadJobs();
-    console.log('🔄 [CRON] Auto upload jobs restarted with new configuration');
   }
 
   /**
@@ -698,7 +634,6 @@ class CronJobService {
     const job = this.jobs.get(jobName);
     if (job) {
       job.stop();
-      console.log(`⏹️ [CRON] Job ${jobName} stopped`);
     }
   }
 
@@ -709,7 +644,6 @@ class CronJobService {
     const job = this.jobs.get(jobName);
     if (job) {
       job.start();
-      console.log(`▶️ [CRON] Job ${jobName} started`);
     }
   }
 
@@ -719,7 +653,6 @@ class CronJobService {
   stopAllJobs() {
     this.jobs.forEach((job, name) => {
       job.stop();
-      console.log(`⏹️ [CRON] Job ${name} stopped`);
     });
   }
 
@@ -744,7 +677,6 @@ class CronJobService {
     switch (jobName) {
       case 'updateFakeTracking':
         // await this.runUpdateFakeTrackingJob(); // COMMENTED OUT
-        console.log('⚠️ [CRON] Fake tracking job is disabled');
         break;
       case 'autoUpload_regular':
         await this.runAutoUploadJob('regular');
@@ -782,7 +714,6 @@ class CronJobService {
     this.jobs.set(jobName, job);
     job.start();
     
-    console.log(`⏰ [CRON] Order Status Sync job scheduled: ${cronPattern} (every 15 minutes)`);
   }
 
   /**
@@ -791,10 +722,6 @@ class CronJobService {
   async runOrderStatusSyncJob() {
     try {
       const timestamp = new Date().toISOString();
-      console.log('🔄 [CRON] ===== Order Status Sync Job Started =====');
-      console.log(`🔄 [CRON] Timestamp: ${timestamp}`);
-      console.log(`🔄 [CRON] Job Type: Automatic (every 5 minutes)`);
-      
       const startTime = Date.now();
       
       // Sync tất cả shops active
@@ -806,15 +733,7 @@ class CronJobService {
       
       const duration = Date.now() - startTime;
       
-      console.log(`✅ [CRON] ===== Order Status Sync Job Completed =====`);
-      console.log(`✅ [CRON] Duration: ${duration}ms (${(duration/1000).toFixed(2)}s)`);
-      console.log(`✅ [CRON] Total shops: ${result.totalShops}`);
-      console.log(`✅ [CRON] Successful: ${result.successCount}`);
-      console.log(`✅ [CRON] Failed: ${result.failedCount}`);
-      console.log(`✅ [CRON] Success rate: ${result.totalShops > 0 ? ((result.successCount/result.totalShops)*100).toFixed(1) : 0}%`);
-      console.log(`✅ [CRON] Next run: ${new Date(Date.now() + 15*60*1000).toISOString()}`);
-      console.log(`✅ [CRON] ============================================`);
-      
+  
       // Emit socket event nếu có
       if (this.io) {
         this.io.emit('orderStatusSyncCompleted', {
@@ -823,19 +742,14 @@ class CronJobService {
           result,
           nextRun: new Date(Date.now() + 15*60*1000) // Next run in 15 minutes
         });
-        console.log(`📡 [CRON] Socket event emitted: orderStatusSyncCompleted`);
+      
       }
       
       return result;
       
     } catch (error) {
       const timestamp = new Date().toISOString();
-      console.error('❌ [CRON] ===== Order Status Sync Job Failed =====');
-      console.error(`❌ [CRON] Timestamp: ${timestamp}`);
-      console.error(`❌ [CRON] Error message:`, error.message);
-      console.error(`❌ [CRON] Stack trace:`, error.stack);
-      console.error(`❌ [CRON] Next retry: ${new Date(Date.now() + 15*60*1000).toISOString()}`);
-      console.error(`❌ [CRON] ==========================================`);
+    
       
       // Emit error event
       if (this.io) {
@@ -844,7 +758,6 @@ class CronJobService {
           error: error.message,
           nextRetry: new Date(Date.now() + 15*60*1000)
         });
-        console.log(`📡 [CRON] Socket error event emitted: orderStatusSyncError`);
       }
       
       throw error;
@@ -870,7 +783,6 @@ class CronJobService {
     this.jobs.set(jobName, job);
     job.start();
     
-    console.log(`⏰ [CRON] Snapshot Auto Sync job scheduled: ${cronPattern} (every 15 minutes)`);
   }
 
   /**
@@ -879,9 +791,6 @@ class CronJobService {
   async runSnapshotAutoSyncJob() {
     try {
       const timestamp = new Date().toISOString();
-      console.log('🔄 [CRON] ===== Snapshot Auto Sync Job Started =====');
-      console.log(`🔄 [CRON] Timestamp: ${timestamp}`);
-      console.log(`🔄 [CRON] Job Type: Automatic (every 15 minutes)`);
       
       const startTime = Date.now();
       
@@ -889,15 +798,6 @@ class CronJobService {
       const result = await SnapshotAutoSyncService.scheduledSyncAllShops();
       
       const duration = Date.now() - startTime;
-      
-      console.log(`✅ [CRON] ===== Snapshot Auto Sync Job Completed =====`);
-      console.log(`✅ [CRON] Duration: ${duration}ms (${(duration/1000).toFixed(2)}s)`);
-      console.log(`✅ [CRON] Total shops: ${result.totalShops}`);
-      console.log(`✅ [CRON] Successful: ${result.successCount}`);
-      console.log(`✅ [CRON] Failed: ${result.totalShops - result.successCount}`);
-      console.log(`✅ [CRON] Success rate: ${result.totalShops > 0 ? ((result.successCount/result.totalShops)*100).toFixed(1) : 0}%`);
-      console.log(`✅ [CRON] Next run: ${new Date(Date.now() + 15*60*1000).toISOString()}`);
-      console.log(`✅ [CRON] ============================================`);
       
       // Emit socket event nếu có
       if (this.io) {
@@ -907,20 +807,12 @@ class CronJobService {
           result,
           nextRun: new Date(Date.now() + 15*60*1000)
         });
-        console.log(`📡 [CRON] Socket event emitted: snapshotAutoSyncCompleted`);
       }
       
       return result;
       
     } catch (error) {
       const timestamp = new Date().toISOString();
-      console.error('❌ [CRON] ===== Snapshot Auto Sync Job Failed =====');
-      console.error(`❌ [CRON] Timestamp: ${timestamp}`);
-      console.error(`❌ [CRON] Error message:`, error.message);
-      console.error(`❌ [CRON] Stack trace:`, error.stack);
-      console.error(`❌ [CRON] Next retry: ${new Date(Date.now() + 15*60*1000).toISOString()}`);
-      console.error(`❌ [CRON] ==========================================`);
-      
       // Emit error event
       if (this.io) {
         this.io.emit('snapshotAutoSyncError', {
@@ -928,7 +820,6 @@ class CronJobService {
           error: error.message,
           nextRetry: new Date(Date.now() + 15*60*1000)
         });
-        console.log(`📡 [CRON] Socket error event emitted: snapshotAutoSyncError`);
       }
       
       throw error;

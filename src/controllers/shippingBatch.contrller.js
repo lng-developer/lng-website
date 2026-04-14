@@ -1631,8 +1631,7 @@ const createBatchFromOrders = async (req, res, next) => {
     });
 
     const shopIds = Object.keys(ordersByShop);
-    console.log(`📊 [CREATE_BATCH] Found ${shopIds.length} shops:`, shopIds.map(shopId => `${shopId}(${ordersByShop[shopId].length} orders)`));
-
+  
     const createdBatches = [];
     const results = [];
 
@@ -1641,8 +1640,7 @@ const createBatchFromOrders = async (req, res, next) => {
       const shopOrderIds = ordersByShop[shopId];
 
       try {
-        console.log(`🔄 [CREATE_BATCH] Processing shop ${shopId} with ${shopOrderIds.length} orders`);
-
+     
         // Lấy thông tin orders từ DB cho shop này
         const shopOrders = await OrderCustomProduct.find({
           orderId: { $in: shopOrderIds },
@@ -1650,8 +1648,7 @@ const createBatchFromOrders = async (req, res, next) => {
         }).lean();
 
         if (!shopOrders.length) {
-          console.log(`⚠️ [CREATE_BATCH] No orders found for shop ${shopId}`);
-          results.push({
+            results.push({
             shopId,
             success: false,
             message: "No orders found in database",
@@ -1683,20 +1680,7 @@ const createBatchFromOrders = async (req, res, next) => {
             });
             totalReal++;
           } else {
-            // ❌ Không có tracking → chỉ lưu vào tracking_fakes để theo dõi, không tạo fake tracking
-            /* COMMENTED OUT - removed fake tracking logic
-            const fakeTracking = generateFakeTracking();
-            
-            // Thêm vào completed với fake tracking
-            completed.push({
-              orderId,
-              tracking: fakeTracking,
-              isFake: true,
-              source: "fake",
-              createdAt: new Date()
-            });
-            */
-
+           
             // Thêm vào tracking_fakes để theo dõi (không có tracking)
             tracking_fakes.push({
               orderId,
@@ -1731,16 +1715,12 @@ const createBatchFromOrders = async (req, res, next) => {
 
         // 🔄 AUTO SYNC: Tự động cập nhật snapshots
         try {
-          console.log(`🔄 [AUTO_SYNC] Triggering auto sync for batch: ${batch._id}`);
-          await SnapshotAutoSyncService.updateBatchSubmissionStatus(batch._id, machineId);
+                await SnapshotAutoSyncService.updateBatchSubmissionStatus(batch._id, machineId);
         } catch (syncError) {
-          console.error(`⚠️ [AUTO_SYNC] Failed to auto sync snapshots:`, syncError.message);
-          // Không throw error để không ảnh hưởng đến flow chính
+           // Không throw error để không ảnh hưởng đến flow chính
         }
 
         createdBatches.push(batch);
-
-        console.log(`✅ [CREATE_BATCH] Created batch ${batch._id} for shop ${shopId} with ${completed.length} orders (${totalReal} real, ${totalFake} fake)`);
 
         // ✅ Tự động gửi upload task nếu có real tracking và autoUpload = true
         let autoTaskSent = false;
@@ -1748,19 +1728,11 @@ const createBatchFromOrders = async (req, res, next) => {
           try {
             const io = req.app.get("io");
             if (io) {
-              console.log(`🔌 [DEBUG] Socket.IO available, total clients: ${io.of("/").sockets.size}`);
-
+      
               // ✅ Kiểm tra room trước khi gửi
               const roomName = `machine:${machineId}`;
               const roomSockets = await io.in(roomName).fetchSockets();
-              console.log(`🏠 [DEBUG] Room ${roomName} has ${roomSockets.length} sockets:`);
-              roomSockets.forEach((sock, index) => {
-                console.log(`  Socket ${index + 1}: ${sock.id} (machine: ${sock.data?.machineId}, shop: ${sock.data?.shopId})`);
-              });
 
-              if (roomSockets.length === 0) {
-                console.log(`⚠️ [DEBUG] No sockets in room ${roomName} - task will not be received!`);
-              }
               // Tạo file content
               const shipDateStr = buildShipDateString(new Date());
               const fileContent = buildCompletedShippingFile(completed, {
@@ -1806,20 +1778,10 @@ const createBatchFromOrders = async (req, res, next) => {
                 }
               };
 
-              // Gửi task
-              console.log(`📡 [DEBUG] Emitting task to room: ${roomName}`);
-              console.log(`📦 [DEBUG] Task payload:`, {
-                type: task.type,
-                batchId: task.payload.batchId.toString(),
-                machineId: task.payload.machineId,
-                shopId: task.payload.shopId,
-                trackingCount: task.payload.trackingData.length
-              });
+    
 
               io.to(`machine:${machineId}`).emit("server:task", task);
-              console.log(`✅ [DEBUG] Task emitted to ${roomSockets.length} sockets in room ${roomName}`);
-
-              // Đánh dấu đã gửi
+                 // Đánh dấu đã gửi
               batch.uploadTaskSent = true;
               batch.uploadTaskSentAt = new Date();
               batch.uploadTaskSentBy = "frontend";
@@ -1838,10 +1800,8 @@ const createBatchFromOrders = async (req, res, next) => {
                 ts: new Date(),
               });
 
-              console.log(`✅ [CREATE_BATCH] Auto sent upload task for batch ${batch._id} (shop: ${shopName})`);
             }
           } catch (taskError) {
-            console.error(`❌ [CREATE_BATCH] Failed to send auto upload task for shop ${shopId}:`, taskError.message);
           }
         }
 
@@ -1864,7 +1824,6 @@ const createBatchFromOrders = async (req, res, next) => {
         });
 
       } catch (shopError) {
-        console.error(`❌ [CREATE_BATCH] Failed to process shop ${shopId}:`, shopError.message);
         results.push({
           shopId,
           success: false,
