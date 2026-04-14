@@ -14,6 +14,19 @@ async function getRealTrackingForOrder(orderId) {
 }
 
 /**
+ * 🚀 OPTIMIZED: Extract tracking directly from order data (no DB query)
+ */
+function extractTrackingFromOrder(order) {
+  for (const item of order.items || []) {
+    const itemTracking = normalizeField(item?.tracking_info?.tracking);
+    if (itemTracking && itemTracking !== "-" && itemTracking !== "---") {
+      return itemTracking;
+    }
+  }
+  return null;
+}
+
+/**
  * TODO: Hàm gen tracking fake cho 1 order (COMMENTED OUT - removed fake tracking)
  * Bạn tự thay logic cho phù hợp.
  */
@@ -1631,30 +1644,25 @@ const createBatchFromOrders = async (req, res, next) => {
     });
 
     const shopIds = Object.keys(ordersByShop);
-  
-    const createdBatches = [];
-    const results = [];
 
-    // ✅ Tạo batch riêng cho từng shopId
-    for (const shopId of shopIds) {
+    // 🚀 PERFORMANCE OPTIMIZATION: Process all shops in parallel
+    const shopPromises = shopIds.map(async (shopId) => {
       const shopOrderIds = ordersByShop[shopId];
 
       try {
-     
-        // Lấy thông tin orders từ DB cho shop này
+        // 🚀 OPTIMIZATION: Single query to get all orders with tracking info
         const shopOrders = await OrderCustomProduct.find({
           orderId: { $in: shopOrderIds },
           shopId: shopId
         }).lean();
 
         if (!shopOrders.length) {
-            results.push({
+          return {
             shopId,
             success: false,
             message: "No orders found in database",
             orderCount: 0
-          });
-          continue;
+          };
         }
 
         const completed = [];
@@ -1662,12 +1670,12 @@ const createBatchFromOrders = async (req, res, next) => {
         let totalReal = 0;
         let totalFake = 0;
 
-        // Xử lý từng order của shop này
+        // 🚀 OPTIMIZATION: Process tracking directly from fetched orders (no additional queries)
         for (const order of shopOrders) {
           const orderId = order.orderId;
 
-          // Lấy tracking từ order
-          const realTracking = await getRealTrackingForOrder(orderId);
+          // Extract tracking directly from order data (no additional DB call)
+          const realTracking = extractTrackingFromOrder(order);
 
           if (realTracking && realTracking.trim()) {
             // ✅ Có real tracking
@@ -1680,15 +1688,12 @@ const createBatchFromOrders = async (req, res, next) => {
             });
             totalReal++;
           } else {
-           
             // Thêm vào tracking_fakes để theo dõi (không có tracking)
             tracking_fakes.push({
               orderId,
-              // tracking: fakeTracking, // REMOVED
-              note: "No real tracking available", // Updated note
+              note: "No real tracking available",
               createdAt: new Date()
             });
-
             totalFake++;
           }
         }
@@ -1697,6 +1702,9 @@ const createBatchFromOrders = async (req, res, next) => {
         const shopInfo = shopOrders[0]; // Lấy thông tin shop từ order đầu tiên
         const shopName = shopInfo.shopName || shopInfo.shopStore || `Shop ${shopId}`;
         const batchLabel = label ? `${label} - ${shopName}` : `FE Batch - ${shopName}`;
+
+        // 🚀 OPTIMIZATION: Batch all database operations
+        const batchOperations = [];
 
         // Tạo batch cho shop này
         const batch = await ShippingBatch.create({
@@ -1713,84 +1721,79 @@ const createBatchFromOrders = async (req, res, next) => {
           }
         });
 
-        // 🔄 AUTO SYNC: Tự động cập nhật snapshots
-        try {
-                await SnapshotAutoSyncService.updateBatchSubmissionStatus(batch._id, machineId);
-        } catch (syncError) {
-           // Không throw error để không ảnh hưởng đến flow chính
-        }
-
-        createdBatches.push(batch);
+        // 🔄 AUTO SYNC: Tự động cập nhật snapshots (non-blocking)
+        const syncPromise = SnapshotAutoSyncService.updateBatchSubmissionStatus(batch._id, machineId)
+          .catch(syncError => {
+            console.error(`⚠️ [AUTO_SYNC] Failed for batch ${batch._id}:`, syncError.message);
+          });
 
         // ✅ Tự động gửi upload task nếu có real tracking và autoUpload = true
         let autoTaskSent = false;
+        let taskPromise = Promise.resolve();
+
         if (autoUpload && totalReal > 0) {
-          try {
-            const io = req.app.get("io");
-            if (io) {
-      
-              // ✅ Kiểm tra room trước khi gửi
-              const roomName = `machine:${machineId}`;
-              const roomSockets = await io.in(roomName).fetchSockets();
+          const io = req.app.get("io");
+          if (io) {
+            // Tạo file content
+            const shipDateStr = buildShipDateString(new Date());
+            const fileContent = buildCompletedShippingFile(completed, {
+              carrierCode,
+              shipMethod,
+              shipDate: shipDateStr,
+            });
 
-              // Tạo file content
-              const shipDateStr = buildShipDateString(new Date());
-              const fileContent = buildCompletedShippingFile(completed, {
-                carrierCode,
-                shipMethod,
-                shipDate: shipDateStr,
-              });
+            const filename = `fe_batch_${shopName.replace(/[^a-zA-Z0-9]/g, '_')}_${batch._id}.txt`;
 
-              const filename = `fe_batch_${shopName.replace(/[^a-zA-Z0-9]/g, '_')}_${batch._id}.txt`;
+            const task = {
+              type: "UPLOAD_TRACKING",
+              payload: {
+                batchId: batch._id,
+                machineId,
+                shopId,
+                label: batchLabel,
+                trackingData: completed.map(item => ({
+                  orderId: item.orderId,
+                  tracking: item.tracking,
+                  isFake: item.isFake,
+                  source: item.source
+                })),
+                stats: batch.stats,
 
-              const task = {
-                type: "UPLOAD_TRACKING",
-                payload: {
-                  batchId: batch._id,
-                  machineId,
-                  shopId,
-                  label: batchLabel,
-                  trackingData: completed.map(item => ({
-                    orderId: item.orderId,
-                    tracking: item.tracking,
-                    isFake: item.isFake,
-                    source: item.source
-                  })),
-                  stats: batch.stats,
+                file: {
+                  filename,
+                  content: fileContent,
+                  contentType: "text/tab-separated-values; charset=utf-8",
+                  size: Buffer.byteLength(fileContent, 'utf8')
+                },
 
-                  file: {
-                    filename,
-                    content: fileContent,
-                    contentType: "text/tab-separated-values; charset=utf-8",
-                    size: Buffer.byteLength(fileContent, 'utf8')
-                  },
+                uploadParams: {
+                  carrierCode,
+                  shipMethod,
+                  shipDate: shipDateStr
+                },
 
-                  uploadParams: {
-                    carrierCode,
-                    shipMethod,
-                    shipDate: shipDateStr
-                  },
+                autoGenerated: false,
+                reason: "fe_batch_creation",
+                requestedBy: "frontend",
+                timestamp: new Date().toISOString()
+              }
+            };
 
-                  autoGenerated: false,
-                  reason: "fe_batch_creation",
-                  requestedBy: "frontend",
-                  timestamp: new Date().toISOString()
-                }
-              };
-
-    
-
-              io.to(`machine:${machineId}`).emit("server:task", task);
-                 // Đánh dấu đã gửi
-              batch.uploadTaskSent = true;
-              batch.uploadTaskSentAt = new Date();
-              batch.uploadTaskSentBy = "frontend";
-              await batch.save();
-
-              autoTaskSent = true;
-
-              // Log
-              await RealtimeLog.create({
+            // Send task and update batch in parallel
+            taskPromise = Promise.all([
+              // Send socket task
+              new Promise((resolve) => {
+                io.to(`machine:${machineId}`).emit("server:task", task);
+                resolve();
+              }),
+              // Update batch
+              ShippingBatch.findByIdAndUpdate(batch._id, {
+                uploadTaskSent: true,
+                uploadTaskSentAt: new Date(),
+                uploadTaskSentBy: "frontend"
+              }),
+              // Create log
+              RealtimeLog.create({
                 shopId,
                 machineId,
                 label: batchLabel,
@@ -1798,14 +1801,19 @@ const createBatchFromOrders = async (req, res, next) => {
                 level: "info",
                 message: `Created batch from FE orders and sent upload task: ${completed.length} orders for shop ${shopName}`,
                 ts: new Date(),
-              });
-
-            }
-          } catch (taskError) {
+              })
+            ]).then(() => {
+              autoTaskSent = true;
+            }).catch(taskError => {
+              console.error(`⚠️ [TASK_ERROR] Failed to send upload task for batch ${batch._id}:`, taskError.message);
+            });
           }
         }
 
-        results.push({
+        // Wait for all async operations to complete
+        await Promise.all([syncPromise, taskPromise]);
+
+        return {
           shopId,
           shopName,
           batchId: batch._id,
@@ -1821,20 +1829,27 @@ const createBatchFromOrders = async (req, res, next) => {
             isFake: item.isFake,
             source: item.source
           }))
-        });
+        };
 
       } catch (shopError) {
-        results.push({
+        console.error(`❌ [CREATE_BATCH] Error processing shop ${shopId}:`, shopError.message);
+        return {
           shopId,
           success: false,
           message: shopError.message,
           orderCount: shopOrderIds.length
-        });
+        };
       }
-    }
+    });
 
-    const successCount = results.filter(r => r.success).length;
-    const totalOrdersProcessed = results.reduce((sum, r) => sum + (r.totalOrders || 0), 0);
+    // 🚀 OPTIMIZATION: Wait for all shops to be processed in parallel
+    const shopResults = await Promise.all(shopPromises);
+    const successfulBatches = shopResults.filter(r => r.success);
+
+    const successCount = shopResults.filter(r => r.success).length;
+    const totalOrdersProcessed = shopResults.reduce((sum, r) => sum + (r.totalOrders || 0), 0);
+
+    console.log(`✅ [CREATE_BATCH] Completed: ${successCount}/${shopIds.length} shops, ${totalOrdersProcessed} orders`);
 
     return res.status(201).json({
       ok: true,
@@ -1842,11 +1857,12 @@ const createBatchFromOrders = async (req, res, next) => {
       successfulBatches: successCount,
       failedBatches: shopIds.length - successCount,
       totalOrdersProcessed,
-      batches: results,
+      batches: shopResults,
       message: `Created ${successCount} batches for ${shopIds.length} shops with ${totalOrdersProcessed} total orders`
     });
 
   } catch (err) {
+    console.error(`❌ [CREATE_BATCH] Fatal error:`, err.message);
     next(err);
   }
 };
@@ -2971,6 +2987,241 @@ const updateOrderSubmissionStatusManually = async (req, res, next) => {
   }
 };
 
+/**
+ * ✅ Bulk remove orders from submission status (set submittedToAmazon = false)
+ * POST /api/shipping-batch/bulk-remove-submission
+ * Body: {
+ *   machineId: string,
+ *   orderIds: string[],
+ *   reason?: string
+ * }
+ */
+const bulkRemoveOrdersFromSubmission = async (req, res, next) => {
+  try {
+    const { machineId, orderIds = [], reason = "Manual removal" } = req.body;
+
+    if (!machineId) {
+      return res.status(400).json({
+        success: false,
+        message: "machineId is required"
+      });
+    }
+
+    if (!orderIds.length) {
+      return res.status(400).json({
+        success: false,
+        message: "orderIds array is required and cannot be empty"
+      });
+    }
+
+    console.log(`🔄 [BULK_REMOVE] Removing ${orderIds.length} orders from submission status for shop: ${machineId}`);
+    console.log(`📋 [BULK_REMOVE] Orders: ${orderIds.join(', ')}`);
+
+    // 1. Find all batches containing these orders
+    const affectedBatches = await ShippingBatch.find({
+      machineId,
+      "completed.orderId": { $in: orderIds }
+    });
+
+    console.log(`📊 [BULK_REMOVE] Found ${affectedBatches.length} batches containing these orders`);
+
+    if (!affectedBatches.length) {
+      return res.json({
+        success: true,
+        message: "No batches found containing these orders - they may already be unsubmitted",
+        processed: 0,
+        results: []
+      });
+    }
+
+    const results = [];
+    let totalRemoved = 0;
+
+    // 2. Process each batch
+    for (const batch of affectedBatches) {
+      const originalCompletedCount = batch.completed.length;
+      const originalFakeCount = batch.tracking_fakes.length;
+
+      // Remove orders from completed array
+      const removedOrders = [];
+      batch.completed = batch.completed.filter(completed => {
+        if (orderIds.includes(completed.orderId)) {
+          removedOrders.push(completed);
+          return false; // Remove from completed
+        }
+        return true; // Keep in completed
+      });
+
+      // Add removed orders to tracking_fakes (if they had tracking)
+      for (const removedOrder of removedOrders) {
+        if (removedOrder.tracking && !removedOrder.isFake) {
+          batch.tracking_fakes.push({
+            orderId: removedOrder.orderId,
+            tracking: removedOrder.tracking,
+            note: `Removed from submission: ${reason}`,
+            removedAt: new Date(),
+            originalBatchId: batch._id
+          });
+        }
+      }
+
+      // Update stats
+      batch.stats.totalOrders = batch.completed.length;
+      batch.stats.totalReal = batch.completed.filter(c => !c.isFake).length;
+      batch.stats.totalFake = batch.tracking_fakes.length;
+
+      // Add removal log
+      if (!batch.removalLog) batch.removalLog = [];
+      batch.removalLog.push({
+        removedAt: new Date(),
+        removedBy: "bulk_api",
+        reason,
+        removedOrderIds: removedOrders.map(o => o.orderId),
+        removedCount: removedOrders.length
+      });
+
+      await batch.save();
+
+      results.push({
+        batchId: batch._id,
+        batchLabel: batch.label,
+        batchType: batch.type,
+        originalCompletedCount,
+        newCompletedCount: batch.completed.length,
+        removedCount: removedOrders.length,
+        removedOrders: removedOrders.map(o => ({
+          orderId: o.orderId,
+          tracking: o.tracking,
+          isFake: o.isFake
+        }))
+      });
+
+      totalRemoved += removedOrders.length;
+    }
+
+    // 3. Update snapshots to reflect the changes
+    try {
+      console.log(`🔄 [BULK_REMOVE] Updating snapshots for shop: ${machineId}`);
+      await SnapshotAutoSyncService.bulkSyncShopSubmissionStatus(machineId);
+    } catch (syncError) {
+      console.error(`⚠️ [BULK_REMOVE] Failed to sync snapshots:`, syncError.message);
+    }
+
+    // 4. Log the bulk removal
+    await RealtimeLog.create({
+      machineId,
+      label: "Bulk Remove Submission",
+      action: "bulk_remove",
+      level: "info",
+      message: `Bulk removed ${totalRemoved} orders from submission status. Reason: ${reason}`,
+      ts: new Date(),
+    });
+
+    console.log(`✅ [BULK_REMOVE] Successfully removed ${totalRemoved} orders from ${affectedBatches.length} batches`);
+
+    return res.json({
+      success: true,
+      message: `Successfully removed ${totalRemoved} orders from submission status`,
+      processed: totalRemoved,
+      affectedBatches: affectedBatches.length,
+      results,
+      summary: {
+        totalOrdersRequested: orderIds.length,
+        totalOrdersRemoved: totalRemoved,
+        batchesModified: affectedBatches.length,
+        reason
+      }
+    });
+
+  } catch (error) {
+    console.error(`❌ [BULK_REMOVE] Error in bulk remove submission:`, error);
+    next(error);
+  }
+};
+
+/**
+ * ✅ Check which orders are currently submitted (for verification)
+ * POST /api/shipping-batch/check-submission-status
+ * Body: {
+ *   machineId: string,
+ *   orderIds: string[]
+ * }
+ */
+const checkOrdersSubmissionStatus = async (req, res, next) => {
+  try {
+    const { machineId, orderIds = [] } = req.body;
+
+    if (!machineId || !orderIds.length) {
+      return res.status(400).json({
+        success: false,
+        message: "machineId and orderIds are required"
+      });
+    }
+
+    console.log(`� [CHECK_SUBMInSSION] Checking submission status for ${orderIds.length} orders in shop: ${machineId}`);
+
+    // Find batches containing these orders
+    const submittedBatches = await ShippingBatch.find({
+      machineId,
+      "completed.orderId": { $in: orderIds }
+    }).lean();
+
+    const submissionMap = new Map();
+    const batchInfo = new Map();
+
+    for (const batch of submittedBatches) {
+      for (const completed of batch.completed || []) {
+        if (orderIds.includes(completed.orderId)) {
+          submissionMap.set(completed.orderId, {
+            submittedToAmazon: true,
+            batchId: batch._id,
+            batchType: batch.type,
+            batchLabel: batch.label,
+            submittedAt: batch.createdAt,
+            tracking: completed.tracking,
+            isFake: completed.isFake
+          });
+
+          if (!batchInfo.has(batch._id.toString())) {
+            batchInfo.set(batch._id.toString(), {
+              batchId: batch._id,
+              batchLabel: batch.label,
+              batchType: batch.type,
+              createdAt: batch.createdAt,
+              ordersInBatch: []
+            });
+          }
+          batchInfo.get(batch._id.toString()).ordersInBatch.push(completed.orderId);
+        }
+      }
+    }
+
+    const results = orderIds.map(orderId => ({
+      orderId,
+      submittedToAmazon: submissionMap.has(orderId),
+      submissionInfo: submissionMap.get(orderId) || null
+    }));
+
+    const summary = {
+      totalChecked: orderIds.length,
+      submitted: results.filter(r => r.submittedToAmazon).length,
+      notSubmitted: results.filter(r => !r.submittedToAmazon).length,
+      batchesFound: batchInfo.size
+    };
+
+    return res.json({
+      success: true,
+      results,
+      summary,
+      batches: Array.from(batchInfo.values())
+    });
+
+  } catch (error) {
+    console.error(`❌ [CHECK_SUBMISSION] Error checking submission status:`, error);
+    next(error);
+  }
+};
+
 // ✅ Cập nhật exports
 module.exports = {
   createBatchFromFile,
@@ -2995,5 +3246,10 @@ module.exports = {
   
   // ✅ Snapshot Auto Sync APIs
   bulkSyncSnapshotSubmissionStatus,
-  updateOrderSubmissionStatusManually
+  updateOrderSubmissionStatusManually,
+  
+  // ✅ NEW: Bulk submission management APIs
+  bulkRemoveOrdersFromSubmission,
+  checkOrdersSubmissionStatus,
+  quickRemoveOrderFromBatches
 };

@@ -109,4 +109,23 @@ router.put(
   shippingBatchController.updateOrderSubmissionStatusManually
 );
 
+// ✅ NEW: Bulk submission management routes
+// Bulk remove orders from submission status
+router.post(
+  "/bulk-remove-submission",
+  shippingBatchController.bulkRemoveOrdersFromSubmission
+);
+
+// Check submission status for multiple orders
+router.post(
+  "/check-submission-status",
+  shippingBatchController.checkOrdersSubmissionStatus
+);
+
+// ✅ Quick fix: Remove specific order from all batches
+router.delete(
+  "/remove-order/:machineId/:orderId",
+  shippingBatchController.quickRemoveOrderFromBatches
+);
+
 module.exports = router;
