@@ -3250,6 +3250,5 @@ module.exports = {
   
   // ✅ NEW: Bulk submission management APIs
   bulkRemoveOrdersFromSubmission,
-  checkOrdersSubmissionStatus,
-  quickRemoveOrderFromBatches
+  checkOrdersSubmissionStatus
 };

@@ -123,9 +123,10 @@ router.post(
 );
 
 // ✅ Quick fix: Remove specific order from all batches
-router.delete(
-  "/remove-order/:machineId/:orderId",
-  shippingBatchController.quickRemoveOrderFromBatches
-);
+// TODO: Implement quickRemoveOrderFromBatches function
+// router.delete(
+//   "/remove-order/:machineId/:orderId",
+//   shippingBatchController.quickRemoveOrderFromBatches
+// );
 
 module.exports = router;
