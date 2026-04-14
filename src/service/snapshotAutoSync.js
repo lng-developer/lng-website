@@ -8,8 +8,7 @@ class SnapshotAutoSyncService {
    */
   static async updateOrderSubmissionStatus(orderId, machineId, submissionInfo = null) {
     try {
-      console.log(`🔄 [AUTO_SYNC] Updating submission status for order: ${orderId} in shop: ${machineId}`);
-      
+       
       // Tìm tất cả snapshots chứa order này
       const snapshots = await OrderStatusSnapshot.find({
         machineId,
@@ -18,11 +17,9 @@ class SnapshotAutoSyncService {
       });
       
       if (snapshots.length === 0) {
-        console.log(`⚠️ [AUTO_SYNC] No snapshots found containing order: ${orderId}`);
-        return { updated: 0, snapshots: [] };
+              return { updated: 0, snapshots: [] };
       }
       
-      console.log(`📊 [AUTO_SYNC] Found ${snapshots.length} snapshots to update`);
       
       const updateResults = [];
       
@@ -32,8 +29,7 @@ class SnapshotAutoSyncService {
           const orderIndex = snapshot.orders.findIndex(o => o.orderId === orderId);
           
           if (orderIndex === -1) {
-            console.log(`⚠️ [AUTO_SYNC] Order ${orderId} not found in snapshot ${snapshot.snapshotId}`);
-            continue;
+                  continue;
           }
           
           // Xác định trạng thái submission mới
@@ -53,9 +49,7 @@ class SnapshotAutoSyncService {
             // Save snapshot
             await snapshot.save();
             
-            console.log(`✅ [AUTO_SYNC] Updated order ${orderId} in snapshot ${snapshot.snapshotId}: ${currentStatus} → ${isSubmitted}`);
-            
-            updateResults.push({
+                updateResults.push({
               snapshotId: snapshot.snapshotId,
               orderId,
               oldStatus: currentStatus,
@@ -63,8 +57,7 @@ class SnapshotAutoSyncService {
               updated: true
             });
           } else {
-            console.log(`ℹ️ [AUTO_SYNC] Order ${orderId} in snapshot ${snapshot.snapshotId} already has correct status: ${isSubmitted}`);
-            updateResults.push({
+                 updateResults.push({
               snapshotId: snapshot.snapshotId,
               orderId,
               status: isSubmitted,
@@ -84,8 +77,7 @@ class SnapshotAutoSyncService {
       }
       
       const updatedCount = updateResults.filter(r => r.updated).length;
-      console.log(`✅ [AUTO_SYNC] Completed: ${updatedCount}/${snapshots.length} snapshots updated for order ${orderId}`);
-      
+         
       return {
         updated: updatedCount,
         total: snapshots.length,
@@ -103,23 +95,20 @@ class SnapshotAutoSyncService {
    */
   static async updateBatchSubmissionStatus(batchId, machineId) {
     try {
-      console.log(`🔄 [AUTO_SYNC] Processing batch submission update: ${batchId} for shop: ${machineId}`);
-      
+        
       // Lấy thông tin batch
       const batch = await ShippingBatch.findById(batchId).lean();
       
       if (!batch) {
-        console.log(`⚠️ [AUTO_SYNC] Batch not found: ${batchId}`);
+       
         return { updated: 0, orders: [] };
       }
       
       if (!batch.completed || batch.completed.length === 0) {
-        console.log(`⚠️ [AUTO_SYNC] No completed orders in batch: ${batchId}`);
-        return { updated: 0, orders: [] };
+              return { updated: 0, orders: [] };
       }
       
-      console.log(`📊 [AUTO_SYNC] Processing ${batch.completed.length} orders from batch ${batchId}`);
-      
+        
       const submissionInfo = {
         batchId: batch._id,
         batchType: batch.type,
@@ -155,8 +144,7 @@ class SnapshotAutoSyncService {
       
       const totalUpdated = results.reduce((sum, r) => sum + (r.updated || 0), 0);
       
-      console.log(`✅ [AUTO_SYNC] Batch ${batchId} processing completed: ${totalUpdated} total snapshot updates`);
-      
+         
       return {
         batchId,
         totalUpdated,
@@ -165,8 +153,7 @@ class SnapshotAutoSyncService {
       };
       
     } catch (error) {
-      console.error(`❌ [AUTO_SYNC] Error in updateBatchSubmissionStatus:`, error);
-      throw error;
+         throw error;
     }
   }
   
@@ -175,18 +162,14 @@ class SnapshotAutoSyncService {
    */
   static async updateOrderUnsubmission(orderId, machineId) {
     try {
-      console.log(`🔄 [AUTO_SYNC] Processing order unsubmission: ${orderId} in shop: ${machineId}`);
-      
+       
       // Update với submissionInfo = null để đánh dấu chưa submit
       const result = await this.updateOrderSubmissionStatus(orderId, machineId, null);
-      
-      console.log(`✅ [AUTO_SYNC] Order ${orderId} marked as unsubmitted in ${result.updated} snapshots`);
-      
+        
       return result;
       
     } catch (error) {
-      console.error(`❌ [AUTO_SYNC] Error in updateOrderUnsubmission:`, error);
-      throw error;
+        throw error;
     }
   }
   
@@ -194,9 +177,7 @@ class SnapshotAutoSyncService {
    * Bulk sync tất cả orders trong một shop
    */
   static async bulkSyncShopSubmissionStatus(machineId) {
-    try {
-      console.log(`🔄 [AUTO_SYNC] Starting bulk sync for shop: ${machineId}`);
-      
+    try {   
       // Lấy tất cả snapshots của shop
       const snapshots = await OrderStatusSnapshot.find({
         machineId,
@@ -204,11 +185,8 @@ class SnapshotAutoSyncService {
       }).sort({ createdAt: -1 });
       
       if (snapshots.length === 0) {
-        console.log(`⚠️ [AUTO_SYNC] No snapshots found for shop: ${machineId}`);
-        return { updated: 0, snapshots: 0 };
+               return { updated: 0, snapshots: 0 };
       }
-      
-      console.log(`📊 [AUTO_SYNC] Found ${snapshots.length} snapshots for bulk sync`);
       
       // Lấy tất cả submitted orders từ ShippingBatch
       const submittedBatches = await ShippingBatch.find({
@@ -227,9 +205,7 @@ class SnapshotAutoSyncService {
           });
         }
       }
-      
-      console.log(`📊 [AUTO_SYNC] Found ${submissionMap.size} submitted orders in ShippingBatch`);
-      
+         
       let totalUpdated = 0;
       const results = [];
       
@@ -256,9 +232,7 @@ class SnapshotAutoSyncService {
             snapshot.stats = this.recalculateStats(snapshot.orders);
             await snapshot.save();
             totalUpdated++;
-            
-            console.log(`✅ [AUTO_SYNC] Updated snapshot: ${snapshot.snapshotId}`);
-          }
+                     }
           
           results.push({
             snapshotId: snapshot.snapshotId,
@@ -275,8 +249,6 @@ class SnapshotAutoSyncService {
           });
         }
       }
-      
-      console.log(`✅ [AUTO_SYNC] Bulk sync completed: ${totalUpdated}/${snapshots.length} snapshots updated`);
       
       return {
         totalSnapshots: snapshots.length,
@@ -310,15 +282,13 @@ class SnapshotAutoSyncService {
    */
   static async scheduledSyncAllShops() {
     try {
-      console.log(`🔄 [AUTO_SYNC] Starting scheduled sync for all shops`);
-      
+       
       // Lấy danh sách shops có snapshots
       const shopsWithSnapshots = await OrderStatusSnapshot.distinct('machineId', {
         isSuccess: true
       });
       
-      console.log(`📊 [AUTO_SYNC] Found ${shopsWithSnapshots.length} shops with snapshots`);
-      
+       
       const results = [];
       
       for (const machineId of shopsWithSnapshots) {
@@ -340,9 +310,7 @@ class SnapshotAutoSyncService {
       }
       
       const successCount = results.filter(r => r.success).length;
-      console.log(`✅ [AUTO_SYNC] Scheduled sync completed: ${successCount}/${shopsWithSnapshots.length} shops synced`);
-      
-      return {
+       return {
         totalShops: shopsWithSnapshots.length,
         successCount,
         results

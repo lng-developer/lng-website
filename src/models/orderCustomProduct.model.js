@@ -315,4 +315,12 @@ const orderCustomProductSchema = new mongoose.Schema({
 // Tối ưu truy vấn theo orderId + orderItemId
 orderCustomProductSchema.index({ orderId: 1, "items.orderItemId": 1 });
 
+// 🚀 PERFORMANCE: Index for createBatchFromOrders API
+orderCustomProductSchema.index({ shopId: 1, orderId: 1 });
+orderCustomProductSchema.index({ shopId: 1, status: 1, createdAt: -1 });
+
+// 🚀 PERFORMANCE: Index for tracking queries
+orderCustomProductSchema.index({ "items.tracking_info.tracking": 1 });
+orderCustomProductSchema.index({ shopId: 1, "items.tracking_info.tracking": 1 });
+
 module.exports = mongoose.model("OrderCustomProduct", orderCustomProductSchema);
