@@ -33,7 +33,6 @@ const ConfigAuto = require("./configAuto.model")
 const AutoJobLog = require("./autoJobLog.model")
 const ExtensionLog = require("./extensionLog.model")
 const OrderStatusSnapshot = require("./orderStatusSnapshot.model")
-
 // Cau hinh mongoose dang global
 mongoose.Promise = global.Promise;
 // Dinh nghia doi tuong DB
