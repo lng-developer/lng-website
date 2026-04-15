@@ -949,7 +949,7 @@ async function requestExtension(req, res) {
     await jobLog.addLog("info", `Sending task to shop :${shopId} and type :`, { type });
 
     if (!shopId || !machineId) {
-      await jobLog.addLog("error", `no shopId or no machineId`, { type });
+      await jobLog.setError(new Error("shopId & machineId required"));
       return res
         .status(400)
         .json({ ok: false, message: "shopId & machineId required" });
@@ -957,7 +957,7 @@ async function requestExtension(req, res) {
 
     const io = req.app.get("io");
     if (!io) {
-      await jobLog.addLog("error", `io missing`, { type });
+      await jobLog.setError(new Error("io missing"));
       return res.status(500).json({ ok: false, message: "io missing" });
     }
 
@@ -993,15 +993,13 @@ async function requestExtension(req, res) {
       ts: new Date(),
     });
 
-    const endTime = new Date();
-    const duration = endTime - startTime;
-    await jobLog.addLog("success", `success            sent task`, { e });
+    // const endTime = new Date();
+    // const duration = endTime - startTime;
+    await jobLog.setSuccess({ ok: true }, { processed: 1, success: 1, failed: 0 }); // ← lưu DB
 
     return res.json({ ok: true });
   } catch (e) {
-    const endTime = new Date();
-    const duration = endTime - startTime;
-    await jobLog.addLog("error", `error`, { e });
+     if (jobLog) await jobLog.setError(e);
     return res.status(500).json({ ok: false, message: e.message });
   }
 }
