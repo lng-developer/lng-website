@@ -222,7 +222,7 @@ class CronJobService {
       const activeConfigs = await ConfigAuto.find({ status: true }); // status: true thay vì "active"
       
    
-      
+
       for (const config of activeConfigs) {
         await this.addAutoJob(config);
       }
@@ -733,7 +733,7 @@ class CronJobService {
       
       const duration = Date.now() - startTime;
       
-  
+      
       // Emit socket event nếu có
       if (this.io) {
         this.io.emit('orderStatusSyncCompleted', {

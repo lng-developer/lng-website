@@ -141,9 +141,9 @@ registerSocketHandlers({ app, io });
 app.use("/api/ext", extRoutes);
 
 // ===== Khởi tạo Cron Jobs
-// const cronJobService = require("./src/service/cronJobs");
-// cronJobService.setSocketIO(io); // Truyền Socket.IO instance vào cron jobs
-// cronJobService.initializeJobs();
+const cronJobService = require("./src/service/cronJobs");
+cronJobService.setSocketIO(io); // Truyền Socket.IO instance vào cron jobs
+cronJobService.initializeJobs();
 
 // Graceful shutdown cho cron jobs
 // const originalShutdown = shutdown;

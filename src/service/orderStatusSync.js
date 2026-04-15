@@ -20,10 +20,6 @@ class OrderStatusSyncService {
     const snapshotId = `${machineId}_${Date.now()}_${uuidv4().slice(0, 8)}`;
     
     try {
-      console.log(`🔄 [SYNC] ===== Starting order status sync =====`);
-      console.log(`🔄 [SYNC] Shop: ${machineId}`);
-      console.log(`🔄 [SYNC] Snapshot ID: ${snapshotId}`);
-      console.log(`🔄 [SYNC] Options:`, JSON.stringify(options, null, 2));
       
       const {
         limit = 1000,
@@ -60,36 +56,25 @@ class OrderStatusSyncService {
         .limit(Number(limit))
         .lean();
 
-      console.log(`📊 [SYNC] Found ${allOrders.length} orders for shop ${machineId}`);
-      console.log(`📊 [SYNC] Filter applied:`, JSON.stringify(orderFilter, null, 2));
-
+      
       if (!allOrders.length) {
-        console.log(`⚠️ [SYNC] No orders found for shopId: ${machineId}`);
-        console.log(`⚠️ [SYNC] This could be normal if shop has no orders in the specified criteria`);
+      
         return await this.saveEmptySnapshot(snapshotId, machineId, options, startTime);
       }
 
-      // 3. Process orders (same logic as checkOrdersStatus)
-      console.log(`🔄 [SYNC] Processing orders details...`);
+      // 3. Process orders (same logic as checkOrdersStatus
       const ordersWithDetails = await this.processOrdersDetails(allOrders);
-      console.log(`📊 [SYNC] Processed ${ordersWithDetails.length} orders with details`);
-      
+       
       // 4. Check submission status
-      console.log(`🔄 [SYNC] Checking submission status...`);
       const finalOrders = await this.checkSubmissionStatus(machineId, ordersWithDetails);
-      console.log(`📊 [SYNC] Checked submission status for ${finalOrders.length} orders`);
-      
+        
       // 5. Apply filter
-      console.log(`🔄 [SYNC] Applying filter type: ${filterType}`);
       const filteredOrders = this.applyFilterType(finalOrders, filterType);
-      console.log(`📊 [SYNC] After filtering: ${filteredOrders.length} orders`);
-      
+       
       // 6. Calculate stats
       const stats = this.calculateStats(allOrders, finalOrders, filteredOrders);
-      console.log(`📊 [SYNC] Stats calculated:`, JSON.stringify(stats, null, 2));
-      
+         
       // 7. Save snapshot
-      console.log(`💾 [SYNC] Saving snapshot to database...`);
       const snapshot = await this.saveSnapshot({
         snapshotId,
         machineId,
@@ -102,24 +87,12 @@ class OrderStatusSyncService {
       });
 
       const duration = Date.now() - startTime;
-      console.log(`✅ [SYNC] ===== Sync completed successfully =====`);
-      console.log(`✅ [SYNC] Shop: ${machineId}`);
-      console.log(`✅ [SYNC] Snapshot ID: ${snapshotId}`);
-      console.log(`✅ [SYNC] Duration: ${duration}ms`);
-      console.log(`✅ [SYNC] Orders saved: ${filteredOrders.length}`);
-      console.log(`✅ [SYNC] Database ID: ${snapshot._id}`);
-      console.log(`✅ [SYNC] ==========================================`);
+     
       return snapshot;
 
     } catch (error) {
       const duration = Date.now() - startTime;
-      console.error(`❌ [SYNC] ===== Sync failed =====`);
-      console.error(`❌ [SYNC] Shop: ${machineId}`);
-      console.error(`❌ [SYNC] Snapshot ID: ${snapshotId}`);
-      console.error(`❌ [SYNC] Duration: ${duration}ms`);
-      console.error(`❌ [SYNC] Error:`, error.message);
-      console.error(`❌ [SYNC] Stack:`, error.stack);
-      console.error(`❌ [SYNC] ========================`);
+  
       
       // Save error snapshot
       return await this.saveErrorSnapshot(snapshotId, machineId, options, error, startTime);
@@ -131,17 +104,12 @@ class OrderStatusSyncService {
    */
   static async syncAllActiveShops(options = {}) {
     try {
-      console.log(`🔄 [SYNC_ALL] ===== Starting sync for all active shops =====`);
-      console.log(`🔄 [SYNC_ALL] Timestamp: ${new Date().toISOString()}`);
-      console.log(`🔄 [SYNC_ALL] Options:`, JSON.stringify(options, null, 2));
-      
+       
       // Get all active shops
       const activeShops = await Shop.find({ 
         status: { $ne: 'inactive' } 
       }).select('_id name store').lean();
-      
-      console.log(`📊 [SYNC_ALL] Found ${activeShops.length} active shops`);
-      
+         
       if (activeShops.length === 0) {
         console.log(`⚠️ [SYNC_ALL] No active shops found to sync`);
         return {
@@ -153,24 +121,21 @@ class OrderStatusSyncService {
       }
       
       // Log shop details
-      activeShops.forEach((shop, index) => {
-        console.log(`📋 [SYNC_ALL] Shop ${index + 1}: ${shop._id} - ${shop.name || 'No name'} (${shop.store || 'No store'})`);
-      });
-      
+     
       const results = [];
       
       // Sync từng shop (có thể chạy parallel nếu cần)
       for (const shop of activeShops) {
         try {
-          console.log(`🔄 [SYNC_ALL] Processing shop ${shop._id} (${shop.name || 'No name'})...`);
+          
           const result = await this.syncOrderStatusForShop(shop._id.toString(), {
             ...options,
             syncType: 'auto'
           });
           results.push({ shopId: shop._id, shopName: shop.name, success: true, result });
-          console.log(`✅ [SYNC_ALL] Shop ${shop._id} completed successfully`);
+          
         } catch (error) {
-          console.error(`❌ [SYNC_ALL] Failed to sync shop ${shop._id} (${shop.name}):`, error.message);
+         
           results.push({ shopId: shop._id, shopName: shop.name, success: false, error: error.message });
         }
       }
@@ -178,13 +143,6 @@ class OrderStatusSyncService {
       const successCount = results.filter(r => r.success).length;
       const failedCount = results.filter(r => !r.success).length;
       
-      console.log(`✅ [SYNC_ALL] ===== Sync all completed =====`);
-      console.log(`✅ [SYNC_ALL] Total shops: ${activeShops.length}`);
-      console.log(`✅ [SYNC_ALL] Successful: ${successCount}`);
-      console.log(`✅ [SYNC_ALL] Failed: ${failedCount}`);
-      console.log(`✅ [SYNC_ALL] Success rate: ${((successCount/activeShops.length)*100).toFixed(1)}%`);
-      console.log(`✅ [SYNC_ALL] Timestamp: ${new Date().toISOString()}`);
-      console.log(`✅ [SYNC_ALL] =====================================`);
       
       return {
         totalShops: activeShops.length,
@@ -194,11 +152,7 @@ class OrderStatusSyncService {
       };
       
     } catch (error) {
-      console.error(`❌ [SYNC_ALL] ===== Critical error in syncAllActiveShops =====`);
-      console.error(`❌ [SYNC_ALL] Error:`, error.message);
-      console.error(`❌ [SYNC_ALL] Stack:`, error.stack);
-      console.error(`❌ [SYNC_ALL] Timestamp: ${new Date().toISOString()}`);
-      console.error(`❌ [SYNC_ALL] ================================================`);
+    
       throw error;
     }
   }
