@@ -2678,7 +2678,7 @@ const checkOrdersStatusHybrid = async (machineId, options) => {
   }).sort({ createdAt: -1 }).lean();
   
   if (!latestSnapshot) {
-    console.log(`⚠️ [HYBRID] No snapshot found, falling back to real-time`);
+    console.log(`⚠️ [HYBRID]1 No snapshot found, falling back to real-time`);
     return await checkOrdersStatusRealTime(machineId, options);
   }
   
