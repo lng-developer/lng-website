@@ -140,18 +140,18 @@ app.set("presence", presence);
 registerSocketHandlers({ app, io });
 app.use("/api/ext", extRoutes);
 
-// ===== Khởi tạo Cron Jobs
-const cronJobService = require("./src/service/cronJobs");
-cronJobService.setSocketIO(io); // Truyền Socket.IO instance vào cron jobs
-cronJobService.initializeJobs();
+// // ===== Khởi tạo Cron Jobs
+// const cronJobService = require("./src/service/cronJobs");
+// cronJobService.setSocketIO(io); // Truyền Socket.IO instance vào cron jobs
+// cronJobService.initializeJobs();
 
-// Graceful shutdown cho cron jobs
-const originalShutdown = shutdown;
-function shutdown() {
-  console.log('� [CRON] Stopping all cron jobs...');
-  cronJobService.stopAllJobs();
-  originalShutdown();
-}
+// // Graceful shutdown cho cron jobs
+// const originalShutdown = shutdown;
+// function shutdown() {
+//   console.log('� [CRON] Stopping all cron jobs...');
+//   cronJobService.stopAllJobs();
+//   originalShutdown();
+// }
 
 // ===== Error handler
 app.use((err, _req, res, _next) => {
