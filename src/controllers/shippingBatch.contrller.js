@@ -2782,7 +2782,7 @@ const checkOrdersStatusSnapshotPriority = async (machineId, options) => {
 /**
  * ✅ Mode 4: Real-time - Logic gốc
  */
-const checkOrdersStatusRealTime = async (machineId, options) => {
+async function checkOrdersStatusRealTime(machineId, options) {
   const { limit, fromDate, toDate, status, filterType } = options;
   
   console.log(`⚡ [REAL_TIME] Using real-time query for shop: ${machineId}`);
@@ -2921,7 +2921,7 @@ const checkOrdersStatusRealTime = async (machineId, options) => {
     dataSource: 'real-time',
     filter: { machineId, limit, fromDate, toDate, status, filterType },
   };
-};
+}
 
 /**
  * Helper function để process orders cho hybrid mode
