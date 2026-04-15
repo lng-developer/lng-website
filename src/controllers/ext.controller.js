@@ -2,7 +2,7 @@ const db = require("../models");
 const Shop = db.shop;
 const RealtimeLog = db.RealtimeLog;
 const OrderCustomProduct = db.orderCustomProduct;
-
+const AutoJobLog = require("../models/autoJobLog.model");
 const mongoose = require("mongoose");
 const axios = require("axios").default;
 const qs = require("querystring");
@@ -702,10 +702,6 @@ async function updateOrderByVendors(orderId, vpidToVendorPrefetched = null) {
   );
 
   // --- DIAGNOSTIC LOG (xoá sau khi debug xong) ---
-  console.log(`[DIAG][${orderId}] vpidSet=`, [...vpidSet]);
-  console.log(`[DIAG][${orderId}] vpidToVendor=`, [...vpidToVendor.entries()]);
-  console.log(`[DIAG][${orderId}] groups=`, JSON.stringify(groups));
-  console.log(`[DIAG][${orderId}] vendorKeys=`, vendorKeys);
   for (const it of doc.items || []) {
     console.log(`[DIAG][${orderId}] item tracking_info=`, JSON.stringify(it?.tracking_info));
   }
@@ -749,8 +745,7 @@ async function updateOrderByVendors(orderId, vpidToVendorPrefetched = null) {
 }
 
 async function runBatch({ max = 100, dryRun = false } = {}) {
-  console.log(`🔍 [BATCH] Starting batch processing with max=${max}, dryRun=${dryRun}`);
-  
+
   const candidates = await OrderCustomProduct.find({
     status: { $ne: "Shipped" },
     "items.cost_breakdown.vendorProductId": { $exists: true, $ne: null },
@@ -759,8 +754,6 @@ async function runBatch({ max = 100, dryRun = false } = {}) {
     .limit(max)
     .lean();
 
-  console.log(`📋 [BATCH] Found ${candidates.length} candidate orders`);
-
   const vpidSet = new Set();
   for (const o of candidates) {
     for (const it of o.items || []) {
@@ -768,8 +761,6 @@ async function runBatch({ max = 100, dryRun = false } = {}) {
       if (vpid) vpidSet.add(String(vpid));
     }
   }
-  
-  console.log(`🔗 [BATCH] Building vendor maps for ${vpidSet.size} vendor products`);
   const vpidToVendor = await buildVendorMapsFromVpidSet(vpidSet);
 
   const knownKeys = new Set([
@@ -785,7 +776,6 @@ async function runBatch({ max = 100, dryRun = false } = {}) {
     return Object.keys(groups).some((k) => knownKeys.has(k));
   });
 
-  console.log(`✅ [BATCH] Filtered to ${filtered.length} orders with known vendors`);
 
   if (dryRun) {
     console.log(`🧪 [BATCH] DRY RUN mode - returning order list without processing`);
@@ -804,25 +794,17 @@ async function runBatch({ max = 100, dryRun = false } = {}) {
     };
   }
 
-  console.log(`🚀 [BATCH] Processing ${filtered.length} orders...`);
   let ok = 0,
     fail = 0;
   for (const o of filtered) {
     try {
       const r = await updateOrderByVendors(o.orderId, vpidToVendor);
-      if (DEBUG || NODE_ENV !== "test") {
-        console.log(
-          `✅ [BATCH] ${o.orderId} | itemsChanged=${r.updatedItems} | orderStatusChanged=${r.orderStatusChanged}`
-        );
-      }
       ok++;
     } catch (err) {
-      console.error(`❌ [BATCH] ${o.orderId}: ${err.message}`);
       fail++;
     }
   }
-  
-  console.log(`🏁 [BATCH] Completed: ${ok} success, ${fail} failed, ${filtered.length} total`);
+
   return { ok, fail, scanned: filtered.length };
 }
 
@@ -890,42 +872,23 @@ const vendorSyncList = async (req, res) => {
 const vendorSyncBatch = async (req, res) => {
   const startTime = new Date();
   const isAutoCall = !req.headers['user-agent']; // Auto calls không có user-agent
-  
+
   try {
     const { max = 100, dryRun = false } = req.body || {};
-    
-    // Log bắt đầu
-    console.log(`🚀 [VENDOR-SYNC][${startTime.toISOString()}] Starting vendorSyncBatch`);
-    console.log(`📋 [VENDOR-SYNC] Type: ${isAutoCall ? '🤖 AUTO' : '👤 MANUAL'}`);
-    console.log(`📋 [VENDOR-SYNC] Config: max=${max}, dryRun=${dryRun}`);
-    
+
     const result = await runBatch({
       max: Number(max) || 100,
       dryRun: Boolean(dryRun),
     });
-    
+
     const endTime = new Date();
     const duration = endTime - startTime;
-    
-    // Log kết quả
-    console.log(`✅ [VENDOR-SYNC][${endTime.toISOString()}] Completed successfully`);
-    console.log(`📊 [VENDOR-SYNC] Results: ok=${result.ok}, fail=${result.fail}, scanned=${result.scanned}`);
-    console.log(`⏱️  [VENDOR-SYNC] Duration: ${duration}ms`);
-    
-    if (result.mode === 'dry-run') {
-      console.log(`🧪 [VENDOR-SYNC] DRY RUN - Orders found: ${result.orderIds?.length || 0}`);
-    }
-    
+
     return res.json({ ok: true, processedOrders: result.scanned, ...result });
   } catch (e) {
     const endTime = new Date();
     const duration = endTime - startTime;
-    
-    // Log lỗi
-    console.error(`❌ [VENDOR-SYNC][${endTime.toISOString()}] Failed after ${duration}ms`);
-    console.error(`❌ [VENDOR-SYNC] Error: ${e.message}`);
-    console.error(`❌ [VENDOR-SYNC] Stack:`, e.stack);
-    
+
     return res.status(500).json({ ok: false, message: e.message });
   }
 };
@@ -962,13 +925,13 @@ const pullAllOrder = async (req, res) => {
 };
 
 async function requestExtension(req, res) {
+
+
+
   const startTime = new Date();
   const isAutoCall = !req.headers['user-agent']; // Auto calls không có user-agent
-  
   try {
-    console.log(`🚀 [REQUEST-EXT][${startTime.toISOString()}] Starting requestExtension`);
-    console.log(`📋 [REQUEST-EXT] Type: ${isAutoCall ? '🤖 AUTO' : '👤 MANUAL'}`);
-    
+
     const {
       shopId,
       machineId,
@@ -977,11 +940,16 @@ async function requestExtension(req, res) {
       type,
       payload,
     } = req.body || {};
-    
-    console.log(`📋 [REQUEST-EXT] Shop: ${shopId}, Machine: ${machineId}, Task: ${type}`);
-    
+    const jobLog = await AutoJobLog.createExecution(
+      "autoRequestExtension",   // jobId
+      "autoRequestExtension",   // jobType (phải nằm trong enum)
+      { type, payload }         // config
+    );
+
+    await jobLog.addLog("info", `Sending task to shop :${shopId} and type :`, { type });
+
     if (!shopId || !machineId) {
-      console.log(`❌ [REQUEST-EXT] Missing required fields: shopId=${shopId}, machineId=${machineId}`);
+      await jobLog.setError(new Error("shopId & machineId required"));
       return res
         .status(400)
         .json({ ok: false, message: "shopId & machineId required" });
@@ -989,16 +957,14 @@ async function requestExtension(req, res) {
 
     const io = req.app.get("io");
     if (!io) {
-      console.error(`❌ [REQUEST-EXT] Socket.IO not available`);
+      await jobLog.setError(new Error("io missing"));
       return res.status(500).json({ ok: false, message: "io missing" });
     }
 
     const task = { type: type, payload: payload };
-    console.log(`📤 [REQUEST-EXT] Sending task to machine:${machineId}`, { type, payload });
-    
     // Emit task
     io.to(`machine:${machineId}`).emit("server:task", task);
-    console.log(`✅ [REQUEST-EXT] Task emitted successfully`);
+
 
     let message = "";
 
@@ -1027,21 +993,13 @@ async function requestExtension(req, res) {
       ts: new Date(),
     });
 
-    const endTime = new Date();
-    const duration = endTime - startTime;
-    
-    console.log(`✅ [REQUEST-EXT][${endTime.toISOString()}] Completed successfully`);
-    console.log(`⏱️  [REQUEST-EXT] Duration: ${duration}ms`);
+    // const endTime = new Date();
+    // const duration = endTime - startTime;
+    await jobLog.setSuccess({ ok: true }, { processed: 1, success: 1, failed: 0 }); // ← lưu DB
 
     return res.json({ ok: true });
   } catch (e) {
-    const endTime = new Date();
-    const duration = endTime - startTime;
-    
-    console.error(`❌ [REQUEST-EXT][${endTime.toISOString()}] Failed after ${duration}ms`);
-    console.error(`❌ [REQUEST-EXT] Error: ${e.message}`);
-    console.error(`❌ [REQUEST-EXT] Stack:`, e.stack);
-    
+     if (jobLog) await jobLog.setError(e);
     return res.status(500).json({ ok: false, message: e.message });
   }
 }
@@ -1054,10 +1012,15 @@ async function requestExtension(req, res) {
 const autoRequestExtensionAll = async (req, res) => {
   const startTime = new Date();
   const isAutoCall = !req.headers['user-agent']; // Auto calls không có user-agent
-  
+
   try {
     let { type, payload, action = "auto", label = "Auto Request" } = req.body || {};
-    
+
+    // ✅ Convert null payload to empty object
+    if (payload === null || payload === undefined) {
+      payload = {};
+    }
+
     if (!type) {
       return res.status(400).json({ ok: false, message: "type required" });
     }
@@ -1067,35 +1030,23 @@ const autoRequestExtensionAll = async (req, res) => {
       const yesterday = new Date();
       yesterday.setDate(yesterday.getDate() - 1);
       const dateString = yesterday.toISOString().split('T')[0]; // Format: YYYY-MM-DD
-      
+      const payloadsent = {};
       // Merge payload với date
       payload = {
         ...payload,
         date: dateString
       };
-      
-      console.log(`� [AUTO-REQUEST] Added date for IMPORT_ADS_SPEND: ${dateString}`);
     }
 
-    // Log bắt đầu
-    console.log(`🚀 [AUTO-REQUEST][${startTime.toISOString()}] Starting autoRequestExtensionAll`);
-    console.log(`📋 [AUTO-REQUEST] Type: ${isAutoCall ? '🤖 AUTO' : '👤 MANUAL'}`);
-    console.log(`📋 [AUTO-REQUEST] Task: type=${type}, action=${action}`);
-    if (payload) {
-      console.log(`📋 [AUTO-REQUEST] Payload:`, payload);
-    }
-    
+
     // Lấy tất cả shops từ database
     const shops = await Shop.find({ status: { $ne: 'inactive' } })
       .select({ _id: 1, name: 1, store: 1 })
       .lean();
-    
-    console.log(`📊 [AUTO-REQUEST] Found ${shops.length} active shops`);
-    
     if (shops.length === 0) {
-      console.log(`⚠️  [AUTO-REQUEST] No active shops found`);
-      return res.json({ 
-        ok: true, 
+
+      return res.json({
+        ok: true,
         message: "No active shops found",
         processed: 0,
         results: []
@@ -1118,10 +1069,9 @@ const autoRequestExtensionAll = async (req, res) => {
       const shopId = String(shop._id);
       const machineId = shopId; // shopId và machineId giống nhau
       const shopName = shop.name || shop.store || `Shop ${shopId}`;
-      
+
       try {
-        console.log(`📤 [AUTO-REQUEST] Processing shop: ${shopName} (${shopId})`);
-        
+
         // Gọi requestExtension cho từng shop
         const mockReq = {
           body: {
@@ -1135,17 +1085,18 @@ const autoRequestExtensionAll = async (req, res) => {
           headers: {}, // Không có user-agent để đánh dấu là auto call
           app: req.app // Truyền app object để có thể get io
         };
-        
+
         const mockRes = {
           json: (data) => data,
           status: (code) => ({
             json: (data) => ({ statusCode: code, ...data })
           })
         };
-        
+
+
         // Gọi requestExtension trực tiếp (không require lại)
         const result = await requestExtension(mockReq, mockRes);
-        
+
         if (result.ok) {
           results.push({
             shopId,
@@ -1154,34 +1105,28 @@ const autoRequestExtensionAll = async (req, res) => {
             message: `Task sent successfully`
           });
           successCount++;
-          console.log(`✅ [AUTO-REQUEST] Success: ${shopName}`);
+
         } else {
           throw new Error(result.message || 'Unknown error');
         }
-        
+
       } catch (error) {
-        console.error(`❌ [AUTO-REQUEST] Failed for shop ${shopName}:`, error.message);
-        
+
         results.push({
           shopId,
           shopName,
           success: false,
           message: error.message
         });
-        
+
         failCount++;
       }
     }
 
     const endTime = new Date();
     const duration = endTime - startTime;
-    
-    // Log kết quả
-    console.log(`✅ [AUTO-REQUEST][${endTime.toISOString()}] Completed`);
-    console.log(`📊 [AUTO-REQUEST] Results: success=${successCount}, failed=${failCount}, total=${shops.length}`);
-    console.log(`⏱️  [AUTO-REQUEST] Duration: ${duration}ms`);
-    
-    return res.json({ 
+
+    return res.json({
       ok: true,
       processed: shops.length,
       success: successCount,
@@ -1189,15 +1134,12 @@ const autoRequestExtensionAll = async (req, res) => {
       results,
       duration: `${duration}ms`
     });
-    
+
   } catch (e) {
     const endTime = new Date();
     const duration = endTime - startTime;
-    
-    // Log lỗi
-    console.error(`❌ [AUTO-REQUEST][${endTime.toISOString()}] Failed after ${duration}ms`);
-    console.error(`❌ [AUTO-REQUEST] Error: ${e.message}`);
-    
+
+
     return res.status(500).json({ ok: false, message: e.message });
   }
 };
