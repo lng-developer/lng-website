@@ -99,4 +99,10 @@ router.put(
   scaleController.resetScaleForOrdersBulk
 );
 
+router.put(
+  "/orders/:orderId/assign-cs",
+  authenticateToken,
+  authorizeRoles("Admin", "Design Leader"),
+  scaleController.assignOrderToCS
+);
 module.exports = router;

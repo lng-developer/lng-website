@@ -310,6 +310,29 @@ const orderCustomProductSchema = new mongoose.Schema({
     ref: "Vendor",
     default: null,
   },
+  csAssigneeId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: "User",
+    default: null,
+  },
+
+  csAssignedBy: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: "User",
+    default: null,
+  },
+
+  csAssignedAt: {
+    type: Date,
+    default: null,
+  },
+
+  cs_assignment_status: {
+    type: String,
+    enum: ["Unassigned", "Assigned", "In Progress", "Done"],
+    default: "Unassigned",
+    index: true,
+  },
 });
 
 // Tối ưu truy vấn theo orderId + orderItemId

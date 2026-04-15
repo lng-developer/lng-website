@@ -12,6 +12,7 @@ const Listing = db.listing;
 const User = db.user;
 const Team = db.Team;
 const Shop = db.shop;
+const Role = db.role;
 const upload = multer({ storage: multer.memoryStorage() });
 const { logOrderHistory } = require("../service/orderHistoryLogger");
 
@@ -879,8 +880,10 @@ const getScaleList = async (req, res) => {
       scale_status,
       search,
       shopName,
-      // NEW: param lọc theo asin_type của Listing
-      pngStatus, // "true" | "false"
+      pngStatus,
+      cs_unassigned = "",
+      cs_assignee_id = "",
+      cs_assignment_status = "",
     } = req.query;
 
     const KNOWN = [
@@ -909,7 +912,6 @@ const getScaleList = async (req, res) => {
     const isDesignLeader = hasRole(userRole, "Design Leader");
     const isDesigner = hasRole(userRole, "Designer");
 
-    // Cho phép Admin, Seller, Customer Service, Design Leader, Designer
     if (!(isAdmin || isSeller || isCS || isDesignLeader || isDesigner)) {
       return res
         .status(403)
@@ -918,8 +920,7 @@ const getScaleList = async (req, res) => {
 
     /**
      * CHỈ giới hạn theo seller khi là Seller "thuần"
-     * (không có bất kỳ role quyền cao nào khác).
-     * Design Leader phải luôn bypass filter này, kể cả khi tài khoản có Seller.
+     * (không có role quyền cao nào khác)
      */
     const isSellerOnly = isSeller && !(isAdmin || isCS || isDesignLeader);
 
@@ -927,19 +928,20 @@ const getScaleList = async (req, res) => {
       return res.status(400).json({ message: "Invalid user id in token" });
     }
 
-    // 1) Match theo thời gian + seller filter (CHỈ filter khi là Seller thuần)
+    // ===== Base match =====
     const initialMatch = {};
     if (from && to) {
       initialMatch.createdAt = { $gte: new Date(from), $lte: new Date(to) };
     }
 
+    // CS chỉ thấy order được assign cho chính mình
     if (isCS) {
       initialMatch.csAssigneeId = new mongoose.Types.ObjectId(userId);
     } else if (isSellerOnly) {
       initialMatch.sellerId = new mongoose.Types.ObjectId(userId);
     }
 
-    // 2) Base pipeline
+    // ===== Base pipeline =====
     const pipeline = [
       { $match: initialMatch },
 
@@ -965,6 +967,7 @@ const getScaleList = async (req, res) => {
       },
       { $unwind: { path: "$seller", preserveNullAndEmptyArrays: true } },
 
+      // populate cs_assignee
       {
         $lookup: {
           from: "users",
@@ -978,15 +981,15 @@ const getScaleList = async (req, res) => {
       // Filter shopName
       ...(shopName && shopName.trim()
         ? [
-          {
-            $match: {
-              "shop.name": { $regex: new RegExp(shopName.trim(), "i") },
+            {
+              $match: {
+                "shop.name": { $regex: new RegExp(shopName.trim(), "i") },
+              },
             },
-          },
-        ]
+          ]
         : []),
 
-      // Filter search (mở rộng thêm seller)
+      // Filter search
       ...(() => {
         if (!search || !search.trim()) return [];
         const keyword = new RegExp(search.trim(), "i");
@@ -1008,33 +1011,43 @@ const getScaleList = async (req, res) => {
         ];
       })(),
 
-      // CS assignment filters
-      ...(cs_unassigned === "true"
-        ? [{ $match: { csAssigneeId: null } }]
-        : []),
-      ...(cs_assignee_id
+      // ===== CS assignment filters =====
+      ...(String(cs_unassigned || "").toLowerCase() === "true"
         ? [
-          {
-            $match: {
-              csAssigneeId: new mongoose.Types.ObjectId(cs_assignee_id),
+            {
+              $match: {
+                $or: [
+                  { csAssigneeId: { $exists: false } },
+                  { csAssigneeId: null },
+                  { cs_assignment_status: "Unassigned" },
+                ],
+              },
             },
-          },
-        ]
+          ]
         : []),
-      ...(cs_assignment_status
+
+      ...(cs_assignee_id && mongoose.Types.ObjectId.isValid(cs_assignee_id)
         ? [
-          {
-            $match: {
-              cs_assignment_status: cs_assignment_status,
+            {
+              $match: {
+                csAssigneeId: new mongoose.Types.ObjectId(cs_assignee_id),
+              },
             },
-          },
-        ]
+          ]
+        : []),
+
+      ...(cs_assignment_status && String(cs_assignment_status).trim()
+        ? [
+            {
+              $match: {
+                cs_assignment_status: String(cs_assignment_status).trim(),
+              },
+            },
+          ]
         : []),
     ];
 
-    // NEW ===== pngStatus: lọc theo asin_type của Listing (Custom Image | Outline)
-    // Mặc định (pngStatus !== 'true') -> LOẠI TRỪ các order có asin_type 'Custom Image' | 'Outline'
-    // Khi pngStatus === 'true' -> CHỈ LẤY các order này
+    // ===== pngStatus filter =====
     const wantPngStatus = String(pngStatus || "false").toLowerCase() === "true";
     pipeline.push(
       {
@@ -1058,16 +1071,17 @@ const getScaleList = async (req, res) => {
         },
       },
       {
-        $addFields: { hasPngAsinType: { $gt: [{ $size: "$pngListings" }, 0] } },
+        $addFields: {
+          hasPngAsinType: { $gt: [{ $size: "$pngListings" }, 0] },
+        },
       },
       wantPngStatus
         ? { $match: { hasPngAsinType: true } }
         : { $match: { hasPngAsinType: { $ne: true } } },
       { $unset: "pngListings" }
     );
-    // ===== end NEW
 
-    // Chuẩn hoá bucket
+    // ===== Bucket status =====
     pipeline.push({
       $addFields: {
         hasPendingItem: {
@@ -1088,7 +1102,7 @@ const getScaleList = async (req, res) => {
       },
     });
 
-    // 3) Áp filter theo bucket
+    // ===== Filter theo bucket =====
     let onlyPending = false;
     if (scale_status && String(scale_status).trim() !== "") {
       if (/^all$/i.test(scale_status.trim())) {
@@ -1105,11 +1119,16 @@ const getScaleList = async (req, res) => {
           .map(canon)
           .filter(Boolean);
         const valid = wanted.filter((v) => KNOWN.includes(v));
+
         if (valid.length > 0) {
-          pipeline.push({ $match: { overall_status_bucket: { $in: valid } } });
+          pipeline.push({
+            $match: { overall_status_bucket: { $in: valid } },
+          });
           onlyPending = valid.length === 1 && valid[0] === "Pending";
         } else {
-          pipeline.push({ $match: { overall_status_bucket: "__NO_MATCH__" } });
+          pipeline.push({
+            $match: { overall_status_bucket: "__NO_MATCH__" },
+          });
         }
       }
     } else {
@@ -1127,12 +1146,7 @@ const getScaleList = async (req, res) => {
     }
 
     /**
-     * ===== NEW RULE =====
-     * Need Scale chỉ hiện những Listing có psd.status = available (case-insensitive: "Available"/"available")
-     * - Lọc lại items của các order bucket Need Scale theo listingId có PSD available
-     * - Nếu sau lọc items rỗng => loại order khỏi kết quả
-     *
-     * IMPORTANT: đặt BEFORE count/paginate để totalCount đúng
+     * Need Scale chỉ hiện những Listing có psd.status = available
      */
     pipeline.push(
       {
@@ -1189,7 +1203,6 @@ const getScaleList = async (req, res) => {
           },
         },
       },
-      // Nếu là Need Scale mà items bị lọc rỗng => loại order khỏi result
       {
         $match: {
           $expr: {
@@ -1203,9 +1216,8 @@ const getScaleList = async (req, res) => {
       },
       { $unset: ["availablePsdListings", "availablePsdListingIds"] }
     );
-    // ===== end NEW RULE =====
 
-    // 5) Join Case
+    // ===== Join Case =====
     pipeline.push({
       $lookup: {
         from: "cases",
@@ -1215,24 +1227,23 @@ const getScaleList = async (req, res) => {
       },
     });
 
-    // --- Count ---
+    // ===== Count =====
     const countPipeline = [...pipeline, { $count: "total" }];
     const countResult = await OrderCustomProduct.aggregate(countPipeline);
     const totalCount = countResult?.[0]?.total || 0;
 
-    // --- Paginate ---
+    // ===== Paginate =====
     const isAll = String(perPage).toLowerCase() === "all";
     const pageNum = parseInt(page, 10) || 1;
     const limitNum = isAll ? totalCount || 1 : parseInt(perPage, 10) || 10;
     const skip = isAll ? 0 : (pageNum - 1) * limitNum;
 
-    // sort cũ: purchase_date asc → đơn cũ -> mới
     pipeline.push({ $sort: { purchase_date: 1, createdAt: 1 } });
     if (!isAll) pipeline.push({ $skip: skip }, { $limit: limitNum });
 
     const orders = await OrderCustomProduct.aggregate(pipeline);
 
-    // === Map vendor product name ===
+    // ===== Map vendor product name =====
     const vendorIdSet = new Set();
     for (const o of orders) {
       for (const it of o.items || []) {
@@ -1245,14 +1256,17 @@ const getScaleList = async (req, res) => {
     if (vendorIdSet.size > 0) {
       const idObjs = [];
       for (const id of vendorIdSet) {
-        if (mongoose.Types.ObjectId.isValid(id))
+        if (mongoose.Types.ObjectId.isValid(id)) {
           idObjs.push(new mongoose.Types.ObjectId(id));
+        }
       }
+
       if (idObjs.length > 0) {
         const vps = await VendorProduct.find({ _id: { $in: idObjs } })
           .select("product_name vendor_id")
           .populate({ path: "vendor_id", select: "name" })
           .lean();
+
         vendorFullNameMap = new Map(
           (vps || []).map((vp) => {
             const vendorName = vp?.vendor_id?.name || "";
@@ -1263,6 +1277,7 @@ const getScaleList = async (req, res) => {
       }
     }
 
+    // ===== Map listings =====
     const listingIdSet = new Set();
     for (const o of orders) {
       for (const it of o.items || []) {
@@ -1271,14 +1286,15 @@ const getScaleList = async (req, res) => {
       }
     }
 
-    // Query Listing 1 lần và map theo _id
     let listingMap = new Map();
     if (listingIdSet.size > 0) {
       const ids = [];
       for (const id of listingIdSet) {
-        if (mongoose.Types.ObjectId.isValid(id))
+        if (mongoose.Types.ObjectId.isValid(id)) {
           ids.push(new mongoose.Types.ObjectId(id));
+        }
       }
+
       if (ids.length > 0) {
         const listings = await Listing.find({ _id: { $in: ids } })
           .select("asin_type product_image psd")
@@ -1287,6 +1303,7 @@ const getScaleList = async (req, res) => {
       }
     }
 
+    // ===== Final result =====
     const result = orders.map((order) => {
       const items = (order.items || []).map((item) => {
         const surfaces = item.version3Data?.customizationInfo?.surfaces || [];
@@ -1335,19 +1352,10 @@ const getScaleList = async (req, res) => {
           listingId: item.listingId,
           listing: ldoc
             ? {
-              asin_type: ldoc.asin_type || null,
-              product_image: ldoc.product_image || null,
-              psd: ldoc.psd || null,
-            }
-            : null,
-          cs_assignment_status: order.cs_assignment_status || "Unassigned",
-          csAssignedAt: order.csAssignedAt || null,
-          cs_assignee: order.cs_assignee
-            ? {
-              _id: order.cs_assignee._id,
-              full_name: order.cs_assignee.full_name,
-              email: order.cs_assignee.email,
-            }
+                asin_type: ldoc.asin_type || null,
+                product_image: ldoc.product_image || null,
+                psd: ldoc.psd || null,
+              }
             : null,
         };
       });
@@ -1368,17 +1376,28 @@ const getScaleList = async (req, res) => {
         case: order.case,
         address_validation: order.address_validation?.isValid,
         scale_overall_status: order.scale_overall_status,
+
+        cs_assignment_status: order.cs_assignment_status || "Unassigned",
+        csAssignedAt: order.csAssignedAt || null,
+        cs_assignee: order.cs_assignee
+          ? {
+              _id: order.cs_assignee._id,
+              full_name: order.cs_assignee.full_name,
+              email: order.cs_assignee.email,
+            }
+          : null,
+
         seller: order.seller
           ? {
-            _id: order.seller._id,
-            full_name: order.seller.full_name,
-            email: order.seller.email,
-          }
+              _id: order.seller._id,
+              full_name: order.seller.full_name,
+              email: order.seller.email,
+            }
           : null,
       };
     });
 
-    res.json({
+    return res.json({
       data: result,
       totalCount,
       totalPages: isAll ? 1 : Math.ceil(totalCount / limitNum),
@@ -1386,9 +1405,10 @@ const getScaleList = async (req, res) => {
     });
   } catch (error) {
     console.error("❌ getScaleList error:", error);
-    res
-      .status(500)
-      .json({ message: "Failed to retrieve scale list", error: error.message });
+    return res.status(500).json({
+      message: "Failed to retrieve scale list",
+      error: error.message,
+    });
   }
 };
 
@@ -2803,22 +2823,34 @@ const assignOrderToCS = async (req, res) => {
       return res.status(404).json({ message: "Order not found" });
     }
 
-    const csUser = await User.findById(csUserId).select("_id full_name email role");
+    const csUser = await User.findById(csUserId)
+      .select("_id full_name email role_id")
+      .lean();
+
     if (!csUser) {
       return res.status(404).json({ message: "CS user not found" });
     }
 
-    const roles = Array.isArray(csUser.role) ? csUser.role : [csUser.role];
-    const isCS = roles.some(
-      (r) => String(r || "").trim().toLowerCase() === "customer service"
-    );
+    if (!csUser.role_id || !mongoose.Types.ObjectId.isValid(csUser.role_id)) {
+      return res.status(400).json({ message: "User does not have a valid role_id" });
+    }
 
-    if (!isCS) {
-      return res.status(400).json({ message: "Selected user is not Customer Service" });
+    const role = await Role.findById(csUser.role_id).select("name").lean();
+    const userRoleName = String(role?.name || "").trim().toLowerCase();
+
+    if (userRoleName !== "customer service") {
+      return res.status(400).json({
+        message: "Selected user is not Customer Service",
+        debug: {
+          userId: csUser._id,
+          role_id: csUser.role_id,
+          role_name: role?.name || null,
+        },
+      });
     }
 
     order.csAssigneeId = csUser._id;
-    order.csAssignedBy = user.userId || user.id;
+    order.csAssignedBy = user.userId || user.id || null;
     order.csAssignedAt = new Date();
     order.cs_assignment_status = "Assigned";
 
@@ -2832,6 +2864,12 @@ const assignOrderToCS = async (req, res) => {
         csAssignedBy: order.csAssignedBy,
         csAssignedAt: order.csAssignedAt,
         cs_assignment_status: order.cs_assignment_status,
+        cs_assignee: {
+          _id: csUser._id,
+          full_name: csUser.full_name,
+          email: csUser.email,
+          role_name: role?.name || null,
+        },
       },
     });
   } catch (err) {
