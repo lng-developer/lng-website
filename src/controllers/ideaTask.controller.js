@@ -398,8 +398,9 @@ const uploadPsd = async (req, res) => {
       const isAdmin = hasRole(r, "Admin");
       const isDL = hasRole(r, "Design Leader");
       const isAssignee = task.assignedTo?.toString?.() === me;
+      const isCS = hasRole(r, "Customer Service");
 
-      if (!(isAdmin || isDL || (isDesigner && isAssignee))) {
+      if (!(isAdmin || isDL || isCS || (isDesigner && isAssignee))) {
         return res.status(403).json({ message: "Access denied" });
       }
 
