@@ -934,7 +934,7 @@ const getScaleList = async (req, res) => {
     }
 
     if (isCS) {
-      // Nếu sau này cần filter theo team CS thì mở lại phần này
+      initialMatch.csAssigneeId = new mongoose.Types.ObjectId(userId);
     } else if (isSellerOnly) {
       initialMatch.sellerId = new mongoose.Types.ObjectId(userId);
     }
@@ -964,6 +964,16 @@ const getScaleList = async (req, res) => {
         },
       },
       { $unwind: { path: "$seller", preserveNullAndEmptyArrays: true } },
+
+      {
+        $lookup: {
+          from: "users",
+          localField: "csAssigneeId",
+          foreignField: "_id",
+          as: "cs_assignee",
+        },
+      },
+      { $unwind: { path: "$cs_assignee", preserveNullAndEmptyArrays: true } },
 
       // Filter shopName
       ...(shopName && shopName.trim()
@@ -997,6 +1007,29 @@ const getScaleList = async (req, res) => {
           },
         ];
       })(),
+
+      // CS assignment filters
+      ...(cs_unassigned === "true"
+        ? [{ $match: { csAssigneeId: null } }]
+        : []),
+      ...(cs_assignee_id
+        ? [
+          {
+            $match: {
+              csAssigneeId: new mongoose.Types.ObjectId(cs_assignee_id),
+            },
+          },
+        ]
+        : []),
+      ...(cs_assignment_status
+        ? [
+          {
+            $match: {
+              cs_assignment_status: cs_assignment_status,
+            },
+          },
+        ]
+        : []),
     ];
 
     // NEW ===== pngStatus: lọc theo asin_type của Listing (Custom Image | Outline)
@@ -1305,6 +1338,15 @@ const getScaleList = async (req, res) => {
               asin_type: ldoc.asin_type || null,
               product_image: ldoc.product_image || null,
               psd: ldoc.psd || null,
+            }
+            : null,
+          cs_assignment_status: order.cs_assignment_status || "Unassigned",
+          csAssignedAt: order.csAssignedAt || null,
+          cs_assignee: order.cs_assignee
+            ? {
+              _id: order.cs_assignee._id,
+              full_name: order.cs_assignee.full_name,
+              email: order.cs_assignee.email,
             }
             : null,
         };
@@ -1974,7 +2016,7 @@ async function getScaleStatistics(req, res) {
     }
 
     if (isCS) {
-      // Nếu cần filter theo team CS thì mở lại phần này
+      matchStage.csAssigneeId = new mongoose.Types.ObjectId(userId);
     } else if (isSellerOnly) {
       matchStage.sellerId = new mongoose.Types.ObjectId(userId);
     }
@@ -2070,6 +2112,13 @@ async function getScaleStatistics(req, res) {
             vars: { s: { $ifNull: ["$scale_overall_status", "Need Scale"] } },
             in: { $cond: [{ $in: ["$$s", KNOWN] }, "$$s", "Other"] },
           },
+        },
+        isCSUnassigned: {
+          $or: [
+            { $not: ["$csAssigneeId"] },
+            { $eq: ["$csAssigneeId", null] },
+            { $eq: ["$cs_assignment_status", "Unassigned"] },
+          ],
         },
       },
     });
@@ -2170,6 +2219,11 @@ async function getScaleStatistics(req, res) {
               ],
             },
           },
+          csUnassignedCount: {
+            $sum: {
+              $cond: ["$isCSUnassigned", 1, 0]
+            },
+          },
         },
       },
       {
@@ -2178,16 +2232,19 @@ async function getScaleStatistics(req, res) {
           totalOrders: { $sum: "$orders" },
           byStatus: { $push: { k: "$_id", v: "$orders" } },
           pendingAdj: { $sum: "$pendingAdj" },
+          totalCSUnassigned: { $sum: "$csUnassignedCount" },
         },
       },
       {
         $project: {
           _id: 0,
           totalOrders: 1,
+          totalCSUnassigned: 1,
           counts: {
             $mergeObjects: [
               { $arrayToObject: "$byStatus" },
-              { Pending: "$pendingAdj" }, // overwrite Pending
+              { Pending: "$pendingAdj" },
+              { CSUnassigned: "$totalCSUnassigned" },
             ],
           },
         },
@@ -2198,6 +2255,7 @@ async function getScaleStatistics(req, res) {
 
     const normalizeCounts = (c = {}) => {
       const counts = {
+        CSUnassigned: c["CSUnassigned"] || 0,
         "Need Scale": c["Need Scale"] || 0,
         Pending: c["Pending"] || 0,
         Ready: c["Ready"] || 0,
@@ -2217,6 +2275,7 @@ async function getScaleStatistics(req, res) {
 
     const overall = {
       totalOrders: overallRaw?.totalOrders || 0,
+      totalCSUnassigned: overallRaw?.totalCSUnassigned || 0,
       counts: normalizeCounts(overallRaw?.counts || {}),
     };
 
@@ -2729,6 +2788,91 @@ const resetScaleForOrdersBulk = async (req, res) => {
   }
 };
 
+const assignOrderToCS = async (req, res) => {
+  try {
+    const { orderId } = req.params;
+    const { csUserId } = req.body || {};
+    const user = req.user;
+
+    if (!mongoose.Types.ObjectId.isValid(csUserId)) {
+      return res.status(400).json({ message: "Invalid csUserId" });
+    }
+
+    const order = await OrderCustomProduct.findOne({ orderId });
+    if (!order) {
+      return res.status(404).json({ message: "Order not found" });
+    }
+
+    const csUser = await User.findById(csUserId).select("_id full_name email role");
+    if (!csUser) {
+      return res.status(404).json({ message: "CS user not found" });
+    }
+
+    const roles = Array.isArray(csUser.role) ? csUser.role : [csUser.role];
+    const isCS = roles.some(
+      (r) => String(r || "").trim().toLowerCase() === "customer service"
+    );
+
+    if (!isCS) {
+      return res.status(400).json({ message: "Selected user is not Customer Service" });
+    }
+
+    order.csAssigneeId = csUser._id;
+    order.csAssignedBy = user.userId || user.id;
+    order.csAssignedAt = new Date();
+    order.cs_assignment_status = "Assigned";
+
+    await order.save();
+
+    return res.json({
+      message: "Assigned order to CS successfully",
+      data: {
+        orderId: order.orderId,
+        csAssigneeId: order.csAssigneeId,
+        csAssignedBy: order.csAssignedBy,
+        csAssignedAt: order.csAssignedAt,
+        cs_assignment_status: order.cs_assignment_status,
+      },
+    });
+  } catch (err) {
+    return res.status(500).json({
+      message: "Assign order to CS failed",
+      error: err.message,
+    });
+  }
+};
+
+const unassignOrderFromCS = async (req, res) => {
+  try {
+    const { orderId } = req.params;
+
+    const order = await OrderCustomProduct.findOne({ orderId });
+    if (!order) {
+      return res.status(404).json({ message: "Order not found" });
+    }
+
+    order.csAssigneeId = null;
+    order.csAssignedBy = null;
+    order.csAssignedAt = null;
+    order.cs_assignment_status = "Unassigned";
+
+    await order.save();
+
+    return res.json({
+      message: "Unassigned CS successfully",
+      data: {
+        orderId: order.orderId,
+        cs_assignment_status: order.cs_assignment_status,
+      },
+    });
+  } catch (err) {
+    return res.status(500).json({
+      message: "Unassign CS failed",
+      error: err.message,
+    });
+  }
+};
+
 module.exports = {
   uploadFulfillmentFileForItem,
   confirmScaleForItem,
@@ -2738,5 +2882,7 @@ module.exports = {
   getScaleStatistics,
   getScaleListForDesign,
   getScaleStatisticsForDesign,
-  resetScaleForOrdersBulk
+  resetScaleForOrdersBulk,
+  assignOrderToCS,
+  unassignOrderFromCS
 };
