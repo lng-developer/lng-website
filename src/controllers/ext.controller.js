@@ -749,8 +749,6 @@ async function updateOrderByVendors(orderId, vpidToVendorPrefetched = null) {
 }
 
 async function runBatch({ max = 100, dryRun = false } = {}) {
-  console.log(`🔍 [BATCH] Starting batch processing with max=${max}, dryRun=${dryRun}`);
-  
   const candidates = await OrderCustomProduct.find({
     status: { $ne: "Shipped" },
     "items.cost_breakdown.vendorProductId": { $exists: true, $ne: null },
@@ -759,8 +757,6 @@ async function runBatch({ max = 100, dryRun = false } = {}) {
     .limit(max)
     .lean();
 
-  console.log(`📋 [BATCH] Found ${candidates.length} candidate orders`);
-
   const vpidSet = new Set();
   for (const o of candidates) {
     for (const it of o.items || []) {
@@ -768,27 +764,16 @@ async function runBatch({ max = 100, dryRun = false } = {}) {
       if (vpid) vpidSet.add(String(vpid));
     }
   }
-  
-  console.log(`🔗 [BATCH] Building vendor maps for ${vpidSet.size} vendor products`);
+
   const vpidToVendor = await buildVendorMapsFromVpidSet(vpidSet);
 
-  const knownKeys = new Set([
-    "beeful",
-    "merchfox",
-    "merchize",
-    "printway",
-    "mangotee",
-    "ss88",
-  ]);
+  const knownKeys = new Set(["beeful", "merchfox", "merchize", "printway", "mangotee", "ss88"]);
   const filtered = candidates.filter((o) => {
     const groups = groupItemsByVendorWithMap(o, vpidToVendor);
     return Object.keys(groups).some((k) => knownKeys.has(k));
   });
 
-  console.log(`✅ [BATCH] Filtered to ${filtered.length} orders with known vendors`);
-
   if (dryRun) {
-    console.log(`🧪 [BATCH] DRY RUN mode - returning order list without processing`);
     return {
       ok: true,
       mode: "dry-run",
@@ -804,25 +789,16 @@ async function runBatch({ max = 100, dryRun = false } = {}) {
     };
   }
 
-  console.log(`🚀 [BATCH] Processing ${filtered.length} orders...`);
-  let ok = 0,
-    fail = 0;
+  let ok = 0, fail = 0;
   for (const o of filtered) {
     try {
-      const r = await updateOrderByVendors(o.orderId, vpidToVendor);
-      if (DEBUG || NODE_ENV !== "test") {
-        console.log(
-          `✅ [BATCH] ${o.orderId} | itemsChanged=${r.updatedItems} | orderStatusChanged=${r.orderStatusChanged}`
-        );
-      }
+      await updateOrderByVendors(o.orderId, vpidToVendor);
       ok++;
     } catch (err) {
-      console.error(`❌ [BATCH] ${o.orderId}: ${err.message}`);
       fail++;
     }
   }
-  
-  console.log(`🏁 [BATCH] Completed: ${ok} success, ${fail} failed, ${filtered.length} total`);
+
   return { ok, fail, scanned: filtered.length };
 }
 
@@ -888,44 +864,14 @@ const vendorSyncList = async (req, res) => {
  * body: { max?: number, dryRun?: boolean }
  */
 const vendorSyncBatch = async (req, res) => {
-  const startTime = new Date();
-  const isAutoCall = !req.headers['user-agent']; // Auto calls không có user-agent
-  
   try {
     const { max = 100, dryRun = false } = req.body || {};
-    
-    // Log bắt đầu
-    console.log(`🚀 [VENDOR-SYNC][${startTime.toISOString()}] Starting vendorSyncBatch`);
-    console.log(`📋 [VENDOR-SYNC] Type: ${isAutoCall ? '🤖 AUTO' : '👤 MANUAL'}`);
-    console.log(`📋 [VENDOR-SYNC] Config: max=${max}, dryRun=${dryRun}`);
-    
     const result = await runBatch({
       max: Number(max) || 100,
       dryRun: Boolean(dryRun),
     });
-    
-    const endTime = new Date();
-    const duration = endTime - startTime;
-    
-    // Log kết quả
-    console.log(`✅ [VENDOR-SYNC][${endTime.toISOString()}] Completed successfully`);
-    console.log(`📊 [VENDOR-SYNC] Results: ok=${result.ok}, fail=${result.fail}, scanned=${result.scanned}`);
-    console.log(`⏱️  [VENDOR-SYNC] Duration: ${duration}ms`);
-    
-    if (result.mode === 'dry-run') {
-      console.log(`🧪 [VENDOR-SYNC] DRY RUN - Orders found: ${result.orderIds?.length || 0}`);
-    }
-    
     return res.json({ ok: true, processedOrders: result.scanned, ...result });
   } catch (e) {
-    const endTime = new Date();
-    const duration = endTime - startTime;
-    
-    // Log lỗi
-    console.error(`❌ [VENDOR-SYNC][${endTime.toISOString()}] Failed after ${duration}ms`);
-    console.error(`❌ [VENDOR-SYNC] Error: ${e.message}`);
-    console.error(`❌ [VENDOR-SYNC] Stack:`, e.stack);
-    
     return res.status(500).json({ ok: false, message: e.message });
   }
 };

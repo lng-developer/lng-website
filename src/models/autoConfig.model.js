@@ -16,8 +16,7 @@ const autoConfigSchema = new mongoose.Schema(
       required: true,
     },
     shopId: {
-      type: mongoose.Schema.Types.ObjectId,
-      ref: "Shop",
+      type: String,
       required: true,
     },
     shopName: {
