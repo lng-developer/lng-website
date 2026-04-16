@@ -356,10 +356,10 @@ const startWork = async (req, res) => {
     const isDesigner = hasRole(r, "Designer");
     const isAdmin = hasRole(r, "Admin");
     const isDL = hasRole(r, "Design Leader");
-
+    const csDesign = hasRole(r, "Customer Service");
     // so sánh với ref (ObjectId)
     const isAssignee = task.assignedTo?.toString?.() === String(me);
-    if (!(isAdmin || isDL || (isDesigner && isAssignee))) {
+    if (!(isAdmin || isDL || (isDesigner && isAssignee) || (csDesign && isAssignee))) {
       return res.status(403).json({ message: "Access denied" });
     }
 
