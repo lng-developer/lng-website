@@ -276,8 +276,8 @@ const updateIdeaTask = async (req, res) => {
   try {
     const task = await IdeaTask.findById(req.params.id);
     if (!task) return res.status(404).json({ message: "Not found" });
-    if (!canEditIdeaBasics(req, task))
-      return res.status(403).json({ message: "Access denied" });
+    // if (!canEditIdeaBasics(req, task))
+    //   return res.status(403).json({ message: "Access denied" });
 
     const { title, description, referenceLink, deadline, productType, image } =
       req.body;
