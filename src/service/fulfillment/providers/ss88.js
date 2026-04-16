@@ -302,7 +302,7 @@ const SHIPPING_TYPE_MAP = {
     'free economy':'Standard',
     economy:       'Standard',
     // Expedited → Priority
-    expedited:     'Priority',
+    expedited:     'Standard',
     priority:      'Priority',
 };
 
