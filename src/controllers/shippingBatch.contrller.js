@@ -1096,17 +1096,17 @@ const checkOrdersStatus = async (req, res, next) => {
     let result;
     switch (useSnapshot) {
       case "snapshot-only":
-        result = await this.checkOrdersStatusFromSnapshot(machineId, { limit, fromDate, toDate, status, filterType });
+        result = await checkOrdersStatusFromSnapshot(machineId, { limit, fromDate, toDate, status, filterType });
         break;
       case "hybrid":
-        result = await this.checkOrdersStatusHybrid(machineId, { limit, fromDate, toDate, status, filterType });
+        result = await checkOrdersStatusHybrid(machineId, { limit, fromDate, toDate, status, filterType });
         break;
       case "snapshot-priority":
-        result = await this.checkOrdersStatusSnapshotPriority(machineId, { limit, fromDate, toDate, status, filterType });
+        result = await checkOrdersStatusSnapshotPriority(machineId, { limit, fromDate, toDate, status, filterType });
         break;
       case "real-time":
       default:
-        result = await this.checkOrdersStatusRealTime(machineId, { limit, fromDate, toDate, status, filterType });
+        result = await checkOrdersStatusRealTime(machineId, { limit, fromDate, toDate, status, filterType });
         break;
     }
 
@@ -2678,7 +2678,7 @@ const checkOrdersStatusHybrid = async (machineId, options) => {
   }).sort({ createdAt: -1 }).lean();
   
   if (!latestSnapshot) {
-    console.log(`⚠️ [HYBRID] No snapshot found, falling back to real-time`);
+    console.log(`⚠️ [HYBRID]1 No snapshot found, falling back to real-time`);
     return await checkOrdersStatusRealTime(machineId, options);
   }
   
@@ -2782,7 +2782,7 @@ const checkOrdersStatusSnapshotPriority = async (machineId, options) => {
 /**
  * ✅ Mode 4: Real-time - Logic gốc
  */
-const checkOrdersStatusRealTime = async (machineId, options) => {
+async function checkOrdersStatusRealTime(machineId, options) {
   const { limit, fromDate, toDate, status, filterType } = options;
   
   console.log(`⚡ [REAL_TIME] Using real-time query for shop: ${machineId}`);
@@ -2921,7 +2921,7 @@ const checkOrdersStatusRealTime = async (machineId, options) => {
     dataSource: 'real-time',
     filter: { machineId, limit, fromDate, toDate, status, filterType },
   };
-};
+}
 
 /**
  * Helper function để process orders cho hybrid mode
