@@ -13,7 +13,7 @@ const router = express.Router();
 router.get(
   "/",
   authenticateToken,
-  authorizeRoles("Admin"),
+  authorizeRoles("Admin", "Design Leader"),
   userController.getAllUsers
 );
 
