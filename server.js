@@ -55,9 +55,7 @@ const {
   ToDoListRoutes,
   EtsyOrderRoutes,
   EtsyListingRoutes,
-  cronJobRoutes,
-  configAutoRoutes,
-  autoJobLogRoutes,
+  autoConfigRoutes,
   extensionLogRoutes
 } = require("./src/routes");
 
@@ -92,9 +90,7 @@ app.use("/api/shipping-batches", ShippingBatchRoutes); // ✅ Alias để hỗ t
 app.use("/api/to-do", ToDoListRoutes);
 app.use("/api/etsy", EtsyOrderRoutes);
 app.use("/api/etsy-listing", EtsyListingRoutes);
-app.use("/api/cron-jobs", cronJobRoutes);
-app.use("/api/config-auto", configAutoRoutes);
-app.use("/api/auto-job-logs", autoJobLogRoutes);
+app.use("/api/auto-config", autoConfigRoutes);
 app.use("/api/ext/logs", extensionLogRoutes);
 
 

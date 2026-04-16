@@ -25,14 +25,12 @@ const teamRoutes = require("./team.routes");
 const extRoutes = require("./ext.routes");
 const adminSessionRoutes = require("./admin.session.routes");
 const PointsRoutes = require("./points.routes");
+const extensionLogRoutes = require("./extensionLog.routes");
 const ShippingBatchRoutes = require("./shippingBatch.routes");
 const ToDoListRoutes = require("./todoList.routes");
-const EtsyOrderRoutes = require("./etsyOrder.routes")
-const EtsyListingRoutes = require("./etsyListing.routes")
-const cronJobRoutes = require("./cronJob.routes");
-const configAutoRoutes = require("./configAuto.routes");
-const autoJobLogRoutes = require("./autoJobLog.routes");
-const extensionLogRoutes = require("./extensionLog.routes");
+const EtsyOrderRoutes = require("./etsyOrder.routes");
+const EtsyListingRoutes = require("./etsyListing.routes");
+const autoConfigRoutes = require("./autoConfig.routes");
 
 module.exports = {
   roleRoutes,
@@ -62,12 +60,10 @@ module.exports = {
   extRoutes,
   adminSessionRoutes,
   PointsRoutes,
+  extensionLogRoutes,
   ShippingBatchRoutes,
   ToDoListRoutes,
   EtsyOrderRoutes,
   EtsyListingRoutes,
-  cronJobRoutes,
-  configAutoRoutes,
-  autoJobLogRoutes,
-  extensionLogRoutes
+  autoConfigRoutes,
 };
