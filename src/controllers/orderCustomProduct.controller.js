@@ -4374,6 +4374,70 @@ const applyManualVendorMapping = async (req, res) => {
   }
 };
 
+const updateOrderItemQuantity = async (req, res) => {
+  try {
+    const { orderId, orderItemId } = req.params;
+    const { quantity } = req.body;
+
+    // validate input
+    if (quantity === undefined || quantity === null) {
+      return res.status(400).json({
+        message: "Quantity is required",
+      });
+    }
+
+    const parsedQuantity = Number(quantity);
+
+    if (!Number.isInteger(parsedQuantity) || parsedQuantity < 1) {
+      return res.status(400).json({
+        message: "Quantity must be an integer greater than 0",
+      });
+    }
+
+    // update đúng item trong mảng items
+    const updatedOrder = await OrderCustomProduct.findOneAndUpdate(
+      {
+        orderId,
+        "items.orderItemId": orderItemId,
+      },
+      {
+        $set: {
+          "items.$[item].quantity": parsedQuantity,
+        },
+      },
+      {
+        new: true,
+        arrayFilters: [{ "item.orderItemId": orderItemId }],
+      }
+    );
+
+    if (!updatedOrder) {
+      return res.status(404).json({
+        message: "Order or order item not found",
+      });
+    }
+
+    // lấy lại item vừa update
+    const updatedItem = updatedOrder.items.find(
+      (item) => item.orderItemId === orderItemId
+    );
+
+    return res.status(200).json({
+      message: "Order item quantity updated successfully",
+      data: {
+        orderId: updatedOrder.orderId,
+        orderItemId,
+        quantity: updatedItem?.quantity || parsedQuantity,
+      },
+    });
+  } catch (error) {
+    return res.status(500).json({
+      message: "Failed to update order item quantity",
+      error: error.message,
+    });
+  }
+};
+
 module.exports = {
   // getAllOrders,
   getOrderById,
@@ -4397,4 +4461,5 @@ module.exports = {
   validateInvalidAddressesBatch,
   updateTrackingByOrderId,
   applyManualVendorMapping,
+  updateOrderItemQuantity
 };
