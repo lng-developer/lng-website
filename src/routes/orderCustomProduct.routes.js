@@ -90,4 +90,10 @@ router.post("/orders/address/validate-invalid", controller.validateInvalidAddres
 
 router.post("/update-tracking", controller.updateTrackingByOrderId);
 
+router.patch(
+  "/:orderId/items/:orderItemId/quantity",
+  authenticateToken,
+  controller.updateOrderItemQuantity
+);
+
 module.exports = router;
