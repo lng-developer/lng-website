@@ -981,12 +981,12 @@ const getScaleList = async (req, res) => {
       // Filter shopName
       ...(shopName && shopName.trim()
         ? [
-            {
-              $match: {
-                "shop.name": { $regex: new RegExp(shopName.trim(), "i") },
-              },
+          {
+            $match: {
+              "shop.name": { $regex: new RegExp(shopName.trim(), "i") },
             },
-          ]
+          },
+        ]
         : []),
 
       // Filter search
@@ -1014,36 +1014,36 @@ const getScaleList = async (req, res) => {
       // ===== CS assignment filters =====
       ...(String(cs_unassigned || "").toLowerCase() === "true"
         ? [
-            {
-              $match: {
-                $or: [
-                  { csAssigneeId: { $exists: false } },
-                  { csAssigneeId: null },
-                  { cs_assignment_status: "Unassigned" },
-                ],
-              },
+          {
+            $match: {
+              $or: [
+                { csAssigneeId: { $exists: false } },
+                { csAssigneeId: null },
+                { cs_assignment_status: "Unassigned" },
+              ],
             },
-          ]
+          },
+        ]
         : []),
 
       ...(cs_assignee_id && mongoose.Types.ObjectId.isValid(cs_assignee_id)
         ? [
-            {
-              $match: {
-                csAssigneeId: new mongoose.Types.ObjectId(cs_assignee_id),
-              },
+          {
+            $match: {
+              csAssigneeId: new mongoose.Types.ObjectId(cs_assignee_id),
             },
-          ]
+          },
+        ]
         : []),
 
       ...(cs_assignment_status && String(cs_assignment_status).trim()
         ? [
-            {
-              $match: {
-                cs_assignment_status: String(cs_assignment_status).trim(),
-              },
+          {
+            $match: {
+              cs_assignment_status: String(cs_assignment_status).trim(),
             },
-          ]
+          },
+        ]
         : []),
     ];
 
@@ -1352,10 +1352,10 @@ const getScaleList = async (req, res) => {
           listingId: item.listingId,
           listing: ldoc
             ? {
-                asin_type: ldoc.asin_type || null,
-                product_image: ldoc.product_image || null,
-                psd: ldoc.psd || null,
-              }
+              asin_type: ldoc.asin_type || null,
+              product_image: ldoc.product_image || null,
+              psd: ldoc.psd || null,
+            }
             : null,
         };
       });
@@ -1381,18 +1381,18 @@ const getScaleList = async (req, res) => {
         csAssignedAt: order.csAssignedAt || null,
         cs_assignee: order.cs_assignee
           ? {
-              _id: order.cs_assignee._id,
-              full_name: order.cs_assignee.full_name,
-              email: order.cs_assignee.email,
-            }
+            _id: order.cs_assignee._id,
+            full_name: order.cs_assignee.full_name,
+            email: order.cs_assignee.email,
+          }
           : null,
 
         seller: order.seller
           ? {
-              _id: order.seller._id,
-              full_name: order.seller.full_name,
-              email: order.seller.email,
-            }
+            _id: order.seller._id,
+            full_name: order.seller.full_name,
+            email: order.seller.email,
+          }
           : null,
       };
     });
@@ -2842,7 +2842,6 @@ const assignOrderToCS = async (req, res) => {
       "designer",
       "design leader",
     ]);
-
     if (!allowedRoleNames.has(userRoleName)) {
       return res.status(400).json({
         message: "Selected user must be Customer Service, Designer, or Design Leader",
