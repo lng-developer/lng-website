@@ -2837,10 +2837,15 @@ const assignOrderToCS = async (req, res) => {
 
     const role = await Role.findById(csUser.role_id).select("name").lean();
     const userRoleName = String(role?.name || "").trim().toLowerCase();
+    const allowedRoleNames = new Set([
+      "customer service",
+      "designer",
+      "design leader",
+    ]);
 
-    if (userRoleName !== "customer service") {
+    if (!allowedRoleNames.has(userRoleName)) {
       return res.status(400).json({
-        message: "Selected user is not Customer Service",
+        message: "Selected user must be Customer Service, Designer, or Design Leader",
         debug: {
           userId: csUser._id,
           role_id: csUser.role_id,
