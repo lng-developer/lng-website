@@ -1090,20 +1090,33 @@ const checkOrdersStatus = async (req, res, next) => {
     console.log(`🔍 [CHECK_ORDERS] Mode: ${useSnapshot} for shop: ${machineId}`);
 
     // Route to different processing modes
+    const opts = { limit, fromDate, toDate, status, filterType };
     let result;
     switch (useSnapshot) {
       case "snapshot-only":
-        result = await checkOrdersStatusFromSnapshot(machineId, { limit, fromDate, toDate, status, filterType });
+        result = await checkOrdersStatusFromSnapshot(machineId, opts);
         break;
       case "hybrid":
-        result = await checkOrdersStatusHybrid(machineId, { limit, fromDate, toDate, status, filterType });
+        result = await checkOrdersStatusHybrid(machineId, opts);
         break;
       case "snapshot-priority":
-        result = await checkOrdersStatusSnapshotPriority(machineId, { limit, fromDate, toDate, status, filterType });
+        result = await checkOrdersStatusSnapshotPriority(machineId, opts);
         break;
+      case "auto": {
+        // Use hybrid if a recent valid snapshot exists, otherwise real-time
+        const hasSnapshot = await OrderStatusSnapshot.exists({
+          machineId,
+          'filterConfig.filterType': filterType,
+          isSuccess: true,
+        });
+        result = hasSnapshot
+          ? await checkOrdersStatusHybrid(machineId, opts)
+          : await checkOrdersStatusRealTime(machineId, opts);
+        break;
+      }
       case "real-time":
       default:
-        result = await checkOrdersStatusRealTime(machineId, { limit, fromDate, toDate, status, filterType });
+        result = await checkOrdersStatusRealTime(machineId, opts);
         break;
     }
 
@@ -1760,8 +1773,8 @@ const createBatchFromOrders = async (req, res, next) => {
           if (realTracking) {
             // ✅ Có real tracking
             completed.push({
-              orderId,
-              tracking: realTracking,
+              orderId: processed.orderId,
+              tracking: processed.tracking,
               isFake: false,
               source: "system",
               createdAt: new Date()
@@ -2268,6 +2281,90 @@ const getLatestOrderStatusSnapshot = async (req, res, next) => {
   }
 };
 
+// ─── Private helpers shared by all checkOrdersStatus modes ───────────────────
+
+const _extractOrderDetails = (orders) =>
+  orders.map(order => {
+    let hasValidTracking = false;
+    let tracking = "";
+    let trackingInfo = null;
+
+    for (const item of order.items || []) {
+      const itemTracking = normalizeField(item?.tracking_info?.tracking);
+      if (itemTracking && itemTracking !== "-" && itemTracking !== "---") {
+        hasValidTracking = true;
+        tracking = itemTracking;
+        trackingInfo = {
+          tracking: itemTracking,
+          fulfillment: item.tracking_info?.fulfillment || "",
+          status: item.tracking_info?.status || "",
+          carrier: item.tracking_info?.note || "",
+          updated_at: item.tracking_info?.updated_at || null,
+        };
+        break;
+      }
+    }
+
+    return {
+      orderId: order.orderId,
+      shopId: order.shopId?._id || order.shopId,
+      shopName: order.shopId?.name || null,
+      shopStore: order.shopId?.store || null,
+      status: order.status,
+      createdAt: order.createdAt,
+      updatedAt: order.updatedAt,
+      hasTracking: hasValidTracking,
+      tracking: tracking || null,
+      trackingInfo,
+      itemsCount: (order.items || []).length,
+      customerEmail: order.customer?.email || null,
+      totalAmount: order.total_amount || 0,
+    };
+  });
+
+const _buildSubmissionMap = async (orderIds, machineId) => {
+  const orderIdsSet = new Set(orderIds);
+  const submittedBatches = await ShippingBatch.find({
+    machineId,
+    "completed.orderId": { $in: orderIds },
+  }).lean();
+
+  const map = new Map();
+  for (const batch of submittedBatches) {
+    for (const completed of batch.completed || []) {
+      if (orderIdsSet.has(completed.orderId)) {
+        map.set(completed.orderId, {
+          submittedToAmazon: true,
+          batchId: batch._id,
+          batchType: batch.type,
+          submittedAt: batch.createdAt,
+          batchLabel: batch.label,
+        });
+      }
+    }
+  }
+  return map;
+};
+
+const _calcStats = (orders, filteredCount) => {
+  let totalWithTracking = 0, totalSubmitted = 0, totalNotSubmitted = 0;
+  for (const o of orders) {
+    if (o.hasTracking) totalWithTracking++;
+    if (o.submittedToAmazon) totalSubmitted++;
+    if (o.hasTracking && !o.submittedToAmazon) totalNotSubmitted++;
+  }
+  return {
+    totalScanned: orders.length,
+    totalWithTracking,
+    totalWithoutTracking: orders.length - totalWithTracking,
+    totalSubmitted,
+    totalNotSubmitted,
+    filteredCount,
+  };
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+
 /**
  * ✅ Mode 1: Snapshot Only - Chỉ lấy từ snapshot
  */
@@ -2299,17 +2396,19 @@ const checkOrdersStatusFromSnapshot = async (machineId, options) => {
   
   // Apply additional filters if needed
   let filteredOrders = latestSnapshot.orders;
-  
+
   // Filter by date range if specified
   if (fromDate || toDate) {
+    const from = fromDate ? new Date(fromDate) : null;
+    const to = toDate ? new Date(toDate) : null;
     filteredOrders = filteredOrders.filter(order => {
       const orderDate = new Date(order.createdAt);
-      if (fromDate && orderDate < new Date(fromDate)) return false;
-      if (toDate && orderDate > new Date(toDate)) return false;
+      if (from && orderDate < from) return false;
+      if (to && orderDate > to) return false;
       return true;
     });
   }
-  
+
   // Apply limit
   if (limit && filteredOrders.length > limit) {
     filteredOrders = filteredOrders.slice(0, limit);
@@ -2384,36 +2483,28 @@ const checkOrdersStatusHybrid = async (machineId, options) => {
   
   // 6. Apply filters
   let filteredOrders = allOrders;
-  
+
   // Filter by date range
   if (fromDate || toDate) {
+    const from = fromDate ? new Date(fromDate) : null;
+    const to = toDate ? new Date(toDate) : null;
     filteredOrders = filteredOrders.filter(order => {
       const orderDate = new Date(order.createdAt);
-      if (fromDate && orderDate < new Date(fromDate)) return false;
-      if (toDate && orderDate > new Date(toDate)) return false;
+      if (from && orderDate < from) return false;
+      if (to && orderDate > to) return false;
       return true;
     });
   }
-  
+
   // Apply limit
   if (limit && filteredOrders.length > limit) {
     filteredOrders = filteredOrders.slice(0, limit);
   }
-  
-  // 7. Recalculate stats
-  const stats = {
-    totalScanned: allOrders.length,
-    totalWithTracking: allOrders.filter(o => o.hasTracking).length,
-    totalWithoutTracking: allOrders.filter(o => !o.hasTracking).length,
-    totalSubmitted: allOrders.filter(o => o.submittedToAmazon).length,
-    totalNotSubmitted: allOrders.filter(o => o.hasTracking && !o.submittedToAmazon).length,
-    filteredCount: filteredOrders.length,
-  };
-  
+
   return {
     orders: filteredOrders,
     totalCount: filteredOrders.length,
-    stats,
+    stats: _calcStats(allOrders, filteredOrders.length),
     dataSource: 'hybrid',
     snapshotId: latestSnapshot.snapshotId,
     snapshotAge: snapshotAgeMinutes,
@@ -2485,67 +2576,12 @@ async function checkOrdersStatusRealTime(machineId, options) {
     };
   }
 
-  // Process orders (logic gốc)
-  const ordersWithDetails = [];
-  for (const order of allOrders) {
-    let hasValidTracking = false;
-    let tracking = "";
-    let trackingInfo = null;
+  const ordersWithDetails = _extractOrderDetails(allOrders);
 
-    for (const item of order.items || []) {
-      const itemTracking = normalizeField(item?.tracking_info?.tracking);
-      if (itemTracking && itemTracking !== "-" && itemTracking !== "---") {
-        hasValidTracking = true;
-        tracking = itemTracking;
-        trackingInfo = {
-          tracking: itemTracking,
-          fulfillment: item.tracking_info?.fulfillment || "",
-          status: item.tracking_info?.status || "",
-          carrier: item.tracking_info?.note || "",
-          updated_at: item.tracking_info?.updated_at || null,
-        };
-        break;
-      }
-    }
-
-    ordersWithDetails.push({
-      orderId: order.orderId,
-      shopId: order.shopId?._id || order.shopId,
-      shopName: order.shopId?.name || null,
-      shopStore: order.shopId?.store || null,
-      status: order.status,
-      createdAt: order.createdAt,
-      updatedAt: order.updatedAt,
-      hasTracking: hasValidTracking,
-      tracking: tracking || null,
-      trackingInfo: trackingInfo,
-      itemsCount: (order.items || []).length,
-      customerEmail: order.customer?.email || null,
-      totalAmount: order.total_amount || 0,
-    });
-  }
-
-  // Check submission status
-  const allOrderIds = ordersWithDetails.map(o => o.orderId);
-  const submittedBatches = await ShippingBatch.find({
-    machineId,
-    "completed.orderId": { $in: allOrderIds },
-  }).lean();
-
-  const submissionMap = new Map();
-  for (const batch of submittedBatches) {
-    for (const completed of batch.completed || []) {
-      if (allOrderIds.includes(completed.orderId)) {
-        submissionMap.set(completed.orderId, {
-          submittedToAmazon: true,
-          batchId: batch._id,
-          batchType: batch.type,
-          submittedAt: batch.createdAt,
-          batchLabel: batch.label,
-        });
-      }
-    }
-  }
+  const submissionMap = await _buildSubmissionMap(
+    ordersWithDetails.map(o => o.orderId),
+    machineId
+  );
 
   const finalOrders = ordersWithDetails.map(order => ({
     ...order,
@@ -2570,19 +2606,10 @@ async function checkOrdersStatusRealTime(machineId, options) {
       break;
   }
 
-  const stats = {
-    totalScanned: allOrders.length,
-    totalWithTracking: finalOrders.filter(o => o.hasTracking).length,
-    totalWithoutTracking: finalOrders.filter(o => !o.hasTracking).length,
-    totalSubmitted: finalOrders.filter(o => o.submittedToAmazon).length,
-    totalNotSubmitted: finalOrders.filter(o => o.hasTracking && !o.submittedToAmazon).length,
-    filteredCount: filteredOrders.length,
-  };
-
   return {
     orders: filteredOrders,
     totalCount: filteredOrders.length,
-    stats,
+    stats: _calcStats(finalOrders, filteredOrders.length),
     dataSource: 'real-time',
     filter: { machineId, limit, fromDate, toDate, status, filterType },
   };
@@ -2592,68 +2619,11 @@ async function checkOrdersStatusRealTime(machineId, options) {
  * Helper function để process orders cho hybrid mode
  */
 const processOrdersForHybrid = async (orders, machineId) => {
-  const ordersWithDetails = [];
-  
-  for (const order of orders) {
-    let hasValidTracking = false;
-    let tracking = "";
-    let trackingInfo = null;
-
-    for (const item of order.items || []) {
-      const itemTracking = normalizeField(item?.tracking_info?.tracking);
-      if (itemTracking && itemTracking !== "-" && itemTracking !== "---") {
-        hasValidTracking = true;
-        tracking = itemTracking;
-        trackingInfo = {
-          tracking: itemTracking,
-          fulfillment: item.tracking_info?.fulfillment || "",
-          status: item.tracking_info?.status || "",
-          carrier: item.tracking_info?.note || "",
-          updated_at: item.tracking_info?.updated_at || null,
-        };
-        break;
-      }
-    }
-
-    ordersWithDetails.push({
-      orderId: order.orderId,
-      shopId: order.shopId?._id || order.shopId,
-      shopName: order.shopId?.name || null,
-      shopStore: order.shopId?.store || null,
-      status: order.status,
-      createdAt: order.createdAt,
-      updatedAt: order.updatedAt,
-      hasTracking: hasValidTracking,
-      tracking: tracking || null,
-      trackingInfo: trackingInfo,
-      itemsCount: (order.items || []).length,
-      customerEmail: order.customer?.email || null,
-      totalAmount: order.total_amount || 0,
-    });
-  }
-  
-  // Check submission status for new orders
-  const allOrderIds = ordersWithDetails.map(o => o.orderId);
-  const submittedBatches = await ShippingBatch.find({
-    machineId,
-    "completed.orderId": { $in: allOrderIds },
-  }).lean();
-
-  const submissionMap = new Map();
-  for (const batch of submittedBatches) {
-    for (const completed of batch.completed || []) {
-      if (allOrderIds.includes(completed.orderId)) {
-        submissionMap.set(completed.orderId, {
-          submittedToAmazon: true,
-          batchId: batch._id,
-          batchType: batch.type,
-          submittedAt: batch.createdAt,
-          batchLabel: batch.label,
-        });
-      }
-    }
-  }
-
+  const ordersWithDetails = _extractOrderDetails(orders);
+  const submissionMap = await _buildSubmissionMap(
+    ordersWithDetails.map(o => o.orderId),
+    machineId
+  );
   return ordersWithDetails.map(order => ({
     ...order,
     submittedToAmazon: submissionMap.has(order.orderId),
