@@ -4,7 +4,7 @@ const mongoose = require("mongoose");
 const FakeItemSchema = new mongoose.Schema(
   {
     orderId: { type: String, required: true },
-    tracking: { type: String, required: true },
+    tracking: { type: String },
     note: { type: String },
     createdAt: { type: Date, default: Date.now },
   },
