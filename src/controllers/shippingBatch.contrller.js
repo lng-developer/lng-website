@@ -488,7 +488,7 @@ function normalizeField(value) {
     .replace(/,+$/g, ""); // bỏ dấu phẩy ở cuối (case "9214...,")
 }
 
-function buildCompletedShppingFile(completed, options = {}) {
+function buildCompletedShippingFile(completed, options = {}) {
   const {
     carrierCode = "USPS",
     shipMethod = "USPS First Class",
@@ -1721,11 +1721,11 @@ const createBatchFromOrders = async (req, res, next) => {
       try {
         console.log(`🔄 [CREATE_BATCH] Processing shop ${shopId} with ${shopOrderIds.length} orders`);
 
-        // Lấy thông tin orders từ DB cho shop này
+        // Lấy thông tin orders từ DB cho shop này (populate để lấy tên shop)
         const shopOrders = await OrderCustomProduct.find({
           orderId: { $in: shopOrderIds },
           shopId: shopId
-        }).lean();
+        }).populate('shopId', 'name store').lean();
 
         if (!shopOrders.length) {
           console.log(`⚠️ [CREATE_BATCH] No orders found for shop ${shopId}`);
@@ -1743,14 +1743,21 @@ const createBatchFromOrders = async (req, res, next) => {
         let totalReal = 0;
         let totalFake = 0;
 
-        // Xử lý từng order của shop này
+        // Xử lý từng order — đọc tracking trực tiếp từ data đã fetch (tránh N+1 query)
         for (const order of shopOrders) {
           const orderId = order.orderId;
 
-          // Lấy tracking từ order
-          const realTracking = await getRealTrackingForOrder(orderId);
+          // Tìm tracking hợp lệ đầu tiên trong tất cả items
+          let realTracking = null;
+          for (const item of order.items || []) {
+            const t = item?.tracking_info?.tracking;
+            if (t && t.trim() && t !== '-' && t !== '---') {
+              realTracking = t.trim();
+              break;
+            }
+          }
 
-          if (realTracking && realTracking.trim()) {
+          if (realTracking) {
             // ✅ Có real tracking
             completed.push({
               orderId,
@@ -1761,35 +1768,19 @@ const createBatchFromOrders = async (req, res, next) => {
             });
             totalReal++;
           } else {
-            // ❌ Không có tracking → chỉ lưu vào tracking_fakes để theo dõi, không tạo fake tracking
-            /* COMMENTED OUT - removed fake tracking logic
-            const fakeTracking = generateFakeTracking();
-            
-            // Thêm vào completed với fake tracking
-            completed.push({
-              orderId,
-              tracking: fakeTracking,
-              isFake: true,
-              source: "fake",
-              createdAt: new Date()
-            });
-            */
-
-            // Thêm vào tracking_fakes để theo dõi (không có tracking)
+            // ❌ Không có tracking → lưu vào tracking_fakes để theo dõi
             tracking_fakes.push({
               orderId,
-              // tracking: fakeTracking, // REMOVED
-              note: "No real tracking available", // Updated note
+              note: "No real tracking available",
               createdAt: new Date()
             });
-
             totalFake++;
           }
         }
 
-        // Lấy shop name để làm label
-        const shopInfo = shopOrders[0]; // Lấy thông tin shop từ order đầu tiên
-        const shopName = shopInfo.shopName || shopInfo.shopStore || `Shop ${shopId}`;
+        // Lấy shop name từ populated shopId
+        const shopInfo = shopOrders[0];
+        const shopName = shopInfo.shopId?.name || shopInfo.shopId?.store || `Shop ${shopId}`;
         const batchLabel = label ? `${label} - ${shopName}` : `FE Batch - ${shopName}`;
 
         // Tạo batch cho shop này
