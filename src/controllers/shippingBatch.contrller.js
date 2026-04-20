@@ -1773,8 +1773,8 @@ const createBatchFromOrders = async (req, res, next) => {
           if (realTracking) {
             // ✅ Có real tracking
             completed.push({
-              orderId: processed.orderId,
-              tracking: processed.tracking,
+              orderId,
+              tracking: realTracking,
               isFake: false,
               source: "system",
               createdAt: new Date()
@@ -2365,6 +2365,14 @@ const _calcStats = (orders, filteredCount) => {
 
 // ─────────────────────────────────────────────────────────────────────────────
 
+const _enrichSnapshotOrders = (orders, snapshot) =>
+  orders.map(o => ({
+    ...o,
+    shopId: o.shopId ?? snapshot.shopId,
+    shopName: o.shopName ?? snapshot.shopName,
+    shopStore: o.shopStore ?? snapshot.shopStore,
+  }));
+
 /**
  * ✅ Mode 1: Snapshot Only - Chỉ lấy từ snapshot
  */
@@ -2395,7 +2403,7 @@ const checkOrdersStatusFromSnapshot = async (machineId, options) => {
   console.log(`📊 [SNAPSHOT_ONLY] Using snapshot from ${Math.round(snapshotAge/1000/60)} minutes ago`);
   
   // Apply additional filters if needed
-  let filteredOrders = latestSnapshot.orders;
+  let filteredOrders = _enrichSnapshotOrders(latestSnapshot.orders, latestSnapshot);
 
   // Filter by date range if specified
   if (fromDate || toDate) {
@@ -2479,7 +2487,7 @@ const checkOrdersStatusHybrid = async (machineId, options) => {
   }
   
   // 5. Merge snapshot orders + new orders
-  let allOrders = [...latestSnapshot.orders, ...newOrdersProcessed];
+  let allOrders = [..._enrichSnapshotOrders(latestSnapshot.orders, latestSnapshot), ...newOrdersProcessed];
   
   // 6. Apply filters
   let filteredOrders = allOrders;
