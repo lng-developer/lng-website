@@ -1734,7 +1734,7 @@ const createBatchFromOrders = async (req, res, next) => {
       try {
         console.log(`🔄 [CREATE_BATCH] Processing shop ${shopId} with ${shopOrderIds.length} orders`);
 
-        // Lấy thông tin orders từ DB cho shop này (populate shopId để lấy tên shop)
+        // Lấy thông tin orders từ DB cho shop này (populate để lấy tên shop)
         const shopOrders = await OrderCustomProduct.find({
           orderId: { $in: shopOrderIds },
           shopId: shopId
@@ -1756,15 +1756,25 @@ const createBatchFromOrders = async (req, res, next) => {
         let totalReal = 0;
         let totalFake = 0;
 
-        // Dùng _extractOrderDetails để lấy tracking từ orders đã fetch (tránh N+1 query)
-        const processedOrders = _extractOrderDetails(shopOrders);
+        // Xử lý từng order — đọc tracking trực tiếp từ data đã fetch (tránh N+1 query)
+        for (const order of shopOrders) {
+          const orderId = order.orderId;
 
-        for (const processed of processedOrders) {
-          if (processed.hasTracking && processed.tracking) {
+          // Tìm tracking hợp lệ đầu tiên trong tất cả items
+          let realTracking = null;
+          for (const item of order.items || []) {
+            const t = item?.tracking_info?.tracking;
+            if (t && t.trim() && t !== '-' && t !== '---') {
+              realTracking = t.trim();
+              break;
+            }
+          }
+
+          if (realTracking) {
             // ✅ Có real tracking
             completed.push({
-              orderId: processed.orderId,
-              tracking: processed.tracking,
+              orderId,
+              tracking: realTracking,
               isFake: false,
               source: "system",
               createdAt: new Date()
@@ -1773,7 +1783,7 @@ const createBatchFromOrders = async (req, res, next) => {
           } else {
             // ❌ Không có tracking → lưu vào tracking_fakes để theo dõi
             tracking_fakes.push({
-              orderId: processed.orderId,
+              orderId,
               note: "No real tracking available",
               createdAt: new Date()
             });
@@ -2355,6 +2365,14 @@ const _calcStats = (orders, filteredCount) => {
 
 // ─────────────────────────────────────────────────────────────────────────────
 
+const _enrichSnapshotOrders = (orders, snapshot) =>
+  orders.map(o => ({
+    ...o,
+    shopId: o.shopId ?? snapshot.shopId,
+    shopName: o.shopName ?? snapshot.shopName,
+    shopStore: o.shopStore ?? snapshot.shopStore,
+  }));
+
 /**
  * ✅ Mode 1: Snapshot Only - Chỉ lấy từ snapshot
  */
@@ -2385,7 +2403,7 @@ const checkOrdersStatusFromSnapshot = async (machineId, options) => {
   console.log(`📊 [SNAPSHOT_ONLY] Using snapshot from ${Math.round(snapshotAge/1000/60)} minutes ago`);
   
   // Apply additional filters if needed
-  let filteredOrders = latestSnapshot.orders;
+  let filteredOrders = _enrichSnapshotOrders(latestSnapshot.orders, latestSnapshot);
 
   // Filter by date range if specified
   if (fromDate || toDate) {
@@ -2469,7 +2487,7 @@ const checkOrdersStatusHybrid = async (machineId, options) => {
   }
   
   // 5. Merge snapshot orders + new orders
-  let allOrders = [...latestSnapshot.orders, ...newOrdersProcessed];
+  let allOrders = [..._enrichSnapshotOrders(latestSnapshot.orders, latestSnapshot), ...newOrdersProcessed];
   
   // 6. Apply filters
   let filteredOrders = allOrders;
