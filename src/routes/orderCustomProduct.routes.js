@@ -31,7 +31,7 @@ router.post(
 // Manual Mapping
 router.put(
   "/manual-mapping",
-  // authenticateToken,
+  authenticateToken,
   controller.applyManualVendorMapping
 );
 
