@@ -4407,8 +4407,26 @@ const applyManualVendorMapping = async (req, res) => {
     const order = await OrderCustomProduct.findOne({ orderId });
     if (!order) return res.status(404).json({ message: "Order not found" });
 
+    const changes = [];
+    const oldForcedVendorId = order.forced_vendor_id
+      ? String(order.forced_vendor_id)
+      : null;
+
     if (forcedVendorId !== undefined) {
-      order.forced_vendor_id = forcedVendorId || null;
+      const nextForcedVendorId = forcedVendorId || null;
+      const nextForcedVendorIdStr = nextForcedVendorId
+        ? String(nextForcedVendorId)
+        : null;
+
+      if (oldForcedVendorId !== nextForcedVendorIdStr) {
+        changes.push({
+          field: "forced_vendor_id",
+          from: oldForcedVendorId,
+          to: nextForcedVendorIdStr,
+        });
+      }
+
+      order.forced_vendor_id = nextForcedVendorId;
     }
 
     if (Array.isArray(items)) {
@@ -4417,7 +4435,23 @@ const applyManualVendorMapping = async (req, res) => {
           (i) => String(i.orderItemId) === String(override.orderItemId)
         );
         if (item) {
-          item.manual_vendor_cost_center_id = override.vendorCostCenterId || null;
+          const oldManualVendorCostCenterId = item.manual_vendor_cost_center_id
+            ? String(item.manual_vendor_cost_center_id)
+            : null;
+          const nextManualVendorCostCenterId = override.vendorCostCenterId || null;
+          const nextManualVendorCostCenterIdStr = nextManualVendorCostCenterId
+            ? String(nextManualVendorCostCenterId)
+            : null;
+
+          if (oldManualVendorCostCenterId !== nextManualVendorCostCenterIdStr) {
+            changes.push({
+              field: `items[orderItemId=${item.orderItemId}].manual_vendor_cost_center_id`,
+              from: oldManualVendorCostCenterId,
+              to: nextManualVendorCostCenterIdStr,
+            });
+          }
+
+          item.manual_vendor_cost_center_id = nextManualVendorCostCenterId;
 
           // 👉 Xoá breakdown cũ nếu user huỷ manual mapping để hàm compute ép tính lại từ đầu
           if (!override.vendorCostCenterId) {
@@ -4429,6 +4463,21 @@ const applyManualVendorMapping = async (req, res) => {
 
     // Lưu lại manual_vendor_cost_center_id trước
     await order.save();
+
+    if (changes.length > 0) {
+      await logOrderHistory({
+        orderDoc: order,
+        action: "UPDATE_MANUAL_VENDOR_MAPPING",
+        description: "Manual vendor mapping updated",
+        changes,
+        user: req.user,
+        context: {
+          source: "PORTAL",
+          ip: req.ip,
+          userAgent: req.headers["user-agent"],
+        },
+      });
+    }
 
     // 👉 GỌI TRỰC TIẾP HÀM computeBaseCostForOrder ĐỂ TỰ ĐỘNG GOM NHÓM VÀ TÍNH SHIP CHUẨN XÁC DO MÌNH VỪA FIX
     // Tránh việc tự cộng dồn tay gộp shipping sai ở đây.

@@ -23,6 +23,7 @@ const orderHistorySchema = new mongoose.Schema(
                 "UPDATE_ADDRESS",
                 "UPDATE_BASE_COST",
                 "UPDATE_ITEM_QUANTITY",
+                "UPDATE_MANUAL_VENDOR_MAPPING",
                 "SYNC_AMAZON_FINANCE",
                 "SEND_TO_VENDOR",
                 "OPEN_CASE",
