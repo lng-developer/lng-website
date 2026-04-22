@@ -370,6 +370,84 @@ const validateAddressByOrderId = async (req, res) => {
   }
 };
 
+const markAddressValidByOrderId = async (req, res) => {
+  try {
+    const { orderId } = req.params;
+
+    const order = await OrderCustomProduct.findOne({ orderId });
+    if (!order) {
+      return res.status(404).json({
+        message: "Order not found",
+        orderId,
+      });
+    }
+
+    const oldAddressValid = order.address_validation?.isValid ?? null;
+    const oldScaleOverallStatus = order.scale_overall_status;
+
+    const nextScaleOverallStatus =
+      oldScaleOverallStatus === "Address Invalid"
+        ? "Pending"
+        : oldScaleOverallStatus;
+
+    if (oldAddressValid === true && nextScaleOverallStatus === oldScaleOverallStatus) {
+      return res.status(200).json({
+        message: "No change",
+        orderId,
+        addressValid: true,
+        scale_overall_status: order.scale_overall_status,
+      });
+    }
+
+    order.address_validation = {
+      isValid: true,
+      smartyResponse: order.address_validation?.smartyResponse ?? null,
+    };
+    order.scale_overall_status = nextScaleOverallStatus;
+    await order.save();
+
+    await logOrderHistory({
+      orderDoc: order,
+      action: "MARK_ADDRESS_VALID",
+      description: "Address validation manually overridden to valid",
+      changes: [
+        {
+          field: "address_validation.isValid",
+          from: oldAddressValid,
+          to: true,
+        },
+        ...(oldScaleOverallStatus !== nextScaleOverallStatus
+          ? [
+            {
+              field: "scale_overall_status",
+              from: oldScaleOverallStatus,
+              to: nextScaleOverallStatus,
+            },
+          ]
+          : []),
+      ],
+      user: req.user,
+      context: {
+        source: "PORTAL",
+        ip: req.ip,
+        userAgent: req.headers["user-agent"],
+      },
+    });
+
+    return res.status(200).json({
+      message: "Order address marked as valid successfully",
+      orderId,
+      addressValid: true,
+      scale_overall_status: order.scale_overall_status,
+    });
+  } catch (err) {
+    return res.status(500).json({
+      message: "Failed to mark address as valid",
+      error: err.message,
+    });
+  }
+};
+
 // Helper: xác định validation “đủ tin cậy” hay chỉ là lỗi hệ thống/billing
 function normalizeValidationResult(result) {
   // Kỳ vọng validateAddressWithSmarty trả { isValid, smartyResponse }
@@ -4394,6 +4472,33 @@ const updateOrderItemQuantity = async (req, res) => {
       });
     }
 
+    const existingOrder = await OrderCustomProduct.findOne({
+      orderId,
+      "items.orderItemId": orderItemId,
+    });
+
+    if (!existingOrder) {
+      return res.status(404).json({
+        message: "Order or order item not found",
+      });
+    }
+
+    const existingItem = existingOrder.items.find(
+      (item) => item.orderItemId === orderItemId
+    );
+    const oldQuantity = existingItem?.quantity ?? null;
+
+    if (oldQuantity === parsedQuantity) {
+      return res.status(200).json({
+        message: "No change",
+        data: {
+          orderId,
+          orderItemId,
+          quantity: parsedQuantity,
+        },
+      });
+    }
+
     // update đúng item trong mảng items
     const updatedOrder = await OrderCustomProduct.findOneAndUpdate(
       {
@@ -4421,6 +4526,26 @@ const updateOrderItemQuantity = async (req, res) => {
     const updatedItem = updatedOrder.items.find(
       (item) => item.orderItemId === orderItemId
     );
+
+    await logOrderHistory({
+      orderDoc: updatedOrder,
+      action: "UPDATE_ITEM_QUANTITY",
+      description: `Order item quantity changed from ${oldQuantity} to ${updatedItem?.quantity || parsedQuantity}`,
+      changes: [
+        {
+          field: "items.quantity",
+          from: oldQuantity,
+          to: updatedItem?.quantity || parsedQuantity,
+        },
+      ],
+      orderItemId,
+      user: req.user,
+      context: {
+        source: "PORTAL",
+        ip: req.ip,
+        userAgent: req.headers["user-agent"],
+      },
+    });
 
     return res.status(200).json({
       message: "Order item quantity updated successfully",
@@ -4458,6 +4583,7 @@ module.exports = {
   createReplacementOrder,
   updateScaleOrder,
   validateAddressByOrderId,
+  markAddressValidByOrderId,
   validateInvalidAddressesBatch,
   updateTrackingByOrderId,
   applyManualVendorMapping,
