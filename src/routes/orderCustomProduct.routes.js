@@ -83,6 +83,11 @@ router.put("/:orderId", authenticateToken, controller.updateScaleOrder);
 router.post("/:orderId/replace", authenticateToken, controller.createReplacementOrder);
 
 router.post("/:orderId/validate-address", controller.validateAddressByOrderId);
+router.put(
+  "/:orderId/mark-address-valid",
+  authenticateToken,
+  controller.markAddressValidByOrderId
+);
 
 // routes/order.routes.js
 router.post("/orders/address/validate-invalid", controller.validateInvalidAddressesBatch);
