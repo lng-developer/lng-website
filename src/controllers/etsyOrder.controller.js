@@ -908,7 +908,7 @@ async function calculateEtsyCost(order) {
         if (!vendorSelection.success) { stagedItems.push({ transactionId: itemId, sku, mapped_sku, used_sku, configCode, sizeValue, colorValue, status: "failed", reason: vendorSelection.reason }); continue; }
 
         const { vendorProductId, matched, selectedOrder, itemDisplayName, vendorId } = vendorSelection;
-        const baseEach = Number(matched?.base_cost || 0);
+        const baseEach = Number(matched?.base_cost || 0) + 1; // +1$ per item surcharge
         const qty = Math.max(1, Number(item.quantity || 1));
 
         const rate = await (async () => {

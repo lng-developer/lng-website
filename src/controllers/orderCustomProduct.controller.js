@@ -3484,7 +3484,7 @@ const computeBaseCostForOrder = async (req, res) => {
         vendorId,
       } = vendorSelection;
 
-      const baseEach = Number(matched?.base_cost || 0);
+      const baseEach = Number(matched?.base_cost || 0) + 1; // +1$ per item surcharge
       const qty = Math.max(1, Number(item.quantity || 1));
 
       // ===== inline resolveShippingRates (cached) =====
