@@ -865,7 +865,7 @@ const vendorSyncList = async (req, res) => {
  */
 const vendorSyncBatch = async (req, res) => {
   try {
-    const { max = 100, dryRun = false } = req.body || {};
+    const { max = 400, dryRun = false } = req.body || {};
     const result = await runBatch({
       max: Number(max) || 100,
       dryRun: Boolean(dryRun),
