@@ -30,7 +30,6 @@ const Notification = require("./notification.model")
 const Issue = require("./issue.model")
 const EtsyOrder = require("./etsyOrder.model")
 const ExtensionLog = require("./extensionLog.model")
-const OrderStatusSnapshot = require("./orderStatusSnapshot.model")
 const AutoConfig = require("./autoConfig.model")
 
 // Cau hinh mongoose dang global
@@ -70,7 +69,6 @@ db.Notification = Notification
 db.Issue = Issue
 db.EtsyOrder = EtsyOrder
 db.ExtensionLog = ExtensionLog
-db.OrderStatusSnapshot = OrderStatusSnapshot
 db.AutoConfig = AutoConfig
 db.connectDB = async () => {
   await mongoose
