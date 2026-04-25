@@ -2292,6 +2292,102 @@ const updateBaseCost = async (req, res) => {
   }
 };
 
+const resetBaseCost = async (req, res) => {
+  try {
+    const { orderId } = req.body;
+
+    if (!orderId) {
+      return res.status(400).json({ message: "Missing orderId" });
+    }
+
+    const order = await OrderCustomProduct.findOne({ orderId });
+    if (!order) {
+      return res.status(404).json({ message: "Order not found" });
+    }
+
+    const oldBaseCost = Number(order.base_cost || 0);
+    const oldShippingGroups = Array.isArray(order.base_cost_shipping_groups)
+      ? order.base_cost_shipping_groups
+      : [];
+    const oldComputedAt = order.base_cost_computed_at || null;
+    const itemsWithCostBreakdown = Array.isArray(order.items)
+      ? order.items.filter((item) => item?.cost_breakdown != null).length
+      : 0;
+
+    order.base_cost = 0;
+    order.base_cost_shipping_groups = [];
+    order.base_cost_computed_at = null;
+
+    if (Array.isArray(order.items)) {
+      for (const item of order.items) {
+        item.cost_breakdown = undefined;
+      }
+    }
+
+    await order.save();
+
+    const changes = [];
+    if (oldBaseCost !== 0) {
+      changes.push({
+        field: "base_cost",
+        from: oldBaseCost,
+        to: 0,
+      });
+    }
+
+    if (oldShippingGroups.length > 0) {
+      changes.push({
+        field: "base_cost_shipping_groups",
+        from: oldShippingGroups,
+        to: [],
+      });
+    }
+
+    if (oldComputedAt) {
+      changes.push({
+        field: "base_cost_computed_at",
+        from: oldComputedAt,
+        to: null,
+      });
+    }
+
+    if (itemsWithCostBreakdown > 0) {
+      changes.push({
+        field: "items.cost_breakdown",
+        from: `${itemsWithCostBreakdown} item(s) had cost breakdown`,
+        to: "removed",
+      });
+    }
+
+    if (changes.length > 0) {
+      await logOrderHistory({
+        orderDoc: order,
+        action: "UPDATE_BASE_COST",
+        description: "Order base cost reset to 0 and item cost breakdown removed",
+        changes,
+        user: req.user,
+        context: {
+          source: "PORTAL",
+          ip: req.ip,
+          userAgent: req.headers["user-agent"],
+        },
+      });
+    }
+
+    return res.status(200).json({
+      message: "Order base cost reset successfully",
+      orderId,
+      base_cost: 0,
+      removedCostBreakdownCount: itemsWithCostBreakdown,
+    });
+  } catch (error) {
+    return res.status(500).json({
+      message: "Failed to reset order base cost",
+      error: error.message,
+    });
+  }
+};
+
 const updateCustomerInfo = async (req, res) => {
   try {
     const { orderId, customer_infor } = req.body;
@@ -4621,6 +4717,7 @@ module.exports = {
   updateOrderStatus,
   updateShippingType,
   updateBaseCost,
+  resetBaseCost,
   updateCustomerInfo,
   openCaseInOrder,
   getOrderStatistics,
