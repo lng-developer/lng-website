@@ -1,6 +1,7 @@
 const db = require("../models");
 const ShippingBatch = db.ShippingBatch;
 const OrderCustomProduct = db.orderCustomProduct;
+const Shop = db.shop;
 
 async function getRealTrackingForOrder(orderId) {
   const order = await OrderCustomProduct.findOne({ orderId: orderId });
@@ -1969,7 +1970,9 @@ const _buildSubmissionMap = async (orderIds, machineId) => {
   const submittedBatches = await ShippingBatch.find({
     machineId,
     "completed.orderId": { $in: orderIds },
-  }).lean();
+  })
+    .select('_id type label createdAt completed.orderId')
+    .lean();
 
   const map = new Map();
   for (const batch of submittedBatches) {
@@ -2030,8 +2033,11 @@ async function checkOrdersStatusRealTime(machineId, options) {
     }
   }
 
+  // Fetch shop once (all orders for machineId belong to this shop) — tránh .populate() N+1
+  const shop = await Shop.findById(machineId).select('name store').lean();
+
   const allOrders = await OrderCustomProduct.find(orderFilter)
-    .populate('shopId', 'name store')
+    .select('orderId shopId status createdAt updatedAt items.tracking_info.tracking items.tracking_info.fulfillment items.tracking_info.status items.tracking_info.note items.tracking_info.updated_at customer.email total_amount')
     .sort({ createdAt: -1 })
     .limit(Number(limit))
     .lean();
@@ -2043,6 +2049,12 @@ async function checkOrdersStatusRealTime(machineId, options) {
       dataSource: 'real-time',
       filter: { machineId, limit, fromDate, toDate, status, filterType },
     };
+  }
+
+  // Inject shop info để _extractOrderDetails đọc được name/store
+  if (shop) {
+    const shopInfo = { _id: shop._id, name: shop.name, store: shop.store };
+    for (const order of allOrders) order.shopId = shopInfo;
   }
 
   const ordersWithDetails = _extractOrderDetails(allOrders);

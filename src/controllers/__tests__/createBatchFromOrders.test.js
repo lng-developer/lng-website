@@ -15,11 +15,11 @@ jest.mock('../../models', () => ({
   OrderStatusSnapshot: { exists: jest.fn() },
 }));
 
-jest.mock('../../service/orderStatusSync', () => ({}));
+jest.mock('../../service/orderStatusSync', () => ({}), { virtual: true });
 
 jest.mock('../../service/snapshotAutoSync', () => ({
   updateBatchSubmissionStatus: jest.fn().mockResolvedValue({}),
-}));
+}), { virtual: true });
 
 const db = require('../../models');
 const controller = require('../shippingBatch.contrller');
