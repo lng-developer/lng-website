@@ -55,6 +55,7 @@ router.put(
 );
 
 router.put("/update-base-cost", authenticateToken, controller.updateBaseCost);
+router.put("/reset-base-cost", authenticateToken, controller.resetBaseCost);
 
 router.put(
   "/update-customer-info",
