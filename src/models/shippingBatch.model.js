@@ -82,6 +82,8 @@ const ShippingBatchSchema = new mongoose.Schema(
 
 ShippingBatchSchema.index({ machineId: 1, createdAt: -1 });
 ShippingBatchSchema.index({ label: 1, createdAt: -1 });
+// Tối ưu _buildSubmissionMap: filter machineId + match orderId trong completed[]
+ShippingBatchSchema.index({ machineId: 1, "completed.orderId": 1 });
 
 const ShippingBatch = mongoose.model("ShippingBatch", ShippingBatchSchema);
 

@@ -338,4 +338,7 @@ const orderCustomProductSchema = new mongoose.Schema({
 // Tối ưu truy vấn theo orderId + orderItemId
 orderCustomProductSchema.index({ orderId: 1, "items.orderItemId": 1 });
 
+// Tối ưu checkOrdersStatus: filter shopId + sort createdAt desc + limit
+orderCustomProductSchema.index({ shopId: 1, createdAt: -1 });
+
 module.exports = mongoose.model("OrderCustomProduct", orderCustomProductSchema);
