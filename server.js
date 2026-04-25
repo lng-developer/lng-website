@@ -93,7 +93,7 @@ app.use("/api/etsy-listing", EtsyListingRoutes);
 app.use("/api/auto-config", autoConfigRoutes);
 app.use("/api/ext/logs", extensionLogRoutes);
 
-
+app.use("/api/r2-test", require("./src/routes/upload.router.R2"));
 // ===== HTTP server
 const httpServer = http.createServer(app);
 
