@@ -291,9 +291,10 @@ async function send(orderDoc) {
 
     // --- Auto Pay ngay sau khi tạo đơn thành công ---
     const autoPay = String(process.env.PRINTWAY_AUTO_PAY || "true").toLowerCase() !== "false";
-    const payStrict = String(process.env.PRINTWAY_PAY_STRICT || "true").toLowerCase() !== "false";
+    const payStrict = false;
 
     let payResult = null;
+    let payError = null;
     if (autoPay) {
         try {
             payResult = await payOrder(
@@ -303,12 +304,11 @@ async function send(orderDoc) {
             );
         } catch (e) {
             console.error("[PRINTWAY] Auto pay failed:", e?.message, e?.vendorResponse || "");
-            if (payStrict) {
-                // Nếu bạn muốn thất bại cả quy trình khi thanh toán lỗi (mặc định)
-                e.code = e.code || "PRINTWAY_PAY_FAILED";
-                throw e;
-            }
-            // Nếu không strict, chỉ gắn cảnh báo trong normalized
+            payError = {
+                code: e?.code || "PRINTWAY_PAY_FAILED",
+                message: e?.message || "Printway: Payment failed",
+                vendorResponse: e?.vendorResponse || null,
+            };
         }
     }
 
@@ -320,6 +320,7 @@ async function send(orderDoc) {
             autoPay: autoPay,
             payStrict: payStrict,
             payResult: payResult || null,
+            payError,
         },
     };
 }
