@@ -2,6 +2,8 @@ const db = require("../models");
 const Shop = db.shop;
 const RealtimeLog = db.RealtimeLog;
 const OrderCustomProduct = db.orderCustomProduct;
+const taskStatusService = require("../service/taskStatus.service");
+const { emitTaskToMachine, buildTaskId } = require("../lib/taskEmitter");
 
 const mongoose = require("mongoose");
 const axios = require("axios").default;
@@ -886,7 +888,19 @@ const pullAllOrder = async (req, res) => {
   const io = req.app.get("io");
   if (!io) return res.status(500).json({ ok: false, message: "io missing" });
 
-  const task = { type: type, payload: payload };
+  // Broadcast — không persist vì không có machineId cụ thể.
+  // Extension nhận sẽ self-generate eventId từ taskId+status.
+  const broadcastTaskId = buildTaskId({
+    type,
+    shopId: "broadcast",
+    payload,
+  });
+  const task = {
+    taskId: broadcastTaskId,
+    type,
+    payload: { ...(payload || {}), taskId: broadcastTaskId },
+    sentAt: new Date().toISOString(),
+  };
 
   io.emit("server:task", task);
 
@@ -939,12 +953,18 @@ async function requestExtension(req, res) {
       return res.status(500).json({ ok: false, message: "io missing" });
     }
 
-    const task = { type: type, payload: payload };
-    console.log(`📤 [REQUEST-EXT] Sending task to machine:${machineId}`, { type, payload });
-    
-    // Emit task
-    io.to(`machine:${machineId}`).emit("server:task", task);
-    console.log(`✅ [REQUEST-EXT] Task emitted successfully`);
+    const taskId = buildTaskId({ type, shopId, machineId, payload });
+    console.log(`📤 [REQUEST-EXT] Sending task ${taskId} to machine:${machineId}`, { type, payload });
+
+    // Emit task (persist + send) — payload tự động chèn taskId
+    const emitted = await emitTaskToMachine(io, {
+      taskId,
+      type,
+      shopId,
+      machineId,
+      payload,
+    });
+    console.log(`✅ [REQUEST-EXT] Task emitted successfully (taskId=${emitted.taskId})`);
 
     let message = "";
 
@@ -979,18 +999,66 @@ async function requestExtension(req, res) {
     console.log(`✅ [REQUEST-EXT][${endTime.toISOString()}] Completed successfully`);
     console.log(`⏱️  [REQUEST-EXT] Duration: ${duration}ms`);
 
-    return res.json({ ok: true });
+    return res.json({ ok: true, taskId: emitted.taskId });
   } catch (e) {
     const endTime = new Date();
     const duration = endTime - startTime;
-    
+
     console.error(`❌ [REQUEST-EXT][${endTime.toISOString()}] Failed after ${duration}ms`);
     console.error(`❌ [REQUEST-EXT] Error: ${e.message}`);
     console.error(`❌ [REQUEST-EXT] Stack:`, e.stack);
-    
+
     return res.status(500).json({ ok: false, message: e.message });
   }
 }
+
+/**
+ * POST /api/ext/task-result
+ * REST fallback khi socket lỗi. Idempotent theo eventId.
+ * body: { eventId, taskId, status, type?, shopId?, machineId?, result?, error?, source?, reportedAt? }
+ */
+const taskResultRest = async (req, res) => {
+  try {
+    const payload = req.body || {};
+
+    if (!payload.eventId) {
+      return res.status(400).json({ ok: false, message: "eventId is required" });
+    }
+    if (!payload.taskId) {
+      return res.status(400).json({ ok: false, message: "taskId is required" });
+    }
+    if (!payload.status) {
+      return res.status(400).json({ ok: false, message: "status is required" });
+    }
+
+    const result = await taskStatusService.upsertByEventId({
+      eventId: payload.eventId,
+      taskId: payload.taskId,
+      type: payload.type,
+      status: payload.status,
+      shopId: payload.shopId,
+      machineId: payload.machineId,
+      result: payload.result,
+      error: payload.error,
+      source: payload.source || "rest_fallback",
+      reportedAt: payload.reportedAt,
+      rawPayload: payload,
+    });
+
+    console.log(
+      `📨 [REST] /task-result ${payload.status} taskId=${payload.taskId} eventId=${payload.eventId} deduped=${result.deduped}`
+    );
+
+    return res.json({
+      ok: true,
+      eventId: payload.eventId,
+      deduped: !!result.deduped,
+    });
+  } catch (e) {
+    console.error("[REST] /task-result error:", e.message);
+    return res.status(500).json({ ok: false, message: e.message });
+  }
+};
 
 /**
  * POST /api/request-extension/auto-all
@@ -1342,6 +1410,7 @@ module.exports = {
   pullAllOrder,
   testConnection,
   broadcastMessage,
+  taskResultRest,
 
   // vendor sync APIs
   vendorSyncOne,
