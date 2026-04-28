@@ -1,5 +1,6 @@
 // src/socket/index.js
 const presence = require("../lib/presence");
+const taskStatusService = require("../service/taskStatus.service");
 
 module.exports = function registerSocketHandlers({ app, io }) {
   app.set("io", io);
@@ -75,29 +76,121 @@ module.exports = function registerSocketHandlers({ app, io }) {
       rooms: [`shop:${shopId}`, `machine:${machineId}`]
     });
 
-    // Heartbeat
-    socket.on("ext:heartbeat", (p = {}) => {
-      presence.heartbeat(machineId, {
-        label: p.label,
-        version: p.version,
-        ua: p.ua,
-        ip: p.ip,
-      });
-      io.to(`shop:${shopId}`).emit("presence:update", {
-        kind: "heartbeat",
-        at: Date.now(),
-        client: {
-          shopId,
+    // Heartbeat — BẮT BUỘC ACK callback để extension không tăng heartbeatFailCount
+    socket.on("ext:heartbeat", (p = {}, ack) => {
+      try {
+        presence.heartbeat(machineId, {
+          label: p.label,
+          version: p.version,
+          ua: p.ua,
+          ip: p.ip,
+        });
+        io.to(`shop:${shopId}`).emit("presence:update", {
+          kind: "heartbeat",
+          at: Date.now(),
+          client: {
+            shopId,
+            machineId,
+            label: p.label || label || `Client ${machineId}`,
+            version: p.version || version || "",
+            socketId: socket.id,
+            ua: p.ua || ua || "",
+            ip: p.ip || ip || "",
+            status: "online",
+            lastSeen: Date.now(),
+          },
+        });
+        if (typeof ack === "function") {
+          ack({ ok: true, serverTs: Date.now() });
+        }
+      } catch (err) {
+        console.error("[SOCKET] ext:heartbeat error:", err.message);
+        if (typeof ack === "function") {
+          ack({ ok: false, message: err.message });
+        }
+      }
+    });
+
+    // client:task — Extension gửi status received/completed/failed (idempotent theo eventId)
+    socket.on("client:task", async (payload = {}, ack) => {
+      try {
+        const result = await taskStatusService.upsertByEventId({
+          eventId: payload.eventId,
+          taskId: payload.taskId,
+          type: payload.type,
+          status: payload.status,
+          shopId: payload.shopId || shopId,
+          machineId: payload.machineId || machineId,
+          result: payload.result,
+          error: payload.error,
+          source: payload.source || "chrome_extension",
+          reportedAt: payload.reportedAt,
+          rawPayload: payload,
+        });
+
+        console.log(
+          `📨 [SOCKET] client:task ${payload.status} taskId=${payload.taskId} eventId=${payload.eventId} deduped=${result.deduped}`
+        );
+
+        // Broadcast cho monitor dashboard
+        io.to(`shop:${shopId}`).emit("task:status", {
+          taskId: payload.taskId,
+          eventId: payload.eventId,
+          status: payload.status,
           machineId,
-          label: p.label || label || `Client ${machineId}`,
-          version: p.version || version || "",
-          socketId: socket.id,
-          ua: p.ua || ua || "",
-          ip: p.ip || ip || "",
-          status: "online",
-          lastSeen: Date.now(),
-        },
-      });
+          shopId,
+          deduped: result.deduped,
+          at: Date.now(),
+        });
+
+        if (typeof ack === "function") {
+          ack({ ok: true, eventId: payload.eventId, deduped: result.deduped });
+        }
+      } catch (err) {
+        console.error("[SOCKET] client:task error:", err.message);
+        if (typeof ack === "function") {
+          ack({ ok: false, message: err.message });
+        }
+      }
+    });
+
+    // client:pull_pending_tasks — Resend tasks chưa hoàn tất khi extension reconnect
+    socket.on("client:pull_pending_tasks", async (payload = {}, ack) => {
+      try {
+        const targetMachineId = payload.machineId || machineId;
+        const targetShopId = payload.shopId || shopId;
+
+        const pending = await taskStatusService.findPendingTasks({
+          shopId: targetShopId,
+          machineId: targetMachineId,
+          statuses: ["sent", "received"],
+        });
+
+        for (const t of pending) {
+          socket.emit("server:task", {
+            taskId: t.taskId,
+            type: t.type,
+            payload: t.payload,
+            sentAt: (t.sentAt || t.createdAt || new Date()).toISOString
+              ? (t.sentAt || t.createdAt || new Date()).toISOString()
+              : new Date().toISOString(),
+            resent: true,
+          });
+        }
+
+        console.log(
+          `🔁 [SOCKET] Resent ${pending.length} pending tasks to machine:${targetMachineId}`
+        );
+
+        if (typeof ack === "function") {
+          ack({ ok: true, count: pending.length });
+        }
+      } catch (err) {
+        console.error("[SOCKET] client:pull_pending_tasks error:", err.message);
+        if (typeof ack === "function") {
+          ack({ ok: false, message: err.message });
+        }
+      }
     });
 
     // Task Acknowledgment - Client xác nhận đã nhận task

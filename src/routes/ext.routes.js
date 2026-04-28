@@ -16,6 +16,10 @@ router.get("/online", extController.getClientOnline);
 
 // ================= TWO-WAY COMMUNICATION =================
 
+// REST fallback: extension báo task status khi socket lỗi (idempotent theo eventId)
+// body: { eventId, taskId, status, type?, shopId?, machineId?, result?, error?, source?, reportedAt? }
+router.post("/task-result", extController.taskResultRest);
+
 // Test connection với specific client
 router.post("/test-connection/:machineId", extController.testConnection);
 

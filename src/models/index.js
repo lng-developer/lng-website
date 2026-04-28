@@ -31,6 +31,8 @@ const Issue = require("./issue.model")
 const EtsyOrder = require("./etsyOrder.model")
 const ExtensionLog = require("./extensionLog.model")
 const AutoConfig = require("./autoConfig.model")
+const TaskStatusEvent = require("./taskStatusEvent.model")
+const ExtensionTask = require("./extensionTask.model")
 
 // Cau hinh mongoose dang global
 mongoose.Promise = global.Promise;
@@ -70,6 +72,8 @@ db.Issue = Issue
 db.EtsyOrder = EtsyOrder
 db.ExtensionLog = ExtensionLog
 db.AutoConfig = AutoConfig
+db.TaskStatusEvent = TaskStatusEvent
+db.ExtensionTask = ExtensionTask
 db.connectDB = async () => {
   await mongoose
     .connect(process.env.MONGO_URI, {
