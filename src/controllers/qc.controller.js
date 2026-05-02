@@ -20,6 +20,24 @@ const KNOWN = [
 // All = chỉ các trạng thái đang hoạt động trong quy trình QC
 const ACTIVE = ["Pending", "Sent", "QC Rejected", "Ready", "Address Invalid"];
 
+const hasRole = (userRole, target) => {
+  if (!userRole) return false;
+  const normalizeRole = (s) =>
+    String(s || "")
+      .trim()
+      .replace(/\s+/g, " ")
+      .toLowerCase();
+  const wanted = normalizeRole(target);
+
+  if (Array.isArray(userRole)) {
+    return userRole.some((role) => normalizeRole(role) === wanted);
+  }
+  if (typeof userRole === "object" && Array.isArray(userRole.roles)) {
+    return userRole.roles.some((role) => normalizeRole(role) === wanted);
+  }
+  return normalizeRole(userRole) === wanted;
+};
+
 const canon = (s) => {
   const t = String(s || "").trim();
   if (!t) return "";
@@ -43,9 +61,22 @@ const getQCList = async (req, res) => {
       sellerId,
     } = req.query;
 
+    const userRole = req.user?.role;
+    const userId = req.user?.userId || req.user?.id || req.user?._id || "";
+    const isSeller = hasRole(userRole, "Seller");
+    const isAdmin = hasRole(userRole, "Admin");
+    const isCS = hasRole(userRole, "Customer Service");
+    const isSellerOnly = isSeller && !(isAdmin || isCS);
+
     const matchStage = {};
     if (from && to) {
       matchStage.createdAt = { $gte: new Date(from), $lte: new Date(to) };
+    }
+    if (isSellerOnly) {
+      if (!mongoose.Types.ObjectId.isValid(userId)) {
+        return res.status(400).json({ message: "Invalid user id in token" });
+      }
+      matchStage.sellerId = new mongoose.Types.ObjectId(userId);
     }
 
     // ---- Scale status filter (đã đồng bộ khái niệm "All" = ACTIVE) ----
@@ -128,7 +159,7 @@ const getQCList = async (req, res) => {
       ...(searchOr ? [{ $match: { $or: searchOr } }] : []),
     ];
 
-    if (sellerId && mongoose.Types.ObjectId.isValid(sellerId)) {
+    if (!isSellerOnly && sellerId && mongoose.Types.ObjectId.isValid(sellerId)) {
       basePipeline.push({
         $match: { "seller._id": new mongoose.Types.ObjectId(sellerId) },
       });
@@ -344,9 +375,22 @@ const getQCStatistics = async (req, res) => {
       sellerId,
     } = req.query;
 
+    const userRole = req.user?.role;
+    const userId = req.user?.userId || req.user?.id || req.user?._id || "";
+    const isSeller = hasRole(userRole, "Seller");
+    const isAdmin = hasRole(userRole, "Admin");
+    const isCS = hasRole(userRole, "Customer Service");
+    const isSellerOnly = isSeller && !(isAdmin || isCS);
+
     const matchStage = {};
     if (from && to) {
       matchStage.createdAt = { $gte: new Date(from), $lte: new Date(to) };
+    }
+    if (isSellerOnly) {
+      if (!mongoose.Types.ObjectId.isValid(userId)) {
+        return res.status(400).json({ message: "Invalid user id in token" });
+      }
+      matchStage.sellerId = new mongoose.Types.ObjectId(userId);
     }
 
     let searchOr = null;
@@ -391,7 +435,7 @@ const getQCStatistics = async (req, res) => {
         },
       },
       { $unwind: { path: "$seller", preserveNullAndEmptyArrays: true } },
-      ...(sellerId && mongoose.Types.ObjectId.isValid(sellerId)
+      ...(!isSellerOnly && sellerId && mongoose.Types.ObjectId.isValid(sellerId)
         ? [{ $match: { "seller._id": new mongoose.Types.ObjectId(sellerId) } }]
         : []),
       {
@@ -478,6 +522,22 @@ const updateQCNoteForItem = async (req, res) => {
 
     const order = await OrderCustomProduct.findOne({ orderId });
     if (!order) return res.status(404).json({ message: "Order not found" });
+
+    const userRole = req.user?.role;
+    const userId = req.user?.userId || req.user?.id || req.user?._id || "";
+    const isSeller = hasRole(userRole, "Seller");
+    const isAdmin = hasRole(userRole, "Admin");
+    const isCS = hasRole(userRole, "Customer Service");
+    const isSellerOnly = isSeller && !(isAdmin || isCS);
+
+    if (isSellerOnly) {
+      if (!mongoose.Types.ObjectId.isValid(userId)) {
+        return res.status(400).json({ message: "Invalid user id in token" });
+      }
+      if (String(order.sellerId || "") !== String(userId)) {
+        return res.status(403).json({ message: "You can only QC your own orders" });
+      }
+    }
 
     const item = order.items.find((i) => i.orderItemId === orderItemId);
     if (!item) return res.status(404).json({ message: "Order item not found" });

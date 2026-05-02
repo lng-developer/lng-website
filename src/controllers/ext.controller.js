@@ -43,6 +43,12 @@ const {
   // SS88 (mmoseller)
   // .env: SS88_API_KEY=<your_api_key>
   SS88_API_KEY = "",
+  LUXURYPRO_API_KEY = "",
+  LUXURYPRO_ACCESS_TOKEN = "",
+  LUXURYPRO_TRACKING_ENDPOINT = "",
+  LUXURYPRO_DETAIL_ENDPOINT = "",
+  LUXURYPRO_ENDPOINT = "",
+  LUXURYPRO_AUTH_MODE = "bearer",
 
   // Debug flag cho server (tuỳ set)
   VENDOR_SYNC_DEBUG = "0",
@@ -114,6 +120,11 @@ const httpSS88 = axios.create({
   validateStatus: () => true,
 });
 
+const httpLuxuryPro = axios.create({
+  timeout: 20000,
+  validateStatus: () => true,
+});
+
 // ====== HELPERS ======
 const norm = (s) => String(s || "").trim();
 const lower = (s) => norm(s).toLowerCase();
@@ -143,7 +154,8 @@ function normalizeVendorKey(nameOrType) {
   )
     return "mangotee";
   if (s.includes("ss88") || s.includes("mmoseller")) return "ss88";
-  if (["beeful", "merchfox", "merchize", "printway", "mangotee", "ss88"].includes(s))
+  if (s.includes("luxurypro") || s.includes("luxury pro")) return "luxurypro";
+  if (["beeful", "merchfox", "merchize", "printway", "mangotee", "ss88", "luxurypro"].includes(s))
     return s;
   return "";
 }
@@ -579,6 +591,102 @@ async function fetchSS88(orderId) {
   return { tracking, carrier, shipped, raw: data };
 }
 
+function buildLuxuryProTrackingUrl(orderId) {
+  const configured =
+    LUXURYPRO_TRACKING_ENDPOINT ||
+    LUXURYPRO_DETAIL_ENDPOINT ||
+    (LUXURYPRO_ENDPOINT
+      ? LUXURYPRO_ENDPOINT.replace(/\/create\/?$/i, "/orders/{orderId}")
+      : "https://api.lenauto.com/api/luxurypro/orders/{orderId}");
+
+  if (configured.includes("{orderId}")) {
+    return configured.replace("{orderId}", encodeURIComponent(orderId));
+  }
+  return `${configured.replace(/\/+$/, "")}/${encodeURIComponent(orderId)}`;
+}
+
+function pickLuxuryProTracking(raw) {
+  const root = raw?.data && typeof raw.data === "object" ? raw.data : raw;
+  const candidates = [];
+
+  const push = (obj = {}) => {
+    if (!obj || typeof obj !== "object") return;
+    const tracking = norm(
+      obj.tracking_number ||
+      obj.trackingNumber ||
+      obj.tracking ||
+      obj.tracking_code ||
+      obj.trackingCode ||
+      obj.tracking_id ||
+      obj.trackingId
+    );
+    const carrier = norm(
+      obj.carrier ||
+      obj.carrier_name ||
+      obj.carrierName ||
+      obj.shipping_carrier ||
+      obj.shippingCarrier ||
+      obj.shipping_provider ||
+      obj.shippingProvider
+    );
+    const status = norm(obj.status || obj.production_status || obj.fulfillment_status);
+    const updatedAtMs = new Date(obj.updated_at || obj.updatedAt || obj.shipped_at || obj.shippedAt || 0).getTime();
+    if (tracking || carrier || status) candidates.push({ tracking, carrier, status, updatedAtMs });
+  };
+
+  push(root);
+  push(root?.tracking);
+  push(root?.shipment);
+  push(root?.shipping);
+
+  for (const key of ["trackings", "tracking_list", "shipments", "fulfillments", "events", "items", "line_items"]) {
+    const arr = root?.[key];
+    if (!Array.isArray(arr)) continue;
+    for (const entry of arr) {
+      push(entry);
+      push(entry?.tracking);
+      push(entry?.shipment);
+    }
+  }
+
+  const picked = candidates
+    .filter((c) => isValidTrackingNumber(c.tracking) || c.carrier || c.status)
+    .sort((a, b) => (b.updatedAtMs || 0) - (a.updatedAtMs || 0))[0] || {};
+
+  const tracking = isValidTrackingNumber(picked.tracking) ? picked.tracking : "";
+  const carrier = picked.carrier || "";
+  const status = lower(picked.status || root?.status || root?.production_status || root?.fulfillment_status);
+  const shipped = ["shipped", "delivered", "fulfilled", "completed", "complete"].includes(status) || Boolean(tracking);
+
+  return { tracking, carrier, shipped, raw: root || raw };
+}
+
+async function fetchLuxuryPro(orderId) {
+  const apiKey = LUXURYPRO_API_KEY || LUXURYPRO_ACCESS_TOKEN;
+  if (!apiKey) throw new Error("LuxuryPro missing API key (LUXURYPRO_API_KEY)");
+
+  const headers = { Accept: "application/json" };
+  if (lower(LUXURYPRO_AUTH_MODE) === "x-api-key") {
+    headers["X-API-Key"] = apiKey;
+  } else {
+    headers.Authorization = `Bearer ${apiKey}`;
+  }
+
+  const url = buildLuxuryProTrackingUrl(orderId);
+  const res = await httpLuxuryPro.get(url, { headers });
+  if (DEBUG) console.log("[LuxuryPro][HTTP]", res.status, "| url:", url);
+
+  if (res.status >= 400) {
+    throw new Error(`LuxuryPro HTTP ${res.status}: ${res.data?.message || res.data?.error || "Error"}`);
+  }
+  if (!res.data || typeof res.data !== "object") throw new Error("LuxuryPro empty payload");
+  if (res.data.success === false) {
+    throw new Error(`LuxuryPro bad response: ${res.data.message || res.data.error || "success=false"}`);
+  }
+
+  return pickLuxuryProTracking(res.data);
+}
+
 // ====== APPLY RESULT INTO ORDER DOC ======
 function applyToItemsOfVendor(
   doc,
@@ -615,6 +723,8 @@ function applyToItemsOfVendor(
                   ? "MangoTee"
                   : vendorKey === "ss88"
                     ? "SS88"
+                    : vendorKey === "luxurypro"
+                      ? "LuxuryPro"
                     : norm(ti.fulfillment),
       tracking: tracking || prevTracking,
       status: shipped ? "Shipped" : thePrevStatus || "New",
@@ -679,6 +789,13 @@ function applyToItemsOfVendor(
       ss88_id: norm(raw?.id),
       ss88_status: norm(raw?.status),
     };
+  } else if (vendorKey === "luxurypro") {
+    doc.luxurypro_submission = {
+      ...(doc.luxurypro_submission || {}),
+      attempt_count: (doc.luxurypro_submission?.attempt_count || 0) + 1,
+      last_response: raw,
+      lp_status: norm(raw?.status || raw?.production_status || raw?.fulfillment_status),
+    };
   }
 
   return changed;
@@ -700,7 +817,7 @@ async function updateOrderByVendors(orderId, vpidToVendorPrefetched = null) {
 
   const groups = groupItemsByVendorWithMap(doc, vpidToVendor);
   const vendorKeys = Object.keys(groups).filter((k) =>
-    ["beeful", "merchfox", "merchize", "printway", "mangotee", "ss88"].includes(k)
+    ["beeful", "merchfox", "merchize", "printway", "mangotee", "ss88", "luxurypro"].includes(k)
   );
 
   // --- DIAGNOSTIC LOG (xoá sau khi debug xong) ---
@@ -729,6 +846,7 @@ async function updateOrderByVendors(orderId, vpidToVendorPrefetched = null) {
       else if (vk === "printway") res = await fetchPrintway(orderId, doc);
       else if (vk === "mangotee") res = await fetchMangoTee(orderId);
       else if (vk === "ss88") res = await fetchSS88(orderId);
+      else if (vk === "luxurypro") res = await fetchLuxuryPro(orderId);
       else continue;
 
       totalChanged += applyToItemsOfVendor(doc, vk, res);
@@ -752,7 +870,7 @@ async function updateOrderByVendors(orderId, vpidToVendorPrefetched = null) {
 
 async function runBatch({ max = 100, dryRun = false } = {}) {
   const candidates = await OrderCustomProduct.find({
-    status: { $ne: "Shipped" },
+    status: "Fulfilled",
     "items.cost_breakdown.vendorProductId": { $exists: true, $ne: null },
   })
     .sort({ createdAt: -1 })
@@ -769,7 +887,7 @@ async function runBatch({ max = 100, dryRun = false } = {}) {
 
   const vpidToVendor = await buildVendorMapsFromVpidSet(vpidSet);
 
-  const knownKeys = new Set(["beeful", "merchfox", "merchize", "printway", "mangotee", "ss88"]);
+  const knownKeys = new Set(["beeful", "merchfox", "merchize", "printway", "mangotee", "ss88", "luxurypro"]);
   const filtered = candidates.filter((o) => {
     const groups = groupItemsByVendorWithMap(o, vpidToVendor);
     return Object.keys(groups).some((k) => knownKeys.has(k));
@@ -867,7 +985,7 @@ const vendorSyncList = async (req, res) => {
  */
 const vendorSyncBatch = async (req, res) => {
   try {
-    const { max = 400, dryRun = false } = req.body || {};
+    const { max = 900, dryRun = false } = req.body || {};
     const result = await runBatch({
       max: Number(max) || 100,
       dryRun: Boolean(dryRun),

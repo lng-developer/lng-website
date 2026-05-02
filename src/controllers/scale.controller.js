@@ -240,6 +240,8 @@ function normalizeProviderKey(vendorDoc) {
   if (ft.includes("ss88") || nm.includes("ss88")) return "ss88";
   if (ft.includes("lenful") || nm.includes("lenful")) return "lenful";
   if (ft.includes("pgprint") || nm.includes("pgprint")) return "pgprint";
+  if (ft.includes("luxurypro") || nm.includes("luxurypro")) return "luxurypro";
+  if (ft.includes("luxury pro") || nm.includes("luxury pro")) return "luxurypro";
   if (ft.includes("lng") || nm.includes("lng")) return "lng";
   // có thể bổ sung thêm provider khác ở đây
   return null;
@@ -365,6 +367,25 @@ const confirmScaleForItem = async (req, res) => {
 
     const order = await OrderCustomProduct.findOne({ orderId });
     if (!order) return res.status(404).json({ message: "Order not found" });
+
+    const userRole = req.user?.role;
+    const userId = req.user?.userId || req.user?.id || req.user?._id || "";
+    const isSellerOnly =
+      hasRole(userRole, "Seller") &&
+      !(
+        hasRole(userRole, "Admin") ||
+        hasRole(userRole, "Customer Service") ||
+        hasRole(userRole, "Design Leader")
+      );
+
+    if (isSellerOnly) {
+      if (!mongoose.Types.ObjectId.isValid(userId)) {
+        return res.status(400).json({ message: "Invalid user id in token" });
+      }
+      if (String(order.sellerId || "") !== String(userId)) {
+        return res.status(403).json({ message: "You can only QC your own orders" });
+      }
+    }
 
     const item = Array.isArray(order.items)
       ? order.items.find((i) => i.orderItemId === orderItemId)
