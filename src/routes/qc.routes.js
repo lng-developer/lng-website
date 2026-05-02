@@ -3,10 +3,10 @@ const { QCController } = require('../controllers');
 const router = express.Router();
 const { authenticateToken, authorizeRoles } = require('../middlewares/auth.middleware');
 
-router.get('/', authenticateToken, authorizeRoles('Customer Service', "Admin"), QCController.getQCList);
+router.get('/', authenticateToken, authorizeRoles('Customer Service', "Admin", "Seller"), QCController.getQCList);
 
-router.get('/statistics', authenticateToken, authorizeRoles('Customer Service', "Admin"), QCController.getQCStatistics);
+router.get('/statistics', authenticateToken, authorizeRoles('Customer Service', "Admin", "Seller"), QCController.getQCStatistics);
 
-router.put('/orders/:orderId/items/:orderItemId/qc-note', authenticateToken, authorizeRoles('Customer Service', "Admin"), QCController.updateQCNoteForItem);
+router.put('/orders/:orderId/items/:orderItemId/qc-note', authenticateToken, authorizeRoles('Customer Service', "Admin", "Seller"), QCController.updateQCNoteForItem);
 
 module.exports = router;

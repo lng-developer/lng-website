@@ -62,6 +62,14 @@ const {
     // MangoTee
     MANGOTEE_BASE_URL = "https://v3.mangoteeprints.com/api/public/v1",
     MANGOTEE_API_KEY = "",
+
+    // LuxuryPro
+    LUXURYPRO_API_KEY = "",
+    LUXURYPRO_ACCESS_TOKEN = "",
+    LUXURYPRO_TRACKING_ENDPOINT = "",
+    LUXURYPRO_DETAIL_ENDPOINT = "",
+    LUXURYPRO_ENDPOINT = "",
+    LUXURYPRO_AUTH_MODE = "bearer",
 } = process.env;
 
 // ====== HTTP clients ======
@@ -108,6 +116,11 @@ const httpMangoTee = axios.create({
     validateStatus: () => true,
 });
 
+const httpLuxuryPro = axios.create({
+    timeout: 20000,
+    validateStatus: () => true,
+});
+
 // ====== CLI flags ======
 const argv = process.argv.slice(2);
 const getFlagVal = (name, def = undefined) => {
@@ -141,7 +154,8 @@ function normalizeVendorKey(nameOrType) {
     if (s.includes("merchize")) return "merchize";
     if (s.includes("printway") || s.includes("print way") || s === "pw") return "printway";
     if (s.includes("mangotee") || s.includes("mango tee") || s.includes("mangoteeprints")) return "mangotee";
-    if (["beeful", "merchfox", "merchize", "printway", "mangotee"].includes(s)) return s;
+    if (s.includes("luxurypro") || s.includes("luxury pro")) return "luxurypro";
+    if (["beeful", "merchfox", "merchize", "printway", "mangotee", "luxurypro"].includes(s)) return s;
     return "";
 }
 
@@ -492,6 +506,102 @@ async function fetchMangoTee(orderId) {
 }
 
 // ====== Áp kết quả vào doc cho nhóm item thuộc vendorKey ======
+function buildLuxuryProTrackingUrl(orderId) {
+    const configured =
+        LUXURYPRO_TRACKING_ENDPOINT ||
+        LUXURYPRO_DETAIL_ENDPOINT ||
+        (LUXURYPRO_ENDPOINT
+            ? LUXURYPRO_ENDPOINT.replace(/\/create\/?$/i, "/orders/{orderId}")
+            : "https://api.lenauto.com/api/luxurypro/orders/{orderId}");
+
+    if (configured.includes("{orderId}")) {
+        return configured.replace("{orderId}", encodeURIComponent(orderId));
+    }
+    return `${configured.replace(/\/+$/, "")}/${encodeURIComponent(orderId)}`;
+}
+
+function pickLuxuryProTracking(raw) {
+    const root = raw?.data && typeof raw.data === "object" ? raw.data : raw;
+    const candidates = [];
+
+    const push = (obj = {}) => {
+        if (!obj || typeof obj !== "object") return;
+        const tracking = norm(
+            obj.tracking_number ||
+            obj.trackingNumber ||
+            obj.tracking ||
+            obj.tracking_code ||
+            obj.trackingCode ||
+            obj.tracking_id ||
+            obj.trackingId
+        );
+        const carrier = norm(
+            obj.carrier ||
+            obj.carrier_name ||
+            obj.carrierName ||
+            obj.shipping_carrier ||
+            obj.shippingCarrier ||
+            obj.shipping_provider ||
+            obj.shippingProvider
+        );
+        const status = norm(obj.status || obj.production_status || obj.fulfillment_status);
+        const updatedAtMs = new Date(obj.updated_at || obj.updatedAt || obj.shipped_at || obj.shippedAt || 0).getTime();
+        if (tracking || carrier || status) candidates.push({ tracking, carrier, status, updatedAtMs });
+    };
+
+    push(root);
+    push(root?.tracking);
+    push(root?.shipment);
+    push(root?.shipping);
+
+    for (const key of ["trackings", "tracking_list", "shipments", "fulfillments", "events", "items", "line_items"]) {
+        const arr = root?.[key];
+        if (!Array.isArray(arr)) continue;
+        for (const entry of arr) {
+            push(entry);
+            push(entry?.tracking);
+            push(entry?.shipment);
+        }
+    }
+
+    const picked = candidates
+        .filter((c) => isValidTrackingNumber(c.tracking) || c.carrier || c.status)
+        .sort((a, b) => (b.updatedAtMs || 0) - (a.updatedAtMs || 0))[0] || {};
+
+    const tracking = isValidTrackingNumber(picked.tracking) ? picked.tracking : "";
+    const carrier = picked.carrier || "";
+    const status = lower(picked.status || root?.status || root?.production_status || root?.fulfillment_status);
+    const shipped = ["shipped", "delivered", "fulfilled", "completed", "complete"].includes(status) || Boolean(tracking);
+
+    return { tracking, carrier, shipped, raw: root || raw };
+}
+
+async function fetchLuxuryPro(orderId) {
+    const apiKey = LUXURYPRO_API_KEY || LUXURYPRO_ACCESS_TOKEN;
+    if (!apiKey) throw new Error("LuxuryPro missing API key (LUXURYPRO_API_KEY)");
+
+    const headers = { Accept: "application/json" };
+    if (lower(LUXURYPRO_AUTH_MODE) === "x-api-key") {
+        headers["X-API-Key"] = apiKey;
+    } else {
+        headers.Authorization = `Bearer ${apiKey}`;
+    }
+
+    const url = buildLuxuryProTrackingUrl(orderId);
+    const res = await httpLuxuryPro.get(url, { headers });
+    if (DEBUG) console.log("[LuxuryPro][HTTP]", res.status, "| url:", url);
+
+    if (res.status >= 400) {
+        throw new Error(`LuxuryPro HTTP ${res.status}: ${res.data?.message || res.data?.error || "Error"}`);
+    }
+    if (!res.data || typeof res.data !== "object") throw new Error("LuxuryPro empty payload");
+    if (res.data.success === false) {
+        throw new Error(`LuxuryPro bad response: ${res.data.message || res.data.error || "success=false"}`);
+    }
+
+    return pickLuxuryProTracking(res.data);
+}
+
 function applyToItemsOfVendor(doc, vendorKey, { tracking, carrier, shipped, raw }) {
     let changed = 0;
 
@@ -521,6 +631,8 @@ function applyToItemsOfVendor(doc, vendorKey, { tracking, carrier, shipped, raw 
                                 ? "Printway"
                                 : vendorKey === "mangotee"
                                     ? "MangoTee"
+                                    : vendorKey === "luxurypro"
+                                        ? "LuxuryPro"
                                     : norm(ti.fulfillment),
             tracking: tracking || prevTracking,
             status: shipped ? "Shipped" : thePrevStatus || "New",
@@ -576,6 +688,13 @@ function applyToItemsOfVendor(doc, vendorKey, { tracking, carrier, shipped, raw 
             order_id: norm(raw?.data?.order_id),
             mt_status: norm(raw?.data?.status || raw?.data?.production_status),
         };
+    } else if (vendorKey === "luxurypro") {
+        doc.luxurypro_submission = {
+            ...(doc.luxurypro_submission || {}),
+            attempt_count: (doc.luxurypro_submission?.attempt_count || 0) + 1,
+            last_response: raw,
+            lp_status: norm(raw?.status || raw?.production_status || raw?.fulfillment_status),
+        };
     }
 
     return changed;
@@ -599,7 +718,7 @@ async function updateOrderByVendors(orderId, vpidToVendorPrefetched = null) {
     // nhóm item theo vendor
     const groups = groupItemsByVendorWithMap(doc, vpidToVendor);
     const vendorKeys = Object.keys(groups).filter((k) =>
-        ["beeful", "merchfox", "merchize", "printway", "mangotee"].includes(k)
+        ["beeful", "merchfox", "merchize", "printway", "mangotee", "luxurypro"].includes(k)
     );
 
     if (vendorKeys.length === 0) {
@@ -617,6 +736,7 @@ async function updateOrderByVendors(orderId, vpidToVendorPrefetched = null) {
             else if (vk === "merchize") res = await fetchMerchize(orderId);
             else if (vk === "printway") res = await fetchPrintway(orderId, doc);
             else if (vk === "mangotee") res = await fetchMangoTee(orderId);
+            else if (vk === "luxurypro") res = await fetchLuxuryPro(orderId);
             else continue;
 
             totalChanged += applyToItemsOfVendor(doc, vk, res);
@@ -664,7 +784,7 @@ async function runBatch() {
     const vpidToVendor = await buildVendorMapsFromVpidSet(vpidSet);
 
     // B3) Lọc các order thực sự có vendorKey hợp lệ
-    const knownKeys = new Set(["beeful", "merchfox", "merchize", "printway", "mangotee"]);
+    const knownKeys = new Set(["beeful", "merchfox", "merchize", "printway", "mangotee", "luxurypro"]);
     const filtered = candidates.filter((o) => {
         const groups = groupItemsByVendorWithMap(o, vpidToVendor);
         return Object.keys(groups).some((k) => knownKeys.has(k));
