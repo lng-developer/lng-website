@@ -33,6 +33,7 @@ const {
   buildInitialMatch,
   buildFilters,
   buildVendorFilter,
+  buildSelectedVendorsFilter,
   buildPipeline,
   executePipeline,
   enrichOrdersData,
@@ -1730,6 +1731,8 @@ const getFrontendOrders = async (req, res) => {
       teamId,
       sellerId,
       invalidAddress,
+      vendor,
+      vendors,
 
       // ✅ logs
       includeLogs = "true",
@@ -1770,6 +1773,19 @@ const getFrontendOrders = async (req, res) => {
       noPsd: null, // ✅ disable trong buildFilters
       shippingType,
     });
+
+    // ===== Selected vendor filter =====
+    const selectedVendors = vendor || vendors;
+    if (selectedVendors) {
+      const selectedVendorFilter =
+        await buildSelectedVendorsFilter(selectedVendors);
+      if (selectedVendorFilter.error) {
+        return res.status(400).json({ message: selectedVendorFilter.error });
+      }
+      if (selectedVendorFilter.filter) {
+        filters.push(selectedVendorFilter.filter);
+      }
+    }
 
     // ===== Production vendor filter =====
     if (roles.isProduction) {
@@ -1935,6 +1951,8 @@ const getOrderStatistics = async (req, res) => {
       shopName,
       teamId,
       openCase,
+      vendor,
+      vendors,
     } = req.query;
 
     // ===== RBAC =====
@@ -1969,6 +1987,19 @@ const getOrderStatistics = async (req, res) => {
       noPsd: null, // ✅ disable
       shippingType,
     });
+
+    // ===== Selected vendor filter =====
+    const selectedVendors = vendor || vendors;
+    if (selectedVendors) {
+      const selectedVendorFilter =
+        await buildSelectedVendorsFilter(selectedVendors);
+      if (selectedVendorFilter.error) {
+        return res.status(400).json({ message: selectedVendorFilter.error });
+      }
+      if (selectedVendorFilter.filter) {
+        filters.push(selectedVendorFilter.filter);
+      }
+    }
 
     // ===== TEAM FILTER (leader) =====
     const Team = db.Team;
