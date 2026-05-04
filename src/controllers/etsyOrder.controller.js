@@ -1216,9 +1216,175 @@ const getEtsyOrderStatistics = async (req, res) => {
     }
 };
 
+/* ================== CREATE ORDER (TỪ MODAL TEXT INPUT) ================== */
+
+const SHIPPING_TYPE_ENUM = ["SecondDay", "Ground", "Overnight", "Economy", "Standard", "Expedited"];
+
+const normalizeItem = (raw, idx) => {
+    const transactionId = String(raw?.transactionId ?? "").trim();
+    if (!transactionId) {
+        const err = new Error(`items[${idx}].transactionId is required`);
+        err.status = 400;
+        throw err;
+    }
+
+    let variations = raw?.variations;
+    if (typeof variations === "string") variations = parseVariations(variations);
+    if (!variations || typeof variations !== "object") variations = {};
+
+    return {
+        transactionId,
+        listingId: raw?.listingId ? String(raw.listingId).trim() : undefined,
+        sku: raw?.sku ? String(raw.sku).trim() : undefined,
+        itemName: raw?.itemName ? String(raw.itemName).trim() : undefined,
+        quantity: toInt(raw?.quantity),
+        unitPrice: toNumber(raw?.unitPrice),
+        itemTotal: toNumber(raw?.itemTotal),
+        variationsRaw: raw?.variationsRaw ? String(raw.variationsRaw) : undefined,
+        variations,
+        cost_breakdown: raw?.cost_breakdown ?? null,
+        baseImage: raw?.baseImage && typeof raw.baseImage === "object" ? {
+            imageUrl: raw.baseImage.imageUrl ? String(raw.baseImage.imageUrl) : undefined,
+            width: toInt(raw.baseImage.width),
+            height: toInt(raw.baseImage.height),
+        } : undefined,
+    };
+};
+
+const buildEtsyOrderPayload = (body) => {
+    const orderId = String(body?.orderId ?? "").trim();
+    if (!orderId) {
+        const err = new Error("orderId is required");
+        err.status = 400;
+        throw err;
+    }
+
+    const shopIdRaw = String(body?.shopId ?? "").trim();
+    if (!mongoose.Types.ObjectId.isValid(shopIdRaw)) {
+        const err = new Error("shopId is required and must be a valid ObjectId");
+        err.status = 400;
+        throw err;
+    }
+
+    const items = Array.isArray(body?.items) ? body.items.map(normalizeItem) : [];
+
+    const txSet = new Set();
+    for (const it of items) {
+        if (txSet.has(it.transactionId)) {
+            const err = new Error(`Duplicate transactionId in items: ${it.transactionId}`);
+            err.status = 400;
+            throw err;
+        }
+        txSet.add(it.transactionId);
+    }
+
+    const sellerIdRaw = body?.seller?.sellerId;
+    const sellerId = sellerIdRaw && mongoose.Types.ObjectId.isValid(sellerIdRaw)
+        ? new mongoose.Types.ObjectId(sellerIdRaw)
+        : undefined;
+
+    const shippingType = body?.shipping_type && SHIPPING_TYPE_ENUM.includes(body.shipping_type)
+        ? body.shipping_type
+        : "Standard";
+
+    return {
+        orderId,
+        shopId: new mongoose.Types.ObjectId(shopIdRaw),
+
+        saleDate: toDate(body?.saleDate),
+        paidAt: toDate(body?.paidAt),
+        shippedAt: toDate(body?.shippedAt),
+
+        status: body?.status ? String(body.status).trim() : "New",
+
+        orderType: body?.orderType ? String(body.orderType) : undefined,
+        listingsType: body?.listingsType ? String(body.listingsType) : undefined,
+        paymentType: body?.paymentType ? String(body.paymentType) : undefined,
+        paymentMethod: body?.paymentMethod ? String(body.paymentMethod) : undefined,
+        currency: body?.currency ? String(body.currency).trim().slice(0, 3).toUpperCase() : undefined,
+
+        buyer: {
+            userId: body?.buyer?.userId ? String(body.buyer.userId) : undefined,
+            fullName: body?.buyer?.fullName ? String(body.buyer.fullName) : undefined,
+            firstName: body?.buyer?.firstName ? String(body.buyer.firstName) : undefined,
+            lastName: body?.buyer?.lastName ? String(body.buyer.lastName) : undefined,
+            display: body?.buyer?.display ? String(body.buyer.display) : undefined,
+        },
+
+        seller: {
+            sellerId,
+            sellerCode: body?.seller?.sellerCode ? String(body.seller.sellerCode).trim() : undefined,
+        },
+
+        coupon: {
+            code: body?.coupon?.code ? String(body.coupon.code) : undefined,
+            details: body?.coupon?.details ? String(body.coupon.details) : undefined,
+        },
+
+        shipping: {
+            name: body?.shipping?.name ? String(body.shipping.name) : undefined,
+            address1: body?.shipping?.address1 ? String(body.shipping.address1) : undefined,
+            address2: body?.shipping?.address2 ? String(body.shipping.address2) : undefined,
+            city: body?.shipping?.city ? String(body.shipping.city) : undefined,
+            state: body?.shipping?.state ? String(body.shipping.state) : undefined,
+            zipcode: body?.shipping?.zipcode ? String(body.shipping.zipcode) : undefined,
+            country: body?.shipping?.country ? String(body.shipping.country) : undefined,
+        },
+
+        shipping_type: shippingType,
+
+        totals: {
+            orderValue: toNumber(body?.totals?.orderValue),
+            shipping: toNumber(body?.totals?.shipping),
+            salesTax: toNumber(body?.totals?.salesTax),
+            orderTotal: toNumber(body?.totals?.orderTotal),
+            cardProcessingFees: toNumber(body?.totals?.cardProcessingFees),
+            orderNet: toNumber(body?.totals?.orderNet),
+            fee: toNumber(body?.totals?.fee),
+            adjustedOrderTotal: toNumber(body?.totals?.adjustedOrderTotal),
+            adjustedCardProcessingFees: toNumber(body?.totals?.adjustedCardProcessingFees),
+            adjustedNet: toNumber(body?.totals?.adjustedNet),
+            adjustedOrderValue: toNumber(body?.totals?.adjustedOrderValue),
+            adjustedShipping: toNumber(body?.totals?.adjustedShipping),
+            adjustedSalesTax: toNumber(body?.totals?.adjustedSalesTax),
+            orderShipping: toNumber(body?.totals?.orderShipping),
+            orderSalesTax: toNumber(body?.totals?.orderSalesTax),
+            discountAmount: toNumber(body?.totals?.discountAmount),
+            shippingDiscount: toNumber(body?.totals?.shippingDiscount),
+            inPersonDiscount: toNumber(body?.totals?.inPersonDiscount),
+            vatPaidByBuyer: toNumber(body?.totals?.vatPaidByBuyer),
+        },
+
+        numberOfItems: toInt(body?.numberOfItems) ?? items.reduce((s, i) => s + (i.quantity || 0), 0),
+
+        items,
+    };
+};
+
+const createOrder = async (req, res) => {
+    try {
+        const payload = buildEtsyOrderPayload(req.body || {});
+
+        const dup = await EtsyOrder.findOne({ orderId: payload.orderId }).select("_id").lean();
+        if (dup) {
+            return res.status(409).json({ message: `Order ${payload.orderId} already exists`, _id: dup._id });
+        }
+
+        const doc = await EtsyOrder.create(payload);
+        return res.status(201).json(doc);
+    } catch (err) {
+        if (err?.status === 400) return res.status(400).json({ message: err.message });
+        if (err?.code === 11000) return res.status(409).json({ message: "Duplicate orderId", keyValue: err.keyValue });
+        if (err?.name === "ValidationError") return res.status(400).json({ message: err.message, errors: err.errors });
+        console.error("❌ createOrder error:", err);
+        return res.status(500).json({ message: "Internal Server Error", error: err.message });
+    }
+};
+
 module.exports = {
     importOrders,
     getListOrders,
     computeBaseCostForEtsyOrder,
     getEtsyOrderStatistics,
+    createOrder,
 };
