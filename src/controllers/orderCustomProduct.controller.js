@@ -33,6 +33,7 @@ const {
   buildInitialMatch,
   buildFilters,
   buildVendorFilter,
+  buildSelectedVendorsFilter,
   buildPipeline,
   executePipeline,
   enrichOrdersData,
@@ -105,7 +106,7 @@ const importOrderJson = async (req, res) => {
     if (!order) return res.status(404).json({ message: "Order ID not found" });
 
     const item = order.items.find(
-      (i) => i.orderItemId === jsonData.orderItemId
+      (i) => i.orderItemId === jsonData.orderItemId,
     );
     if (!item)
       return res
@@ -130,7 +131,7 @@ const importOrderJson = async (req, res) => {
 
     // 🔎 tìm listing + lấy nested psd.status
     let listingDoc = await Listing.findOne({ asin }).select(
-      "_id seller psd.status"
+      "_id seller psd.status",
     );
     let createdListing = false;
 
@@ -160,7 +161,7 @@ const importOrderJson = async (req, res) => {
 
       listingDoc = await Listing.create(listingCreatePayload);
       listingDoc = await Listing.findById(listingDoc._id).select(
-        "_id seller psd.status"
+        "_id seller psd.status",
       );
       createdListing = true;
     }
@@ -254,7 +255,7 @@ const importOrderJson = async (req, res) => {
 
     // Ảnh khách upload
     const imageCustomization = options.find(
-      (opt) => opt?.type === "PlacementContainerCustomization"
+      (opt) => opt?.type === "PlacementContainerCustomization",
     );
     const imageData = imageCustomization?.children?.[0]?.image || {};
     customizationOptions.photoUploaded = {
@@ -314,7 +315,7 @@ const validateAddressWithSmarty = async (address) => {
           state: address.state,
           zipcode: address.zip_code,
         },
-      }
+      },
     );
     const data = response.data;
     if (Array.isArray(data) && data.length > 0) {
@@ -446,7 +447,7 @@ const validateInvalidAddressesBatch = async (req, res) => {
     const nLimit = Math.min(Math.max(parseInt(limit, 10) || 200, 1), 1000);
     const nConcurrency = Math.min(
       Math.max(parseInt(concurrency, 10) || 5, 1),
-      20
+      20,
     );
 
     const filter = {};
@@ -543,7 +544,7 @@ const validateInvalidAddressesBatch = async (req, res) => {
               address_validation: validationResult,
               address_validation_checked_at: new Date(),
             },
-          }
+          },
         );
       }
 
@@ -722,7 +723,7 @@ const updateOrdersFromXlsx = async (req, res) => {
     const skuMappingDryRun =
       String(req.body?.skuMappingDryRun ?? "false") === "true";
     const skuMappingPreviewLimit = Number(
-      req.body?.skuMappingPreviewLimit || 20
+      req.body?.skuMappingPreviewLimit || 20,
     );
 
     const ordersToCompute = new Set();
@@ -851,7 +852,7 @@ const updateOrdersFromXlsx = async (req, res) => {
         }
       }
       console.log(
-        `[Import] Found ${asinToListingMap.size} ASIN-Listing matches from ${uniqueAsins.size} unique ASINs`
+        `[Import] Found ${asinToListingMap.size} ASIN-Listing matches from ${uniqueAsins.size} unique ASINs`,
       );
     }
 
@@ -884,7 +885,7 @@ const updateOrdersFromXlsx = async (req, res) => {
       t.shipping_tax = round2((t.shipping_tax || 0) + delta.shipping_tax);
       t.item_promotion_discount = round2(
         (Math.abs(t.item_promotion_discount) || 0) +
-        Math.abs(delta.item_promotion_discount)
+          Math.abs(delta.item_promotion_discount),
       );
 
       // revenue = item + shipping
@@ -930,13 +931,13 @@ const updateOrdersFromXlsx = async (req, res) => {
       bucket.totals.item_price = round2(bucket.totals.item_price + itemPrice);
       bucket.totals.item_tax = round2(bucket.totals.item_tax + itemTax);
       bucket.totals.shipping_price = round2(
-        bucket.totals.shipping_price + shippingPrice
+        bucket.totals.shipping_price + shippingPrice,
       );
       bucket.totals.shipping_tax = round2(
-        bucket.totals.shipping_tax + shippingTax
+        bucket.totals.shipping_tax + shippingTax,
       );
       bucket.totals.item_promotion_discount = round2(
-        Math.abs(bucket.totals.item_promotion_discount) + Math.abs(discount)
+        Math.abs(bucket.totals.item_promotion_discount) + Math.abs(discount),
       );
       bucket.totals.revenue = round2(bucket.totals.revenue + revenue);
     }
@@ -974,7 +975,7 @@ const updateOrdersFromXlsx = async (req, res) => {
             existingOrder.address_validation?.smartyResponse === null
           ) {
             const validationResult = await validateAddressWithSmarty(
-              existingOrder.customer_infor
+              existingOrder.customer_infor,
             );
             existingOrder.address_validation = validationResult;
             await existingOrder.save();
@@ -989,7 +990,7 @@ const updateOrdersFromXlsx = async (req, res) => {
 
       try {
         fs.unlinkSync(filePath);
-      } catch (_) { }
+      } catch (_) {}
       return res.json({
         message: "Update by latest ship date completed",
         results,
@@ -1073,7 +1074,7 @@ const updateOrdersFromXlsx = async (req, res) => {
 
       if (existing) {
         const exists = existing.items.some(
-          (i) => i.orderItemId === itemData.orderItemId
+          (i) => i.orderItemId === itemData.orderItemId,
         );
 
         if (!exists) {
@@ -1143,7 +1144,7 @@ const updateOrdersFromXlsx = async (req, res) => {
         } else {
           // Item đã tồn tại
           const existingItem = existing.items.find(
-            (i) => i.orderItemId === itemData.orderItemId
+            (i) => i.orderItemId === itemData.orderItemId,
           );
 
           // ✅ ensure mapped_sku exists ASAP (not waiting bulkWrite)
@@ -1155,7 +1156,7 @@ const updateOrdersFromXlsx = async (req, res) => {
               considerLogMapping(
                 orderId,
                 existingItem.orderItemId,
-                existingItem.sku
+                existingItem.sku,
               );
               await existing.save();
             }
@@ -1187,7 +1188,7 @@ const updateOrdersFromXlsx = async (req, res) => {
                 considerLogMapping(
                   orderId,
                   existingItem.orderItemId,
-                  existingItem.sku
+                  existingItem.sku,
                 );
               }
             } else {
@@ -1202,7 +1203,7 @@ const updateOrdersFromXlsx = async (req, res) => {
                 considerLogMapping(
                   orderId,
                   existingItem.orderItemId,
-                  existingItem.sku
+                  existingItem.sku,
                 );
               }
             }
@@ -1218,7 +1219,7 @@ const updateOrdersFromXlsx = async (req, res) => {
               considerLogMapping(
                 orderId,
                 existingItem.orderItemId,
-                existingItem.sku
+                existingItem.sku,
               );
             }
           }
@@ -1279,7 +1280,7 @@ const updateOrdersFromXlsx = async (req, res) => {
             : null;
 
         const validationResult = await validateAddressWithSmarty(
-          basicData.customer_infor
+          basicData.customer_infor,
         );
 
         newOrder.address_validation = validationResult;
@@ -1315,10 +1316,10 @@ const updateOrdersFromXlsx = async (req, res) => {
 
         const allEntries = zip.getEntries();
         const imageEntries = allEntries.filter((entry) =>
-          /\.(jpe?g|png)$/i.test(entry.entryName)
+          /\.(jpe?g|png)$/i.test(entry.entryName),
         );
         const jsonEntry = allEntries.find((entry) =>
-          entry.entryName.endsWith(".json")
+          entry.entryName.endsWith(".json"),
         );
 
         const cloudinaryUrls = [];
@@ -1333,7 +1334,7 @@ const updateOrdersFromXlsx = async (req, res) => {
             if (bufferForUpload.length > MAX_CLOUDINARY_BYTES) {
               const compressed = await compressToUnderLimit(
                 bufferForUpload,
-                MAX_CLOUDINARY_BYTES
+                MAX_CLOUDINARY_BYTES,
               );
               if (!compressed) {
                 skippedSnapshots.push({
@@ -1350,11 +1351,11 @@ const updateOrdersFromXlsx = async (req, res) => {
                 bufferForUpload === imageBuffer
                   ? imageName
                   : imageName.replace(/\.(png|jpg|jpeg)$/i, "") +
-                  "_compressed.jpg";
+                    "_compressed.jpg";
 
               const cloudinaryUrl = await uploadToCloudinary(
                 bufferForUpload,
-                finalName
+                finalName,
               );
               cloudinaryUrls.push(cloudinaryUrl);
             } catch (e) {
@@ -1374,7 +1375,7 @@ const updateOrdersFromXlsx = async (req, res) => {
                     cloudinaryUrls.push(url);
                     continue;
                   }
-                } catch (_) { }
+                } catch (_) {}
                 skippedSnapshots.push({
                   image: imageName,
                   reason: "cloudinary: file size too large",
@@ -1443,7 +1444,7 @@ const updateOrdersFromXlsx = async (req, res) => {
       if (!bucket) continue;
 
       const doc = await OrderCustomProduct.findOne({ orderId: oid }).select(
-        "_id amazon_finance_total"
+        "_id amazon_finance_total",
       );
       if (!doc) continue;
 
@@ -1546,20 +1547,20 @@ const updateOrdersFromXlsx = async (req, res) => {
     if (pendingSkuMapLogs.length > 0 && !skuMappingDryRun) {
       try {
         await SkuMappingEntry.bulkWrite(pendingSkuMapLogs, { ordered: false });
-      } catch (_) { }
+      } catch (_) {}
     }
     if (pendingMappedSkuOps.length > 0 && !skuMappingDryRun) {
       try {
         await OrderCustomProduct.bulkWrite(pendingMappedSkuOps, {
           ordered: false,
         });
-      } catch (_) { }
+      } catch (_) {}
     }
 
     // dọn file tạm
     try {
       fs.unlinkSync(filePath);
-    } catch (_) { }
+    } catch (_) {}
 
     return res.json({
       message: "Batch import completed with ASIN-Listing base image matching",
@@ -1578,7 +1579,7 @@ const updateOrdersFromXlsx = async (req, res) => {
   } catch (error) {
     try {
       if (req?.file?.path) fs.unlinkSync(req.file.path);
-    } catch (_) { }
+    } catch (_) {}
     return res
       .status(500)
       .json({ message: "Batch import failed", error: error.message });
@@ -1596,7 +1597,7 @@ const uploadToCloudinary = (buffer, filename) => {
       (error, result) => {
         if (error) reject(error);
         else resolve(result.secure_url);
-      }
+      },
     );
     streamifier.createReadStream(buffer).pipe(stream);
   });
@@ -1652,7 +1653,8 @@ const getFrontendOrders = async (req, res) => {
       teamId,
       sellerId,
       invalidAddress,
-
+      vendor,
+      vendors,
       // ✅ logs
       includeLogs = "true",
       logLimit = 10,
@@ -1692,6 +1694,19 @@ const getFrontendOrders = async (req, res) => {
       noPsd: null, // ✅ disable trong buildFilters
       shippingType,
     });
+
+    // ===== Selected vendor filter =====
+    const selectedVendors = vendor || vendors;
+    if (selectedVendors) {
+      const selectedVendorFilter =
+        await buildSelectedVendorsFilter(selectedVendors);
+      if (selectedVendorFilter.error) {
+        return res.status(400).json({ message: selectedVendorFilter.error });
+      }
+      if (selectedVendorFilter.filter) {
+        filters.push(selectedVendorFilter.filter);
+      }
+    }
 
     // ===== Production vendor filter =====
     if (roles.isProduction) {
@@ -1777,13 +1792,13 @@ const getFrontendOrders = async (req, res) => {
       teamObjectId: ids.teamObjectId,
       sellerObjectId: ids.sellerObjectId,
       shopName,
-      roles
+      roles,
     });
 
     const { orders, totalCount, limitNum } = await executePipeline(
       pipeline,
       page,
-      perPage
+      perPage,
     );
 
     const enrichedOrders = await enrichOrdersData(orders);
@@ -1802,7 +1817,7 @@ const getFrontendOrders = async (req, res) => {
       const logs = await OrderHistory.find({ orderId: { $in: orderIds } })
         .sort({ createdAt: -1 })
         .select(
-          "orderId action description changes orderItemId userId userName userRole source createdAt"
+          "orderId action description changes orderItemId userId userName userRole source createdAt",
         )
         .lean();
 
@@ -1857,6 +1872,8 @@ const getOrderStatistics = async (req, res) => {
       shopName,
       teamId,
       openCase,
+      vendor,
+      vendors,
     } = req.query;
 
     // ===== RBAC =====
@@ -1891,6 +1908,19 @@ const getOrderStatistics = async (req, res) => {
       noPsd: null, // ✅ disable
       shippingType,
     });
+
+    // ===== Selected vendor filter =====
+    const selectedVendors = vendor || vendors;
+    if (selectedVendors) {
+      const selectedVendorFilter =
+        await buildSelectedVendorsFilter(selectedVendors);
+      if (selectedVendorFilter.error) {
+        return res.status(400).json({ message: selectedVendorFilter.error });
+      }
+      if (selectedVendorFilter.filter) {
+        filters.push(selectedVendorFilter.filter);
+      }
+    }
 
     // ===== TEAM FILTER (leader) =====
     const Team = db.Team;
@@ -1988,13 +2018,13 @@ const getOrderStatistics = async (req, res) => {
       listingIdsNoPsd.length === 0
         ? { _id: null } // luôn 0
         : {
-          $and: [
-            {
-              items: { $elemMatch: { listingId: { $in: listingIdsNoPsd } } },
-            },
-            { status: { $ne: "Cancelled" } },
-          ],
-        };
+            $and: [
+              {
+                items: { $elemMatch: { listingId: { $in: listingIdsNoPsd } } },
+              },
+              { status: { $ne: "Cancelled" } },
+            ],
+          };
 
     const [stat] = await OrderCustomProduct.aggregate([
       { $match: match },
@@ -2062,7 +2092,7 @@ const getOrderStatistics = async (req, res) => {
         refund: 0,
         openCase: 0,
         invalidAddress: 0,
-      }
+      },
     );
   } catch (err) {
     console.error("❌ getOrderStatistics error:", err);
@@ -2345,7 +2375,7 @@ const removeCaseFromOrder = async (req, res) => {
     const normalizedCaseIds = [...new Set(caseIds.map((id) => String(id)))];
 
     const invalidIds = normalizedCaseIds.filter(
-      (id) => !mongoose.Types.ObjectId.isValid(id)
+      (id) => !mongoose.Types.ObjectId.isValid(id),
     );
     if (invalidIds.length > 0) {
       return res.status(400).json({
@@ -2385,8 +2415,9 @@ const removeCaseFromOrder = async (req, res) => {
     await logOrderHistory({
       orderDoc: order,
       action: "REMOVE_CASE",
-      description: `Removed ${oldCases.length - newCases.length
-        } case(s) from order`,
+      description: `Removed ${
+        oldCases.length - newCases.length
+      } case(s) from order`,
       changes: [
         {
           field: "case",
@@ -2597,7 +2628,7 @@ async function selectConfigByProductType(configCode, labelValueMap) {
   for (const c of cfgCandidates) {
     const typeValRaw = pickValueByKeys(
       labelValueMap,
-      c.customize_product_type_key || []
+      c.customize_product_type_key || [],
     );
     const typeVal = normalize(typeValRaw);
     const sellerName = normalize(c?.product_for_seller?.name || "");
@@ -2614,7 +2645,7 @@ async function selectConfigByProductType(configCode, labelValueMap) {
     const only = cfgCandidates[0];
     const typeValRaw = pickValueByKeys(
       labelValueMap,
-      only.customize_product_type_key || []
+      only.customize_product_type_key || [],
     );
     return {
       cfg: only,
@@ -2634,7 +2665,7 @@ function findBestCostCenter(
   candidates,
   sizeValue,
   colorValue,
-  { strict = true } = {}
+  { strict = true } = {},
 ) {
   const norm = (s) =>
     String(s || "")
@@ -2643,7 +2674,7 @@ function findBestCostCenter(
   const sizeN = norm(sizeValue);
   const colorN = norm(colorValue);
   const hit = candidates.find(
-    (c) => norm(c.vendor_size) === sizeN && norm(c.vendor_color) === colorN
+    (c) => norm(c.vendor_size) === sizeN && norm(c.vendor_color) === colorN,
   );
   if (hit) return hit;
   if (strict) return null;
@@ -2660,7 +2691,7 @@ async function tryMatchVendorProduct(pfItem, sizeValue, colorValue) {
     status: { $in: ["Active", null] },
   })
     .select(
-      "vendor_size vendor_color standard_size standard_color base_cost sku international.economy international.additional additional_costs"
+      "vendor_size vendor_color standard_size standard_color base_cost sku international.economy international.additional additional_costs",
     )
     .lean();
 
@@ -2683,9 +2714,9 @@ async function listCandidateVendors(pfItems = [], sizeValue, colorValue) {
 
     const vendorId = String(
       it?.vendor_id ||
-      it?.vendor?._id ||
-      (await getVendorIdByVendorProductId(vendorProductId)) ||
-      ""
+        it?.vendor?._id ||
+        (await getVendorIdByVendorProductId(vendorProductId)) ||
+        "",
     );
     if (vendorId) out.add(vendorId);
   }
@@ -2714,7 +2745,7 @@ async function selectBestVendorProduct(
   pfItems,
   sizeValue,
   colorValue,
-  opts = {}
+  opts = {},
 ) {
   const { forcedVendorId = null, strictForcedVendor = true } = opts;
 
@@ -2736,9 +2767,9 @@ async function selectBestVendorProduct(
     if (!vpId) continue;
     const vId = String(
       it?.vendor_id ||
-      it?.vendor?._id ||
-      (await getVendorIdByVendorProductId(vpId)) ||
-      ""
+        it?.vendor?._id ||
+        (await getVendorIdByVendorProductId(vpId)) ||
+        "",
     );
     resolved.push({ ...it, __vendorId: vId, __vendorProductId: vpId });
   }
@@ -2746,7 +2777,7 @@ async function selectBestVendorProduct(
   // Nếu ép vendor: chỉ giữ lại các pfItem cùng vendor
   if (forcedVendorId) {
     const filtered = resolved.filter(
-      (x) => x.__vendorId && String(x.__vendorId) === String(forcedVendorId)
+      (x) => x.__vendorId && String(x.__vendorId) === String(forcedVendorId),
     );
     if (filtered.length === 0) {
       // Không có pfItem thuộc vendor bị ép
@@ -2771,7 +2802,7 @@ async function selectBestVendorProduct(
       status: { $in: ["Active", "active", null] },
     })
       .select(
-        "vendor_size vendor_color standard_size standard_color base_cost sku international.economy international.additional additional_costs"
+        "vendor_size vendor_color standard_size standard_color base_cost sku international.economy international.additional additional_costs",
       )
       .lean();
 
@@ -2826,9 +2857,9 @@ async function buildVendorRank(preItems) {
       if (!vpId) continue;
       const vId = String(
         it?.vendor_id ||
-        it?.vendor?._id ||
-        (await getVendorIdByVendorProductId(vpId)) ||
-        ""
+          it?.vendor?._id ||
+          (await getVendorIdByVendorProductId(vpId)) ||
+          "",
       );
       if (!vId) continue;
       resolved.push({ ...it, __vendorId: vId, __vendorProductId: vpId });
@@ -2884,16 +2915,16 @@ async function resolveShippingRates({
   const up = (v) => norm(v).toUpperCase();
 
   const sizeCand = Array.from(
-    new Set([norm(sizeValue), up(sizeValue)].filter(Boolean))
+    new Set([norm(sizeValue), up(sizeValue)].filter(Boolean)),
   );
   const colorCand = Array.from(
-    new Set([norm(colorValue), up(colorValue)].filter(Boolean))
+    new Set([norm(colorValue), up(colorValue)].filter(Boolean)),
   );
 
   // Pick từ doc (matched hoặc doc DB)
   const pickFromDoc = (
     doc,
-    preferProfile /* 'priority' | 'international' */
+    preferProfile /* 'priority' | 'international' */,
   ) => {
     if (!doc) return null;
 
@@ -3056,10 +3087,10 @@ const computeBaseCostForOrder = async (req, res) => {
     }
 
     // ===== QUERY CACHE (chỉ sống trong 1 lần gọi, tránh re-query DB) =====
-    const _cfgCache = new Map();       // configCode → kết quả selectConfigByProductType
-    const _optRulesCache = new Map();  // "configCode::key::rawValue" → kết quả mapOptionValue
-    const _vpIdCache = new Map();      // vendorProductId → vendorId (string)
-    const _vccCache = new Map();       // vendorProductId → VendorCostCenter[] (lean docs)
+    const _cfgCache = new Map(); // configCode → kết quả selectConfigByProductType
+    const _optRulesCache = new Map(); // "configCode::key::rawValue" → kết quả mapOptionValue
+    const _vpIdCache = new Map(); // vendorProductId → vendorId (string)
+    const _vccCache = new Map(); // vendorProductId → VendorCostCenter[] (lean docs)
 
     // ===== CACHED WRAPPERS =====
     async function cachedSelectConfig(configCode, labelValueMap) {
@@ -3094,7 +3125,7 @@ const computeBaseCostForOrder = async (req, res) => {
       })
         .select(
           "vendor_size vendor_color standard_size standard_color base_cost sku " +
-          "international priority additional_costs"
+            "international priority additional_costs",
         )
         .lean();
       _vccCache.set(k, docs);
@@ -3145,11 +3176,11 @@ const computeBaseCostForOrder = async (req, res) => {
 
       const sizeRaw = pickValueByKeys(
         labelValueMap,
-        cfg.customize_size_key || []
+        cfg.customize_size_key || [],
       );
       const colorRaw = pickValueByKeys(
         labelValueMap,
-        cfg.customize_color_key || []
+        cfg.customize_color_key || [],
       );
 
       const sizeMap = await cachedMapOptionValue({
@@ -3196,16 +3227,16 @@ const computeBaseCostForOrder = async (req, res) => {
           pfItems = [fifthByOrder];
         } else {
           const sorted = [...activeItems].sort(
-            (a, b) => Number(a.order) - Number(b.order)
+            (a, b) => Number(a.order) - Number(b.order),
           );
           if (sorted.length >= 5) {
             pfItems = [sorted[4]];
             console.warn(
-              "[EBM/EBMA] order===5 không tồn tại, fallback dùng phần tử thứ 5 sau sort theo 'order'."
+              "[EBM/EBMA] order===5 không tồn tại, fallback dùng phần tử thứ 5 sau sort theo 'order'.",
             );
           } else {
             throw new Error(
-              "[EBM/EBMA] Không tìm thấy item có order===5 và cũng không đủ 5 items để fallback."
+              "[EBM/EBMA] Không tìm thấy item có order===5 và cũng không đủ 5 items để fallback.",
             );
           }
         }
@@ -3213,7 +3244,9 @@ const computeBaseCostForOrder = async (req, res) => {
 
       // (NEW) Check manual override first
       if (item.manual_vendor_cost_center_id) {
-        const vcc = await VendorCostCenter.findById(item.manual_vendor_cost_center_id).lean();
+        const vcc = await VendorCostCenter.findById(
+          item.manual_vendor_cost_center_id,
+        ).lean();
         if (vcc && Number(vcc.base_cost || 0) > 0) {
           const vId = await cachedGetVendorId(vcc.vendor_product);
           preItems.push({
@@ -3234,7 +3267,9 @@ const computeBaseCostForOrder = async (req, res) => {
           candidateSetsPerItem.push(new Set([vId]));
           continue;
         } else {
-          console.warn(`Manual VCC ${item.manual_vendor_cost_center_id} not found or has 0 cost. Falling back to auto.`);
+          console.warn(
+            `Manual VCC ${item.manual_vendor_cost_center_id} not found or has 0 cost. Falling back to auto.`,
+          );
         }
       }
 
@@ -3257,10 +3292,15 @@ const computeBaseCostForOrder = async (req, res) => {
         const vpId = pf?.vendor_product;
         if (!vpId) continue;
         const candidates = await cachedVendorCostCenters(vpId);
-        const hit = findBestCostCenter(candidates, sizeValue, colorValue, { strict: true });
+        const hit = findBestCostCenter(candidates, sizeValue, colorValue, {
+          strict: true,
+        });
         if (!hit) continue;
         const vId = String(
-          pf?.vendor_id || pf?.vendor?._id || (await cachedGetVendorId(vpId)) || ""
+          pf?.vendor_id ||
+            pf?.vendor?._id ||
+            (await cachedGetVendorId(vpId)) ||
+            "",
         );
         if (vId) vendorSet.add(vId);
       }
@@ -3269,7 +3309,9 @@ const computeBaseCostForOrder = async (req, res) => {
 
     // (CODE MỚI) — KHÔNG ÉP vendor nếu đơn chỉ có 1 item.
     // Nếu có từ 2 item trở lên: giao vendor và chọn theo vendor-rank (pfItems.order)
-    let preferredVendorId = order.forced_vendor_id ? String(order.forced_vendor_id) : null;
+    let preferredVendorId = order.forced_vendor_id
+      ? String(order.forced_vendor_id)
+      : null;
     if (!preferredVendorId && preItems.length >= 2) {
       // inline buildVendorRank (cached)
       const vendorRank = new Map();
@@ -3279,7 +3321,10 @@ const computeBaseCostForOrder = async (req, res) => {
           const vpId = it?.vendor_product;
           if (!vpId) continue;
           const vId = String(
-            it?.vendor_id || it?.vendor?._id || (await cachedGetVendorId(vpId)) || ""
+            it?.vendor_id ||
+              it?.vendor?._id ||
+              (await cachedGetVendorId(vpId)) ||
+              "",
           );
           if (!vId) continue;
           const o = it.order ?? 999;
@@ -3292,7 +3337,7 @@ const computeBaseCostForOrder = async (req, res) => {
 
     console.log(
       "[BaseCost] candidates per item:",
-      candidateSetsPerItem.map((s) => [...s])
+      candidateSetsPerItem.map((s) => [...s]),
     );
     console.log("[BaseCost] preferredVendorId:", preferredVendorId);
 
@@ -3331,35 +3376,58 @@ const computeBaseCostForOrder = async (req, res) => {
         const actives = pfItems
           .filter((it) => String(it.status || "").toLowerCase() === "active")
           .sort(byOrder);
-        let itemsToCheck = actives.length ? actives : [...pfItems].sort(byOrder);
+        let itemsToCheck = actives.length
+          ? actives
+          : [...pfItems].sort(byOrder);
 
         const resolved = [];
         for (const it of itemsToCheck) {
           const vpId = it?.vendor_product;
           if (!vpId) continue;
           const vId = String(
-            it?.vendor_id || it?.vendor?._id || (await cachedGetVendorId(vpId)) || ""
+            it?.vendor_id ||
+              it?.vendor?._id ||
+              (await cachedGetVendorId(vpId)) ||
+              "",
           );
           resolved.push({ ...it, __vendorId: vId, __vendorProductId: vpId });
         }
 
         const filtered = preferredVendorId
-          ? resolved.filter((x) => x.__vendorId && String(x.__vendorId) === String(preferredVendorId))
+          ? resolved.filter(
+              (x) =>
+                x.__vendorId &&
+                String(x.__vendorId) === String(preferredVendorId),
+            )
           : resolved;
         if (preferredVendorId && filtered.length === 0) {
-          return { success: false, reason: `No pfItems under forced vendor ${preferredVendorId}`, forcedVendorId: preferredVendorId };
+          return {
+            success: false,
+            reason: `No pfItems under forced vendor ${preferredVendorId}`,
+            forcedVendorId: preferredVendorId,
+          };
         }
 
         const checkList = filtered.length ? filtered : resolved;
         for (const cItem of checkList) {
-          const candidates = await cachedVendorCostCenters(cItem.__vendorProductId);
+          const candidates = await cachedVendorCostCenters(
+            cItem.__vendorProductId,
+          );
           if (!candidates?.length) continue;
-          let hit = findBestCostCenter(candidates, sizeValue, colorValue, { strict: true });
-          if (!hit) hit = findBestCostCenter(candidates, sizeValue, colorValue, { strict: false });
+          let hit = findBestCostCenter(candidates, sizeValue, colorValue, {
+            strict: true,
+          });
+          if (!hit)
+            hit = findBestCostCenter(candidates, sizeValue, colorValue, {
+              strict: false,
+            });
           if (hit && Number(hit?.base_cost || 0) > 0) {
             return {
-              success: true, vendorProductId: cItem.__vendorProductId, matched: hit,
-              selectedOrder: cItem.order || 999, itemDisplayName: cItem.display_name || "Unknown",
+              success: true,
+              vendorProductId: cItem.__vendorProductId,
+              matched: hit,
+              selectedOrder: cItem.order || 999,
+              itemDisplayName: cItem.display_name || "Unknown",
               vendorId: cItem.__vendorId,
             };
           }
@@ -3372,8 +3440,10 @@ const computeBaseCostForOrder = async (req, res) => {
             : "No matching vendor product with valid cost center found",
           forcedVendorId: preferredVendorId || undefined,
           checkedItems: checkList.map((it) => ({
-            order: it.order, display_name: it.display_name,
-            vendor_product: String(it.__vendorProductId || ""), vendor_id: String(it.__vendorId || ""),
+            order: it.order,
+            display_name: it.display_name,
+            vendor_product: String(it.__vendorProductId || ""),
+            vendor_id: String(it.__vendorId || ""),
           })),
         };
       })();
@@ -3410,50 +3480,119 @@ const computeBaseCostForOrder = async (req, res) => {
         const shipType = String(shippingTypeForOrder || "").toLowerCase();
         const pickFromDoc = (doc, preferProfile) => {
           if (!doc) return null;
-          const hasPriority = doc.priority && (doc.priority.economy != null || doc.priority.additional != null);
-          const hasIntl = doc.international && (doc.international.economy != null || doc.international.additional != null);
-          if (preferProfile === "priority" && hasPriority) return { eco: Number(doc.priority.economy ?? 0), add: Number(doc.priority.additional ?? 0), profile: "priority", source: "doc" };
-          if (hasIntl) return { eco: Number(doc.international.economy ?? 0), add: Number(doc.international.additional ?? 0), profile: "international", source: "doc" };
+          const hasPriority =
+            doc.priority &&
+            (doc.priority.economy != null || doc.priority.additional != null);
+          const hasIntl =
+            doc.international &&
+            (doc.international.economy != null ||
+              doc.international.additional != null);
+          if (preferProfile === "priority" && hasPriority)
+            return {
+              eco: Number(doc.priority.economy ?? 0),
+              add: Number(doc.priority.additional ?? 0),
+              profile: "priority",
+              source: "doc",
+            };
+          if (hasIntl)
+            return {
+              eco: Number(doc.international.economy ?? 0),
+              add: Number(doc.international.additional ?? 0),
+              profile: "international",
+              source: "doc",
+            };
           return null;
         };
 
         async function lookupFromCache(preferProfile) {
           if (!vendorProductId) return null;
           const allDocs = await cachedVendorCostCenters(vendorProductId);
-          const normS = String(sizeValue || "").trim().toLowerCase();
-          const normC = String(colorValue || "").trim().toLowerCase();
+          const normS = String(sizeValue || "")
+            .trim()
+            .toLowerCase();
+          const normC = String(colorValue || "")
+            .trim()
+            .toLowerCase();
           // vendor_size/color
           for (const doc of allDocs) {
-            if (normS && String(doc.vendor_size || "").trim().toLowerCase() === normS &&
-              normC && String(doc.vendor_color || "").trim().toLowerCase() === normC) {
-              const p = pickFromDoc(doc, preferProfile); if (p) return p;
+            if (
+              normS &&
+              String(doc.vendor_size || "")
+                .trim()
+                .toLowerCase() === normS &&
+              normC &&
+              String(doc.vendor_color || "")
+                .trim()
+                .toLowerCase() === normC
+            ) {
+              const p = pickFromDoc(doc, preferProfile);
+              if (p) return p;
             }
           }
           // standard_size/color
           for (const doc of allDocs) {
-            if (normS && String(doc.standard_size || "").trim().toLowerCase() === normS &&
-              normC && String(doc.standard_color || "").trim().toLowerCase() === normC) {
-              const p = pickFromDoc(doc, preferProfile); if (p) return p;
+            if (
+              normS &&
+              String(doc.standard_size || "")
+                .trim()
+                .toLowerCase() === normS &&
+              normC &&
+              String(doc.standard_color || "")
+                .trim()
+                .toLowerCase() === normC
+            ) {
+              const p = pickFromDoc(doc, preferProfile);
+              if (p) return p;
             }
           }
           // fallback: any doc
           for (const doc of allDocs) {
-            const p = pickFromDoc(doc, preferProfile); if (p) return p;
+            const p = pickFromDoc(doc, preferProfile);
+            if (p) return p;
           }
           return null;
         }
 
         if (shipType === "expedited") {
-          if (matched?.priority && (matched.priority.economy != null || matched.priority.additional != null))
-            return { eco: Number(matched.priority.economy ?? 0), add: Number(matched.priority.additional ?? 0), profile: "priority", source: "matched" };
-          const dbPick = await lookupFromCache("priority"); if (dbPick) return dbPick;
-          if (matched?.international && (matched.international.economy != null || matched.international.additional != null))
-            return { eco: Number(matched.international.economy ?? 0), add: Number(matched.international.additional ?? 0), profile: "international", source: "matched-fallback" };
+          if (
+            matched?.priority &&
+            (matched.priority.economy != null ||
+              matched.priority.additional != null)
+          )
+            return {
+              eco: Number(matched.priority.economy ?? 0),
+              add: Number(matched.priority.additional ?? 0),
+              profile: "priority",
+              source: "matched",
+            };
+          const dbPick = await lookupFromCache("priority");
+          if (dbPick) return dbPick;
+          if (
+            matched?.international &&
+            (matched.international.economy != null ||
+              matched.international.additional != null)
+          )
+            return {
+              eco: Number(matched.international.economy ?? 0),
+              add: Number(matched.international.additional ?? 0),
+              profile: "international",
+              source: "matched-fallback",
+            };
           return { eco: 0, add: 0, profile: "priority", source: "zero" };
         }
-        if (matched?.international && (matched.international.economy != null || matched.international.additional != null))
-          return { eco: Number(matched.international.economy ?? 0), add: Number(matched.international.additional ?? 0), profile: "international", source: "matched" };
-        const dbPick = await lookupFromCache("international"); if (dbPick) return dbPick;
+        if (
+          matched?.international &&
+          (matched.international.economy != null ||
+            matched.international.additional != null)
+        )
+          return {
+            eco: Number(matched.international.economy ?? 0),
+            add: Number(matched.international.additional ?? 0),
+            profile: "international",
+            source: "matched",
+          };
+        const dbPick = await lookupFromCache("international");
+        if (dbPick) return dbPick;
         return { eco: 0, add: 0, profile: "international", source: "zero" };
       })();
       const eco = Number(rate.eco || 0);
@@ -3468,17 +3607,17 @@ const computeBaseCostForOrder = async (req, res) => {
       };
       if (["TSB"].includes(configCode.toUpperCase())) {
         additionalCosts.two_sided_print = Number(
-          matched?.additional_costs?.two_sided_print || 0
+          matched?.additional_costs?.two_sided_print || 0,
         );
       }
       if (["TS2S", "QZES"].includes(configCode.toUpperCase())) {
         additionalCosts.two_position_print = Number(
-          matched?.additional_costs?.two_position_print || 0
+          matched?.additional_costs?.two_position_print || 0,
         );
       }
       if (["EBM", "EBMA"].includes(configCode.toUpperCase())) {
         additionalCosts.embroidery = Number(
-          matched?.additional_costs?.embroidery || 0
+          matched?.additional_costs?.embroidery || 0,
         );
       }
       const totalAdditionalCost =
@@ -3673,12 +3812,12 @@ const computeBaseCostForOrder = async (req, res) => {
         const sorted = [...g.items].sort(
           (a, b) =>
             b.eco - a.eco ||
-            String(a.orderItemId).localeCompare(String(b.orderItemId))
+            String(a.orderItemId).localeCompare(String(b.orderItemId)),
         );
 
         for (const it of sorted) {
           const out = perItemResults.find(
-            (r) => r.orderItemId === it.orderItemId && r.status === "ok"
+            (r) => r.orderItemId === it.orderItemId && r.status === "ok",
           );
           if (!out) continue;
 
@@ -3691,7 +3830,7 @@ const computeBaseCostForOrder = async (req, res) => {
           let addUnitsForThisItem = it.qty - (ecoForThisItem > 0 ? 1 : 0);
           addUnitsForThisItem = Math.max(
             0,
-            Math.min(addUnitsForThisItem, remainingAdditionalUnits)
+            Math.min(addUnitsForThisItem, remainingAdditionalUnits),
           );
           remainingAdditionalUnits -= addUnitsForThisItem;
 
@@ -3709,7 +3848,7 @@ const computeBaseCostForOrder = async (req, res) => {
               out.base_cost_total_for_item_including_shipping +
               ecoForThisItem +
               addCostForThisItem
-            ).toFixed(2)
+            ).toFixed(2),
           );
           out.formula = `(base ${it.baseEach} * qty ${it.qty}) + additional ${it.totalAdditionalCost} * qty ${it.qty} + [${g.shipProfile}] eco ${ecoForThisItem} + add ${addRate} * ${addUnitsForThisItem} | Selected: Order ${out.selectedOrder} - ${out.itemDisplayName}`;
         }
@@ -3719,16 +3858,16 @@ const computeBaseCostForOrder = async (req, res) => {
             ecoOnce +
             g.items.reduce((sum, it) => {
               const out = perItemResults.find(
-                (r) => r.orderItemId === it.orderItemId && r.status === "ok"
+                (r) => r.orderItemId === it.orderItemId && r.status === "ok",
               );
               if (!out) return sum;
               return (
                 sum +
                 (out.shipping_international_additional_units || 0) *
-                (out.shipping_international_additional_rate || 0)
+                  (out.shipping_international_additional_rate || 0)
               );
             }, 0)
-          ).toFixed(2)
+          ).toFixed(2),
         );
 
         groupBreakdowns.push({
@@ -3746,7 +3885,7 @@ const computeBaseCostForOrder = async (req, res) => {
     for (const out of perItemResults) {
       if (out.status !== "ok") continue;
       const itemRef = order.items.find(
-        (i) => String(i.orderItemId) === String(out.orderItemId)
+        (i) => String(i.orderItemId) === String(out.orderItemId),
       );
       if (!itemRef) continue;
 
@@ -3786,7 +3925,7 @@ const computeBaseCostForOrder = async (req, res) => {
       if (
         it.cost_breakdown &&
         typeof it.cost_breakdown.base_cost_total_for_item_including_shipping ===
-        "number"
+          "number"
       ) {
         orderTotalBaseCost +=
           it.cost_breakdown.base_cost_total_for_item_including_shipping;
@@ -3862,7 +4001,7 @@ function computeOrderStatusFromItems(items = []) {
   const hasNew = active.includes("New");
   const hasFulfilled = active.includes("Fulfilled");
   const allFulfilledOrShipped = active.every(
-    (s) => s === "Fulfilled" || s === "Shipped"
+    (s) => s === "Fulfilled" || s === "Shipped",
   );
   if (!hasNew && hasFulfilled && allFulfilledOrShipped) return "Fulfilled";
   return "New";
@@ -3875,7 +4014,7 @@ const unique = (arr) => [
 const summarizeItemsField = (items, pickFn) => {
   if (!Array.isArray(items) || items.length === 0) return [];
   return unique(
-    items.map(pickFn).map((v) => (typeof v === "string" ? v.trim() : v))
+    items.map(pickFn).map((v) => (typeof v === "string" ? v.trim() : v)),
   );
 };
 
@@ -3938,7 +4077,7 @@ const updateItemTracking = async (req, res) => {
     // ===== Fetch BEFORE để lấy old order.status cho log =====
     const beforeDoc = await OrderCustomProduct.findOne(
       { orderId },
-      { orderId: 1, status: 1 }
+      { orderId: 1, status: 1 },
     ).lean();
 
     if (!beforeDoc) {
@@ -3980,7 +4119,7 @@ const updateItemTracking = async (req, res) => {
     const docAfterAllUpdate = await OrderCustomProduct.findOneAndUpdate(
       { orderId },
       { $set },
-      { new: true }
+      { new: true },
     );
 
     if (!docAfterAllUpdate) {
@@ -3992,7 +4131,7 @@ const updateItemTracking = async (req, res) => {
     if (newOrderStatus !== docAfterAllUpdate.status) {
       await OrderCustomProduct.updateOne(
         { _id: docAfterAllUpdate._id },
-        { $set: { status: newOrderStatus } }
+        { $set: { status: newOrderStatus } },
       );
       // sync lại instance để trả response nhất quán (không bắt buộc)
       docAfterAllUpdate.status = newOrderStatus;
@@ -4059,7 +4198,7 @@ async function buildNextReplaceOrderId(baseOrderId) {
   const regex = new RegExp(`^${base}-R(\\d+)$`, "i");
   const exists = await OrderCustomProduct.find(
     { orderId: { $regex: new RegExp(`^${base}-R\\d+$`, "i") } },
-    { orderId: 1 }
+    { orderId: 1 },
   ).lean();
 
   if (!exists || exists.length === 0) return `${base}-R1`;
@@ -4176,7 +4315,7 @@ async function createReplacementOrder(req, res) {
       base_cost_shipping_groups: [],
       amazon_total_quantity: newItems.reduce(
         (s, it) => s + Number(it.quantity || 1),
-        0
+        0,
       ),
 
       // metadata replace (không đụng schema hiện tại nếu chưa có field — chỉ lưu thêm key mềm)
@@ -4196,7 +4335,7 @@ async function createReplacementOrder(req, res) {
 
     try {
       const validationResult = await validateAddressWithSmarty(
-        created.customer_infor
+        created.customer_infor,
       );
 
       // cập nhật trường theo đúng model
@@ -4243,11 +4382,10 @@ const updateScaleOrder = async (req, res) => {
     req.body,
     {
       new: true,
-    }
+    },
   );
   res.json(user);
 };
-
 
 /**
  * POST /update-tracking
@@ -4283,7 +4421,7 @@ const updateTrackingByOrderId = async (req, res) => {
     const order = await OrderCustomProduct.findOneAndUpdate(
       { orderId },
       { $set },
-      { new: true }
+      { new: true },
     );
 
     if (!order) {
@@ -4295,7 +4433,7 @@ const updateTrackingByOrderId = async (req, res) => {
     if (newOrderStatus !== order.status) {
       await OrderCustomProduct.updateOne(
         { _id: order._id },
-        { $set: { status: newOrderStatus } }
+        { $set: { status: newOrderStatus } },
       );
       order.status = newOrderStatus;
     }
@@ -4309,7 +4447,9 @@ const updateTrackingByOrderId = async (req, res) => {
     });
   } catch (err) {
     console.error("updateTrackingByOrderId error:", err);
-    return res.status(500).json({ message: "Update failed", error: err.message });
+    return res
+      .status(500)
+      .json({ message: "Update failed", error: err.message });
   }
 };
 
@@ -4320,7 +4460,8 @@ const updateTrackingByOrderId = async (req, res) => {
 const applyManualVendorMapping = async (req, res) => {
   try {
     const { orderId, forcedVendorId, items } = req.body;
-    if (!orderId) return res.status(400).json({ message: "orderId is required" });
+    if (!orderId)
+      return res.status(400).json({ message: "orderId is required" });
 
     const order = await OrderCustomProduct.findOne({ orderId });
     if (!order) return res.status(404).json({ message: "Order not found" });
@@ -4332,10 +4473,11 @@ const applyManualVendorMapping = async (req, res) => {
     if (Array.isArray(items)) {
       for (const override of items) {
         const item = order.items.find(
-          (i) => String(i.orderItemId) === String(override.orderItemId)
+          (i) => String(i.orderItemId) === String(override.orderItemId),
         );
         if (item) {
-          item.manual_vendor_cost_center_id = override.vendorCostCenterId || null;
+          item.manual_vendor_cost_center_id =
+            override.vendorCostCenterId || null;
 
           // 👉 Xoá breakdown cũ nếu user huỷ manual mapping để hàm compute ép tính lại từ đầu
           if (!override.vendorCostCenterId) {
@@ -4353,8 +4495,13 @@ const applyManualVendorMapping = async (req, res) => {
     let computedResult = null;
     const mockReq = { body: { orderId } };
     const mockRes = {
-      status: function () { return this; },
-      json: function (data) { computedResult = data; return this; }
+      status: function () {
+        return this;
+      },
+      json: function (data) {
+        computedResult = data;
+        return this;
+      },
     };
 
     await computeBaseCostForOrder(mockReq, mockRes);
@@ -4362,11 +4509,13 @@ const applyManualVendorMapping = async (req, res) => {
     return res.json({
       message: "Manual mapping applied successfully",
       orderId,
-      computed_info: computedResult
+      computed_info: computedResult,
     });
   } catch (err) {
     console.error("applyManualVendorMapping error:", err);
-    return res.status(500).json({ message: "Update failed", error: err.message });
+    return res
+      .status(500)
+      .json({ message: "Update failed", error: err.message });
   }
 };
 

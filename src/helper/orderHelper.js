@@ -175,6 +175,82 @@ async function buildVendorFilter() {
   };
 }
 
+function parseVendorIds(vendor) {
+  const rawValues = Array.isArray(vendor) ? vendor : [vendor];
+
+  const vendorIds = rawValues
+    .flatMap((value) => String(value || "").split(","))
+    .map((value) => value.trim())
+    .filter((value) => value && value.toLowerCase() !== "all");
+
+  return [...new Set(vendorIds)];
+}
+
+function escapeRegex(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+async function buildSelectedVendorsFilter(vendor) {
+  const vendorIds = parseVendorIds(vendor);
+
+  if (vendorIds.length === 0) {
+    return { filter: null };
+  }
+
+  const invalidVendorId = vendorIds.find((id) => !/^[a-f\d]{24}$/i.test(id));
+  if (invalidVendorId) {
+    return { error: `Invalid vendor id: ${invalidVendorId}` };
+  }
+
+  const vendorObjectIds = vendorIds.map((id) =>
+    mongoose.Types.ObjectId.createFromHexString(id)
+  );
+
+  const vendors = await Vendor.find({ _id: { $in: vendorObjectIds } })
+    .select("name")
+    .lean();
+
+  const vpIds = await VendorProduct.distinct("_id", {
+    vendor_id: { $in: vendorObjectIds },
+  });
+
+  const vpIdsStr = (vpIds || []).map((id) => String(id));
+  const vpIdsObj = vpIdsStr
+    .filter((id) => mongoose.Types.ObjectId.isValid(id))
+    .map((id) => mongoose.Types.ObjectId.createFromHexString(id));
+
+  const vendorConditions = [
+    { forced_vendor_id: { $in: vendorObjectIds } },
+  ];
+
+  const trackingFulfillmentValues = [
+    ...vendorIds,
+    ...vendors
+      .map((v) => String(v.name || "").trim())
+      .filter(Boolean)
+      .map((name) => new RegExp(`^\\s*${escapeRegex(name)}\\s*$`, "i")),
+  ];
+
+  if (trackingFulfillmentValues.length > 0) {
+    vendorConditions.push({
+      "items.tracking_info.fulfillment": { $in: trackingFulfillmentValues },
+    });
+  }
+
+  if (vpIdsStr.length > 0) {
+    vendorConditions.push(
+      { "items.cost_breakdown.vendorProductId": { $in: vpIdsStr } },
+      { "items.cost_breakdown.vendorProductId": { $in: vpIdsObj } }
+    );
+  }
+
+  return {
+    filter: {
+      $or: vendorConditions,
+    },
+  };
+}
+
 async function getVendorProductIdsByVendorName(vendorName) {
   const vdoc = await Vendor.findOne(
     { name: new RegExp(`^${vendorName}$`, "i") },
@@ -477,6 +553,7 @@ module.exports = {
     buildInitialMatch,
     buildFilters,
     buildVendorFilter,
+    buildSelectedVendorsFilter,
     buildPipeline,
     executePipeline,
     enrichOrdersData,
