@@ -1,8 +1,10 @@
 // controllers/orderFulfillment.controller.js
+const path = require("path");
 const multer = require("multer");
 const mongoose = require("mongoose");
 const db = require("../models");
 const cloudinary = require("../utils/cloudinary");
+const { uploadBufferToR2 } = require("../service/cloudflareR2/r2.service");
 const FulfillmentService = require("../service/fulfillment"); // <<< NEW
 const { addPointsFromTask, addPenaltyForScaleReject } = require("../service/pointsService");
 const TaskType = require('../enumeration/taskType')
@@ -74,6 +76,159 @@ async function isLNGGroupOrder(orderDoc) {
 
 // ============ Controllers ============
 
+// const uploadFulfillmentFileForItem = [
+//   upload.array("files"),
+//   async (req, res) => {
+//     try {
+//       const { orderId, orderItemId } = req.params;
+//       const { meta } = req.body;
+//       const user = req.user;
+
+//       if (!req.files?.length)
+//         return res.status(400).json({ message: "Missing files" });
+
+//       let positions = [];
+//       try {
+//         positions = JSON.parse(meta);
+//       } catch {
+//         return res.status(400).json({ message: "Invalid meta JSON" });
+//       }
+
+//       if (positions.length !== req.files.length) {
+//         return res
+//           .status(400)
+//           .json({ message: "Files count not match positions" });
+//       }
+
+//       const order = await OrderCustomProduct.findOne({ orderId });
+//       if (!order) return res.status(404).json({ message: "Order not found" });
+
+//       const item = order.items.find((i) => i.orderItemId === orderItemId);
+//       if (!item)
+//         return res.status(404).json({ message: "Order item not found" });
+
+//       // ===== Snapshot BEFORE =====
+//       const oldFulfillmentFile = (() => {
+//         try {
+//           const ff = item.fulfillment_file;
+//           if (!ff) return {};
+//           if (ff instanceof Map) return Object.fromEntries(ff);
+//           if (typeof ff === "object") return ff;
+//           return {};
+//         } catch {
+//           return {};
+//         }
+//       })();
+//       const oldItemScaleStatus = item.scale_status;
+//       const oldOrderScaleOverallStatus = order.scale_overall_status;
+//       const oldScaleId = order.scaleId ? String(order.scaleId) : null;
+//       // ===========================
+
+//       // Ensure Map
+//       const ff = item.fulfillment_file;
+//       if (!ff) item.fulfillment_file = new Map();
+//       else if (typeof ff === "string") item.fulfillment_file = new Map();
+//       else if (!(ff instanceof Map))
+//         item.fulfillment_file = new Map(Object.entries(ff));
+
+//       // Upload & set map
+//       for (let i = 0; i < req.files.length; i++) {
+//         const file = req.files[i];
+//         const pos = String(positions[i]?.position || "")
+//           .trim()
+//           .toLowerCase();
+//         if (!pos)
+//           return res
+//             .status(400)
+//             .json({ message: `Missing position for file index ${i}` });
+
+//         const public_id = `fulfillment_files/${orderId}-${orderItemId}-${pos}`;
+//         const up = await uploadStreamToCloudinary(file.buffer, { public_id });
+//         item.fulfillment_file.set(pos, up.secure_url);
+//       }
+
+//       // Business updates
+//       item.scale_status = "Pending";
+//       order.scale_overall_status = computeOverallScaleStatus(order);
+//       item.markModified("fulfillment_file");
+
+//       order.scaleId = user.id; // giữ như code hiện tại của bạn
+//       await order.save();
+
+//       // ===== Snapshot AFTER =====
+//       const newFulfillmentFile =
+//         item.fulfillment_file instanceof Map
+//           ? Object.fromEntries(item.fulfillment_file)
+//           : item.fulfillment_file || {};
+
+//       const changes = [];
+
+//       // 1) fulfillment_file
+//       changes.push({
+//         field: "items.fulfillment_file",
+//         from: oldFulfillmentFile,
+//         to: newFulfillmentFile,
+//       });
+
+//       // 2) item.scale_status
+//       if (oldItemScaleStatus !== item.scale_status) {
+//         changes.push({
+//           field: "items.scale_status",
+//           from: oldItemScaleStatus,
+//           to: item.scale_status,
+//         });
+//       }
+
+//       // 3) order.scale_overall_status
+//       if (oldOrderScaleOverallStatus !== order.scale_overall_status) {
+//         changes.push({
+//           field: "scale_overall_status",
+//           from: oldOrderScaleOverallStatus,
+//           to: order.scale_overall_status,
+//         });
+//       }
+
+//       // 4) order.scaleId
+//       const newScaleId = order.scaleId ? String(order.scaleId) : null;
+//       if (oldScaleId !== newScaleId) {
+//         changes.push({
+//           field: "scaleId",
+//           from: oldScaleId,
+//           to: newScaleId,
+//         });
+//       }
+//       // ==========================
+
+//       // ===== LOGGER =====
+//       await logOrderHistory({
+//         orderDoc: order,
+//         action: "UPLOAD_FULFILLMENT_FILES",
+//         description: `Uploaded fulfillment file(s) for item ${orderItemId}`,
+//         changes,
+//         orderItemId,
+//         user,
+//         context: {
+//           source: "PORTAL",
+//           ip: req.ip,
+//           userAgent: req.headers["user-agent"],
+//         },
+//       });
+//       // =================
+
+//       return res.json({
+//         message: "Uploaded fulfillment files successfully",
+//         fulfillment_file: newFulfillmentFile,
+//         item_scale_status: item.scale_status,
+//         order_scale_overall_status: order.scale_overall_status,
+//       });
+//     } catch (err) {
+//       return res
+//         .status(500)
+//         .json({ message: "Upload failed", error: err.message });
+//     }
+//   },
+// ];
+
 const uploadFulfillmentFileForItem = [
   upload.array("files"),
   async (req, res) => {
@@ -140,9 +295,17 @@ const uploadFulfillmentFileForItem = [
             .status(400)
             .json({ message: `Missing position for file index ${i}` });
 
-        const public_id = `fulfillment_files/${orderId}-${orderItemId}-${pos}`;
-        const up = await uploadStreamToCloudinary(file.buffer, { public_id });
-        item.fulfillment_file.set(pos, up.secure_url);
+        const ext = (path.extname(file.originalname || "").toLowerCase()) || ".png";
+        const key = `fulfillment_files/${orderId}-${orderItemId}-${pos}${ext}`;
+        const up = await uploadBufferToR2({
+          buffer: file.buffer,
+          originalName: file.originalname,
+          mimeType: file.mimetype,
+          size: file.size,
+          folder: "fulfillment_files",
+          key,
+        });
+        item.fulfillment_file.set(pos, up.url);
       }
 
       // Business updates
@@ -220,12 +383,14 @@ const uploadFulfillmentFileForItem = [
         order_scale_overall_status: order.scale_overall_status,
       });
     } catch (err) {
+      console.error("[FULFILLMENT_FILE_UPLOAD_ERROR]", err);
       return res
         .status(500)
         .json({ message: "Upload failed", error: err.message });
     }
   },
 ];
+
 
 // Chuẩn hóa provider từ Vendor.fulfillment_type hoặc Vendor.name
 function normalizeProviderKey(vendorDoc) {

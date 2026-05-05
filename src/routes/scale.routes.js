@@ -9,13 +9,13 @@ const {
 router.post(
   "/orders/:orderId/items/:orderItemId/fulfillment-file",
   authenticateToken,
-  authorizeRoles(
-    "Customer Service",
-    "Admin",
-    "Seller",
-    "Designer",
-    "Design Leader"
-  ),
+  // authorizeRoles(
+  //   "Customer Service",
+  //   "Admin",
+  //   "Seller",
+  //   "Designer",
+  //   "Design Leader"
+  // ),
   scaleController.uploadFulfillmentFileForItem
 );
 
