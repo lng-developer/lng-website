@@ -15,7 +15,7 @@ const ALLOWED_MIME_TYPES = ["image/jpeg", "image/png", "image/webp", "image/gif"
 const upload = multer({
     storage: multer.memoryStorage(),
     limits: {
-        fileSize: 20 * 1024 * 1024,
+        fileSize: 100 * 1024 * 1024,
     },
     fileFilter: (_req, file, cb) => {
         if (!ALLOWED_MIME_TYPES.includes(file.mimetype)) {
@@ -50,7 +50,7 @@ router.post("/upload", upload.single("file"), async (req, res) => {
         });
     } catch (error) {
         console.error("[R2_UPLOAD_ERROR]", error);
-
+        console.log("ERROR STACK");
         return res.status(500).json({
             success: false,
             message: "Upload failed",
