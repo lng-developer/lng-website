@@ -877,6 +877,7 @@ const confirmScaleForItem = async (req, res) => {
 
         order.vendor_submissions = order.vendor_submissions || {};
         order.vendor_submissions[providerKey] = rec;
+        order.markModified("vendor_submissions");
 
         if (providerKey === "grabink") {
           order.grabink_submission = rec;

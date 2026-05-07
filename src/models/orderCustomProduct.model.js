@@ -285,6 +285,18 @@ const orderCustomProductSchema = new mongoose.Schema({
     external_id: { type: String, default: null }, // [Chưa xác minh]: nếu Grabink trả ID
   },
 
+  vendor_submissions: {
+    type: mongoose.Schema.Types.Mixed,
+    default: undefined,
+  },
+
+  fulfillment_portal_submission: {
+    sent: { type: Boolean, default: false },
+    sent_at: { type: Date, default: null },
+    attempt_count: { type: Number, default: 0 },
+    last_response: { type: Object, default: null },
+  },
+
   sellerId: {
     type: mongoose.Schema.Types.ObjectId,
     ref: "User",

@@ -7,6 +7,8 @@ router.get('/', authenticateToken, authorizeRoles('Customer Service', "Admin", "
 
 router.get('/statistics', authenticateToken, authorizeRoles('Customer Service', "Admin", "Seller"), QCController.getQCStatistics);
 
+router.post('/send-to-fulfillment', authenticateToken, authorizeRoles('Customer Service', "Admin", "Seller"), QCController.sendFailedOrdersToFulfillment);
+
 router.put('/orders/:orderId/items/:orderItemId/qc-note', authenticateToken, authorizeRoles('Customer Service', "Admin", "Seller"), QCController.updateQCNoteForItem);
 
 module.exports = router;

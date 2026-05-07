@@ -1,6 +1,8 @@
 // controllers/qc.controller.js
+const axios = require("axios");
 const mongoose = require("mongoose");
 const db = require("../models");
+const { logOrderHistory } = require("../service/orderHistoryLogger");
 const OrderCustomProduct = db.orderCustomProduct;
 const VendorProduct = db.vendorProduct;
 const Listing = db.listing;
@@ -45,6 +47,116 @@ const canon = (s) => {
   if (/^qc\s*reject(?:ed)?$/i.test(t)) return "QC Rejected";
   if (/^addr(?:ess)?\s*invalid$/i.test(t)) return "Address Invalid";
   return t;
+};
+
+const toPlainObject = (value) => {
+  if (!value) return {};
+  if (value instanceof Map) return Object.fromEntries(value);
+  if (typeof value.toObject === "function") return value.toObject();
+  if (typeof value === "object") return value;
+  return {};
+};
+
+const normalizeFulfillmentFile = (value) => {
+  const plain = toPlainObject(value);
+  return plain && typeof plain === "object" ? plain : {};
+};
+
+const extractVersion3Data = (item) => {
+  const surfaces = item.version3Data?.customizationInfo?.surfaces || [];
+  return surfaces.flatMap((surface) =>
+    (surface.areas || []).map((area) => ({
+      label: area.label || area.name || "",
+      value: area.optionValue || area.text || area.numberValue || "",
+    }))
+  );
+};
+
+const buildPortalPayload = (orders) => ({
+  data: orders.map((order) => {
+    const customer = order.customer_infor || {};
+    const shopName = order.shopId?.name || null;
+    const seller = order.sellerId
+      ? {
+          _id: order.sellerId._id,
+          full_name: order.sellerId.full_name,
+          email: order.sellerId.email,
+        }
+      : null;
+    const scaledBy = order.scaleId
+      ? {
+          _id: order.scaleId._id,
+          full_name: order.scaleId.full_name,
+          email: order.scaleId.email,
+        }
+      : null;
+
+    return {
+      orderId: order.orderId,
+      merchantId: order.merchantId || null,
+      marketplaceId: order.marketplaceId || null,
+      customer_infor: {
+        email: customer.email || "",
+        name: customer.name || "",
+        address: customer.address || "",
+        address_2: customer.address_2 || "",
+        city: customer.city || "",
+        state: customer.state || customer.province || "",
+        zip_code: customer.zip_code || "",
+        country: customer.country || "US",
+        phone_number: customer.phone_number || "",
+      },
+      status: "New",
+      purchase_date: order.purchase_date || null,
+      shopName,
+      shipping_type: order.shipping_type || "",
+      items: (order.items || []).map((item) => {
+        const listingDoc =
+          item.listingId && typeof item.listingId === "object"
+            ? toPlainObject(item.listingId)
+            : null;
+        const listingId = listingDoc?._id || item.listingId || null;
+
+        return {
+          orderItemId: item.orderItemId || "",
+          sku: item.sku || "",
+          title: item.title || "",
+          quantity: item.quantity || 1,
+          asin: item.asin || "",
+          version3Data: extractVersion3Data(item),
+          customized_url: item.customized_url || "",
+          baseImageUrl: item.baseImage?.imageUrl || "",
+          snapshotImage: item.snapshotImage || "",
+          fulfillment_file: normalizeFulfillmentFile(item.fulfillment_file),
+          listingId: listingId ? String(listingId) : "",
+          listing: listingDoc
+            ? {
+                asin_type: listingDoc.asin_type || null,
+                product_image: listingDoc.product_image || null,
+                psd: listingDoc.psd || null,
+              }
+            : {},
+          cost_center: item.cost_breakdown
+            ? toPlainObject(item.cost_breakdown)
+            : {},
+          scale_status: "Pending",
+          qc_note: "",
+        };
+      }),
+      scaledBy,
+      seller,
+    };
+  }),
+});
+
+const getPortalError = (error) => {
+  if (error.response) {
+    return {
+      status: error.response.status || 502,
+      error: error.response.data || error.message,
+    };
+  }
+  return { status: 502, error: error.message };
 };
 
 // ====== GET QC LIST ======
@@ -557,4 +669,176 @@ const updateQCNoteForItem = async (req, res) => {
       .json({ message: "Update QC note failed", error: err.message });
   }
 };
-module.exports = { getQCList, getQCStatistics, updateQCNoteForItem };
+
+const sendFailedOrdersToFulfillment = async (req, res) => {
+  const portalUrl = process.env.FULFILLMENT_PORTAL_URL;
+  const portalApiKey = process.env.FULFILLMENT_PORTAL_API_KEY;
+
+  if (!portalUrl || !portalApiKey) {
+    return res.status(500).json({
+      message: "Fulfillment portal configuration is missing",
+    });
+  }
+
+  const rawOrderIds = req.body?.orderIds;
+  if (!Array.isArray(rawOrderIds) || rawOrderIds.length === 0) {
+    return res.status(400).json({
+      message: "orderIds must be a non-empty array",
+    });
+  }
+
+  const orderIds = [
+    ...new Set(
+      rawOrderIds
+        .map((orderId) =>
+          typeof orderId === "string" ? orderId.trim() : String(orderId || "").trim()
+        )
+        .filter(Boolean)
+    ),
+  ];
+
+  if (orderIds.length === 0) {
+    return res.status(400).json({
+      message: "orderIds must contain at least one valid order id",
+    });
+  }
+
+  try {
+    const userRole = req.user?.role;
+    const userId = req.user?.userId || req.user?.id || req.user?._id || "";
+    const isSeller = hasRole(userRole, "Seller");
+    const isAdmin = hasRole(userRole, "Admin");
+    const isCS = hasRole(userRole, "Customer Service");
+    const isSellerOnly = isSeller && !(isAdmin || isCS);
+
+    const query = { orderId: { $in: orderIds } };
+    if (isSellerOnly) {
+      if (!mongoose.Types.ObjectId.isValid(userId)) {
+        return res.status(400).json({ message: "Invalid user id in token" });
+      }
+      query.sellerId = new mongoose.Types.ObjectId(userId);
+    }
+
+    const orders = await OrderCustomProduct.find(query)
+      .populate({ path: "shopId", select: "name" })
+      .populate({ path: "sellerId", select: "full_name email" })
+      .populate({ path: "scaleId", select: "full_name email" })
+      .populate({ path: "items.listingId", select: "asin_type product_image psd" });
+
+    const foundOrderIds = new Set(orders.map((order) => order.orderId));
+    const missingOrderIds = orderIds.filter((orderId) => !foundOrderIds.has(orderId));
+    if (missingOrderIds.length > 0) {
+      return res.status(404).json({
+        message: "Some orders were not found or are not accessible",
+        orderIds: missingOrderIds,
+      });
+    }
+
+    const notFailedOrders = orders
+      .filter((order) => order.scale_overall_status !== "Failed")
+      .map((order) => ({
+        orderId: order.orderId,
+        scale_overall_status: order.scale_overall_status || null,
+      }));
+    if (notFailedOrders.length > 0) {
+      return res.status(409).json({
+        message: "Only orders with scale_overall_status Failed can be sent to fulfillment",
+        orders: notFailedOrders,
+      });
+    }
+
+    const payload = buildPortalPayload(orders);
+    let portalResponse;
+
+    try {
+      portalResponse = await axios.post(portalUrl, payload, {
+        headers: {
+          "Content-Type": "application/json",
+          "x-api-key": portalApiKey,
+        },
+        timeout: 30000,
+      });
+    } catch (error) {
+      const portalError = getPortalError(error);
+
+      await Promise.all(
+        orders.map(async (order) => {
+          const prevSubmission = order.fulfillment_portal_submission || {};
+          order.fulfillment_portal_submission = {
+            sent: false,
+            sent_at: prevSubmission.sent_at || null,
+            attempt_count: (prevSubmission.attempt_count || 0) + 1,
+            last_response: {
+              error: portalError.error,
+              at: new Date(),
+            },
+          };
+          await order.save();
+        })
+      );
+
+      return res.status(portalError.status).json({
+        message: "Failed to send orders to fulfillment",
+        error: portalError.error,
+      });
+    }
+
+    const responseData = portalResponse?.data || null;
+    await Promise.all(
+      orders.map(async (order) => {
+        const prevOverallStatus = order.scale_overall_status;
+        const prevSubmission = order.fulfillment_portal_submission || {};
+        order.fulfillment_portal_submission = {
+          sent: true,
+          sent_at: new Date(),
+          attempt_count: (prevSubmission.attempt_count || 0) + 1,
+          last_response: responseData,
+        };
+        order.scale_overall_status = "Sent";
+        await order.save();
+
+        await logOrderHistory({
+          orderDoc: order,
+          action: "SEND_TO_FULFILLMENT_PORTAL",
+          description: "Order sent to fulfillment portal.",
+          changes: [
+            {
+              field: "scale_overall_status",
+              from: prevOverallStatus,
+              to: "Sent",
+            },
+            {
+              field: "fulfillment_portal_submission.sent",
+              from: !!prevSubmission.sent,
+              to: true,
+            },
+          ],
+          user: req.user,
+          context: {
+            source: "SYSTEM",
+            ip: req.ip,
+            userAgent: req.headers["user-agent"],
+          },
+        });
+      })
+    );
+
+    return res.json({
+      message: "Sent orders to fulfillment successfully",
+      sentCount: orders.length,
+      data: responseData,
+    });
+  } catch (err) {
+    return res.status(500).json({
+      message: "Failed to send orders to fulfillment",
+      error: err.message,
+    });
+  }
+};
+
+module.exports = {
+  getQCList,
+  getQCStatistics,
+  updateQCNoteForItem,
+  sendFailedOrdersToFulfillment,
+};

@@ -31,6 +31,9 @@ function readSubmission(orderDoc, vendorKey) {
 function writeSubmission(orderDoc, vendorKey, submission) {
     orderDoc.vendor_submissions = orderDoc.vendor_submissions || {};
     orderDoc.vendor_submissions[vendorKey] = submission;
+    if (typeof orderDoc.markModified === 'function') {
+        orderDoc.markModified('vendor_submissions');
+    }
 
     // Backward-compat cho grabink
     if (vendorKey === 'grabink') {
