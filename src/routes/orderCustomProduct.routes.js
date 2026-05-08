@@ -46,6 +46,13 @@ router.post(
   controller.updateOrdersFromXlsx
 );
 
+router.post(
+  "/cancel-from-excel",
+ // authenticateToken,
+  controller.upload.single("file"),
+  controller.bulkCancelOrdersFromExcel
+);
+
 router.put("/update-status", authenticateToken, controller.updateOrderStatus);
 
 router.put(

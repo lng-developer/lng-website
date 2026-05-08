@@ -107,6 +107,7 @@ const LENFUL_EMB_POS = {
 };
 
 const EMB_ALLOWED_POSITIONS = new Set([1, 2, 5, 6, 7, 31, 32, 39, 40, 41, 42]);
+const EMBROIDERY_CONFIG_CODES = new Set(["EBM", "EBMA"]);
 
 /**
  * Với case thực tế của bạn:
@@ -163,14 +164,21 @@ function isEmbroideryItem(item = {}) {
         ""
     ).toUpperCase();
 
-    if (embCost > 0 || name.includes("embroider") || code === "EBMA") return true;
+    if (embCost > 0 || name.includes("embroider") || EMBROIDERY_CONFIG_CODES.has(code)) return true;
 
     // fallback theo field upstream
     if (Array.isArray(item.embroidereds) && item.embroidereds.length > 0) return true;
 
     // fallback cứng cho known SKU đang dùng
-    const productSku = String(item.product_sku || item.productSku || "").toUpperCase();
-    const designSku = String(item.design_sku || "").trim();
+    const productSku = String(
+        item.product_sku ||
+        item.productSku ||
+        cb?.matchedSku ||
+        item.mapped_sku ||
+        item.sku ||
+        ""
+    ).toUpperCase();
+    const designSku = String(item.design_sku || item.orderItemId || "").trim();
 
     if (productSku === "LFVNA1632ANAL") return true;
     if (designSku === "157220035307881") return true;
@@ -687,4 +695,12 @@ module.exports = {
     key: "lenful",
     canHandle: (orderDoc) => String(orderDoc.vendor || "").toLowerCase() === "lenful",
     send,
+    _private: {
+        buildPayload,
+        buildLenfulItem,
+        isEmbroideryItem,
+        buildDesigns,
+        buildEmbroidereds,
+        buildMockups,
+    },
 };
