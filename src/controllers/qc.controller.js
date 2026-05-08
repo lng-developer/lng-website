@@ -673,6 +673,7 @@ const updateQCNoteForItem = async (req, res) => {
 const sendFailedOrdersToFulfillment = async (req, res) => {
   const portalUrl = process.env.FULFILLMENT_PORTAL_URL;
   const portalApiKey = process.env.FULFILLMENT_PORTAL_API_KEY;
+  const portalTimeoutMs = Number(process.env.FULFILLMENT_PORTAL_TIMEOUT_MS || 120000);
 
   if (!portalUrl || !portalApiKey) {
     return res.status(500).json({
@@ -756,7 +757,7 @@ const sendFailedOrdersToFulfillment = async (req, res) => {
           "Content-Type": "application/json",
           "x-api-key": portalApiKey,
         },
-        timeout: 30000,
+        timeout: portalTimeoutMs,
       });
     } catch (error) {
       const portalError = getPortalError(error);
