@@ -290,9 +290,9 @@ const getReportMatrix = async (req, res) => {
     const OPCOST_PER_PERSON_PER_DAY = 30;
 
     // ===== EXCLUDE user khỏi opCost =====
-    const OP_COST_EXCLUDE_USER_IDS = new Set([
-      "68b93ed3f02eed8dec002ee3", // boss
-    ]);
+    // Hiện không exclude ai. Mọi seller đều được tính opCost trong khoảng
+    // start_seller → end_seller.
+    const OP_COST_EXCLUDE_USER_IDS = new Set();
 
     // ===== 1) chuẩn bị date list =====
     const dayList = makeDayList(from, to);
