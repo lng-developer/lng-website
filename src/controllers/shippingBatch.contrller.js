@@ -1955,25 +1955,27 @@ const _extractOrderDetails = (orders) =>
 
 const _buildSubmissionMap = async (orderIds, machineId) => {
   const orderIdsSet = new Set(orderIds);
+  // Sort createdAt ASC + luôn ghi đè trong loop → entry CUỐI (batch mới
+  // nhất) thắng. Nếu order được re-upload nhiều lần, lấy lần đẩy gần nhất.
   const submittedBatches = await ShippingBatch.find({
     machineId,
     "completed.orderId": { $in: orderIds },
   })
     .select('_id type label createdAt completed.orderId')
+    .sort({ createdAt: 1 })
     .lean();
 
   const map = new Map();
   for (const batch of submittedBatches) {
     for (const completed of batch.completed || []) {
-      if (orderIdsSet.has(completed.orderId)) {
-        map.set(completed.orderId, {
-          submittedToAmazon: true,
-          batchId: batch._id,
-          batchType: batch.type,
-          submittedAt: batch.createdAt,
-          batchLabel: batch.label,
-        });
-      }
+      if (!orderIdsSet.has(completed.orderId)) continue;
+      map.set(completed.orderId, {
+        submittedToAmazon: true,
+        batchId: batch._id,
+        batchType: batch.type,
+        submittedAt: batch.createdAt,
+        batchLabel: batch.label,
+      });
     }
   }
   return map;
@@ -2052,11 +2054,15 @@ async function checkOrdersStatusRealTime(machineId, options) {
     machineId
   );
 
-  const finalOrders = ordersWithDetails.map(order => ({
-    ...order,
-    submittedToAmazon: submissionMap.has(order.orderId),
-    submissionInfo: submissionMap.get(order.orderId) || null,
-  }));
+  const finalOrders = ordersWithDetails.map(order => {
+    const subInfo = submissionMap.get(order.orderId);
+    return {
+      ...order,
+      submittedToAmazon: !!subInfo,
+      createAtToAmz: subInfo?.submittedAt || null,
+      submissionInfo: subInfo || null,
+    };
+  });
 
   // Apply filterType
   let filteredOrders = finalOrders;
