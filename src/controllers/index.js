@@ -30,6 +30,7 @@ const issueController = require("./issue.controller")
 const notificationController = require("./notification.controller")
 const etsyOrderController = require("./etsyOrder.controller")
 const etsyReportController = require("./etsyReport.controller")
+const etsyAdsController = require("./etsyAds.controller")
 
 module.exports = {
   roleController,
@@ -64,4 +65,5 @@ module.exports = {
   issueController,
   notificationController,
   etsyOrderController,
+  etsyAdsController,
 };
