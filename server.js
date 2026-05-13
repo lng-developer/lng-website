@@ -57,7 +57,8 @@ const {
   EtsyOrderRoutes,
   EtsyListingRoutes,
   autoConfigRoutes,
-  extensionLogRoutes
+  extensionLogRoutes,
+  etsyAdsRoutes
 } = require("./src/routes");
 
 app.use("/api/role", roleRoutes);
@@ -91,6 +92,7 @@ app.use("/api/shipping-batches", ShippingBatchRoutes); // ✅ Alias để hỗ t
 app.use("/api/to-do", ToDoListRoutes);
 app.use("/api/etsy", EtsyOrderRoutes);
 app.use("/api/etsy-listing", EtsyListingRoutes);
+app.use("/api/etsy-ads", etsyAdsRoutes);
 app.use("/api/auto-config", autoConfigRoutes);
 app.use("/api/ext/logs", extensionLogRoutes);
 
