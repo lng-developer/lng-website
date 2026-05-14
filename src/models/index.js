@@ -33,6 +33,7 @@ const ExtensionLog = require("./extensionLog.model")
 const AutoConfig = require("./autoConfig.model")
 const TaskStatusEvent = require("./taskStatusEvent.model")
 const ExtensionTask = require("./extensionTask.model")
+const EtsyAdsDailySummary = require("./etsyAdsDailySummary.model")
 
 // Cau hinh mongoose dang global
 mongoose.Promise = global.Promise;
@@ -74,6 +75,7 @@ db.ExtensionLog = ExtensionLog
 db.AutoConfig = AutoConfig
 db.TaskStatusEvent = TaskStatusEvent
 db.ExtensionTask = ExtensionTask
+db.EtsyAdsDailySummary = EtsyAdsDailySummary
 db.connectDB = async () => {
   await mongoose
     .connect(process.env.MONGO_URI, {

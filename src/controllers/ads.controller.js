@@ -72,11 +72,15 @@ async function mapSellersBySku(skus) {
 
 // ... các import/helper khác như cũ (utcDay, detectDelimiter, norm, toNum, mapSellersBySku, AdsDailySummary)
 
+// Theo yêu cầu nghiệp vụ: mọi ads không match được SKU/employee_id đều
+// thuộc Nguyễn Huy Hoàng (anh ấy phụ trách toàn bộ campaign generic).
+// CẢNH BÁO: nếu sau này có user khác chưa cấu hình employee_id, ads của họ
+// cũng sẽ bị fallback về Hoàng → cần đảm bảo mọi user đều có employee_id.
 const FALLBACK_USER_ID_RAW = "68b93ed3f02eed8dec002ee3";
 const FALLBACK_USER_ID = Types.ObjectId.isValid(FALLBACK_USER_ID_RAW)
   ? new Types.ObjectId(FALLBACK_USER_ID_RAW)
   : FALLBACK_USER_ID_RAW;
-const FALLBACK_USER_NAME = "Boss (Unattributed Ads)";
+const FALLBACK_USER_NAME = "Nguyễn Huy Hoàng";
 
 const importAdsForDay = async (req, res) => {
   try {

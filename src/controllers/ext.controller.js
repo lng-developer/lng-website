@@ -868,7 +868,7 @@ async function updateOrderByVendors(orderId, vpidToVendorPrefetched = null) {
   return { updatedItems: totalChanged, orderStatusChanged };
 }
 
-async function runBatch({ max = 100, dryRun = false } = {}) {
+async function runBatch({ max = 1100, dryRun = false } = {}) {
   const candidates = await OrderCustomProduct.find({
     status: "Fulfilled",
     "items.cost_breakdown.vendorProductId": { $exists: true, $ne: null },
@@ -985,7 +985,7 @@ const vendorSyncList = async (req, res) => {
  */
 const vendorSyncBatch = async (req, res) => {
   try {
-    const { max = 900, dryRun = false } = req.body || {};
+    const { max = 1100, dryRun = false } = req.body || {};
     const result = await runBatch({
       max: Number(max) || 100,
       dryRun: Boolean(dryRun),

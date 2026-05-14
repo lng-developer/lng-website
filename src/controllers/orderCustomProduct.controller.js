@@ -2246,6 +2246,184 @@ const updateOrderStatus = async (req, res) => {
   }
 };
 
+function normalizeExcelHeader(value) {
+  return String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[\s_-]+/g, "");
+}
+
+function extractOrderIdsFromWorkbook(workbook) {
+  const sheetName = workbook.SheetNames[0];
+  if (!sheetName) return [];
+
+  const sheet = workbook.Sheets[sheetName];
+  const rows = XLSX.utils.sheet_to_json(sheet, { defval: "", raw: false });
+  const ids = [];
+
+  if (rows.length > 0) {
+    const headers = Object.keys(rows[0]);
+    const orderIdHeader = headers.find((header) =>
+      ["orderid", "amazonorderid", "amazonorder"].includes(
+        normalizeExcelHeader(header)
+      )
+    );
+
+    if (orderIdHeader) {
+      for (const row of rows) {
+        const value = String(row[orderIdHeader] || "").trim();
+        if (value) ids.push(value);
+      }
+    }
+  }
+
+  if (ids.length === 0) {
+    const matrix = XLSX.utils.sheet_to_json(sheet, {
+      header: 1,
+      defval: "",
+      raw: false,
+    });
+
+    for (const row of matrix) {
+      const value = String(row?.[0] || "").trim();
+      if (!value) continue;
+      if (["orderid", "order id", "order_id"].includes(value.toLowerCase())) {
+        continue;
+      }
+      ids.push(value);
+    }
+  }
+
+  return [...new Set(ids)];
+}
+
+const bulkCancelOrdersFromExcel = async (req, res) => {
+  const filePath = req.file?.path;
+
+  try {
+    if (!req.file) {
+      return res.status(400).json({ message: "Missing Excel file" });
+    }
+
+    const workbook = XLSX.readFile(filePath, { type: "file" });
+    const orderIds = extractOrderIdsFromWorkbook(workbook);
+    const dryRun =
+      String(req.body?.dryRun ?? req.query?.dryRun ?? "false").toLowerCase() ===
+      "true";
+
+    if (orderIds.length === 0) {
+      return res.status(400).json({
+        message:
+          "No orderId found. Use a column named orderId/orderID, or put order IDs in the first column.",
+      });
+    }
+
+    const orders = await OrderCustomProduct.find(
+      { orderId: { $in: orderIds } },
+      { _id: 1, orderId: 1, status: 1, scale_overall_status: 1 }
+    ).lean();
+
+    const foundOrderIds = new Set(orders.map((order) => order.orderId));
+    const notFound = orderIds.filter((orderId) => !foundOrderIds.has(orderId));
+    const alreadyCancelled = orders
+      .filter(
+        (order) =>
+          order.status === "Cancelled" &&
+          order.scale_overall_status === "Cancelled"
+      )
+      .map((order) => order.orderId);
+    const toCancel = orders.filter(
+      (order) =>
+        order.status !== "Cancelled" ||
+        order.scale_overall_status !== "Cancelled"
+    );
+
+    if (!dryRun && toCancel.length > 0) {
+      const now = new Date();
+      const cancelIds = toCancel.map((order) => order.orderId);
+
+      await OrderCustomProduct.updateMany(
+        { orderId: { $in: cancelIds } },
+        {
+          $set: {
+            status: "Cancelled",
+            scale_overall_status: "Cancelled",
+            "items.$[].scale_status": "Cancelled",
+            "items.$[].tracking_info.status": "Cancelled",
+            "items.$[].tracking_info.updated_at": now,
+          },
+        }
+      );
+
+      const userId =
+        req.user?._id ||
+        req.user?.id ||
+        req.user?.userId ||
+        req.user?.uid ||
+        null;
+      const userName =
+        req.user?.name ||
+        req.user?.fullName ||
+        req.user?.username ||
+        req.user?.email ||
+        null;
+      const userRole =
+        req.user?.role || req.user?.userRole || req.user?.type || null;
+
+      await OrderHistory.insertMany(
+        toCancel.map((order) => ({
+          order: order._id,
+          orderId: order.orderId,
+          action: "UPDATE_STATUS",
+          description: "Order cancelled from Excel upload",
+          changes: [
+            { field: "status", from: order.status, to: "Cancelled" },
+            {
+              field: "scale_overall_status",
+              from: order.scale_overall_status,
+              to: "Cancelled",
+            },
+          ],
+          userId,
+          userName,
+          userRole,
+          source: "PORTAL",
+          ip: req.ip || null,
+          userAgent: req.headers["user-agent"] || null,
+        })),
+        { ordered: false }
+      );
+    }
+
+    return res.status(200).json({
+      message: dryRun ? "Bulk cancel dry run completed" : "Bulk cancel completed",
+      dryRun,
+      totalInFile: orderIds.length,
+      matched: orders.length,
+      cancelled: toCancel.length,
+      alreadyCancelled: alreadyCancelled.length,
+      notFound: notFound.length,
+      details: {
+        cancelledOrderIds: toCancel.map((order) => order.orderId),
+        alreadyCancelledOrderIds: alreadyCancelled,
+        notFoundOrderIds: notFound,
+      },
+    });
+  } catch (error) {
+    console.error("bulkCancelOrdersFromExcel error:", error);
+    return res.status(500).json({
+      message: "Failed to bulk cancel orders",
+      error: error.message,
+    });
+  } finally {
+    if (filePath) {
+      try {
+        fs.unlinkSync(filePath);
+      } catch (_) { }
+    }
+  }
+};
+
 const updateShippingType = async (req, res) => {
   try {
     const { orderId, shipping_type } = req.body;
@@ -4745,6 +4923,7 @@ module.exports = {
   getFrontendOrders,
   upload,
   updateOrdersFromXlsx,
+  bulkCancelOrdersFromExcel,
   updateOrderStatus,
   updateShippingType,
   updateBaseCost,

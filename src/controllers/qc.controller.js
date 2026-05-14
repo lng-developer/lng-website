@@ -176,7 +176,7 @@ const getQCList = async (req, res) => {
     const userRole = req.user?.role;
     const userId = req.user?.userId || req.user?.id || req.user?._id || "";
     const isSeller = hasRole(userRole, "Seller");
-    const isAdmin = hasRole(userRole, "Admin");
+    const isAdmin = hasRole(userRole, "Admin" || "Design Leader");
     const isCS = hasRole(userRole, "Customer Service");
     const isSellerOnly = isSeller && !(isAdmin || isCS);
 
@@ -490,7 +490,7 @@ const getQCStatistics = async (req, res) => {
     const userRole = req.user?.role;
     const userId = req.user?.userId || req.user?.id || req.user?._id || "";
     const isSeller = hasRole(userRole, "Seller");
-    const isAdmin = hasRole(userRole, "Admin");
+    const isAdmin = hasRole(userRole, "Admin" || "Design Leader");
     const isCS = hasRole(userRole, "Customer Service");
     const isSellerOnly = isSeller && !(isAdmin || isCS);
 

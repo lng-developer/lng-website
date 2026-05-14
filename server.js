@@ -16,31 +16,7 @@ app.set("trust proxy", true);
 app.use(express.json({ limit: "10mb" }));
 app.use(morgan("dev"));
 
-const parseCorsOrigins = () =>
-  String(process.env.CORS_ORIGINS || "*")
-    .split(",")
-    .map((origin) => origin.trim().replace(/\/+$/, ""))
-    .filter(Boolean);
-
-const corsOrigins = parseCorsOrigins();
-const allowAllCorsOrigins = corsOrigins.includes("*");
-const corsOptions = {
-  origin(origin, callback) {
-    if (!origin || allowAllCorsOrigins) return callback(null, true);
-
-    const normalizedOrigin = origin.replace(/\/+$/, "");
-    if (corsOrigins.includes(normalizedOrigin)) {
-      return callback(null, true);
-    }
-
-    return callback(new Error(`Origin not allowed by CORS: ${origin}`));
-  },
-  methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-  allowedHeaders: ["Content-Type", "Authorization", "x-api-key"],
-  credentials: false,
-};
-
-app.use(cors(corsOptions));
+app.use(cors());
 
 // Health
 app.get("/", (_req, res) =>
@@ -81,7 +57,8 @@ const {
   EtsyOrderRoutes,
   EtsyListingRoutes,
   autoConfigRoutes,
-  extensionLogRoutes
+  extensionLogRoutes,
+  etsyAdsRoutes
 } = require("./src/routes");
 
 app.use("/api/role", roleRoutes);
@@ -115,6 +92,7 @@ app.use("/api/shipping-batches", ShippingBatchRoutes); // ✅ Alias để hỗ t
 app.use("/api/to-do", ToDoListRoutes);
 app.use("/api/etsy", EtsyOrderRoutes);
 app.use("/api/etsy-listing", EtsyListingRoutes);
+app.use("/api/etsy-ads", etsyAdsRoutes);
 app.use("/api/auto-config", autoConfigRoutes);
 app.use("/api/ext/logs", extensionLogRoutes);
 
@@ -131,7 +109,7 @@ const io = new Server(httpServer, {
   path: "/ws",
   transports: ["websocket", "polling"], // cho fallback an toàn
   cors: {
-    origin: allowAllCorsOrigins ? "*" : corsOrigins,
+    origin: "*",
     methods: ["GET", "POST"],
     credentials: false,
   },
