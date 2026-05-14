@@ -106,7 +106,7 @@ const buildPortalPayload = (orders) => ({
         country: customer.country || "US",
         phone_number: customer.phone_number || "",
       },
-      status: "New",
+      status: "Fulfilled",
       purchase_date: order.purchase_date || null,
       shopName,
       shipping_type: order.shipping_type || "",
@@ -788,14 +788,26 @@ const sendFailedOrdersToFulfillment = async (req, res) => {
     await Promise.all(
       orders.map(async (order) => {
         const prevOverallStatus = order.scale_overall_status;
+        const prevOrderStatus = order.status;
         const prevSubmission = order.fulfillment_portal_submission || {};
+        const fulfilledAt = new Date();
         order.fulfillment_portal_submission = {
           sent: true,
-          sent_at: new Date(),
+          sent_at: fulfilledAt,
           attempt_count: (prevSubmission.attempt_count || 0) + 1,
           last_response: responseData,
         };
         order.scale_overall_status = "Sent";
+        order.status = "Fulfilled";
+
+        for (const item of order.items || []) {
+          item.tracking_info = item.tracking_info || {};
+          if (!["Shipped", "Cancelled"].includes(item.tracking_info.status)) {
+            item.tracking_info.status = "Fulfilled";
+          }
+          item.tracking_info.updated_at = fulfilledAt;
+        }
+
         await order.save();
 
         await logOrderHistory({
@@ -807,6 +819,11 @@ const sendFailedOrdersToFulfillment = async (req, res) => {
               field: "scale_overall_status",
               from: prevOverallStatus,
               to: "Sent",
+            },
+            {
+              field: "status",
+              from: prevOrderStatus,
+              to: "Fulfilled",
             },
             {
               field: "fulfillment_portal_submission.sent",
