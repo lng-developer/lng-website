@@ -62,6 +62,14 @@ const normalizeFulfillmentFile = (value) => {
   return plain && typeof plain === "object" ? plain : {};
 };
 
+const toIsoDateStringOrNull = (value) => {
+  if (!value) return null;
+  const date = value instanceof Date ? value : new Date(value);
+  return Number.isNaN(date.getTime()) ? null : date.toISOString();
+};
+
+const isCanceledStatus = (status) => /^(canceled|cancelled)$/i.test(String(status || "").trim());
+
 const extractVersion3Data = (item) => {
   const surfaces = item.version3Data?.customizationInfo?.surfaces || [];
   return surfaces.flatMap((surface) =>
@@ -73,8 +81,8 @@ const extractVersion3Data = (item) => {
 };
 
 const buildPortalPayload = (orders) => ({
-  data: orders.map((order) => {
-    const customer = order.customer_infor || {};
+  data: (Array.isArray(orders) ? orders : []).map((order) => {
+    const customer = toPlainObject(order.customer_infor);
     const shopName = order.shopId?.name || null;
     const seller = order.sellerId
       ? {
@@ -107,10 +115,10 @@ const buildPortalPayload = (orders) => ({
         phone_number: customer.phone_number || "",
       },
       status: "Fulfilled",
-      purchase_date: order.purchase_date || null,
+      purchase_date: toIsoDateStringOrNull(order.purchase_date),
       shopName,
-      shipping_type: order.shipping_type || "",
-      items: (order.items || []).map((item) => {
+      shipping_type: order.shipping_type || "Standard",
+      items: (Array.isArray(order.items) ? order.items : []).map((item) => {
         const listingDoc =
           item.listingId && typeof item.listingId === "object"
             ? toPlainObject(item.listingId)
@@ -148,6 +156,49 @@ const buildPortalPayload = (orders) => ({
     };
   }),
 });
+
+const validatePortalPayload = (payload) => {
+  const errors = [];
+  if (!Array.isArray(payload?.data)) {
+    errors.push({ field: "data", message: "data must be an array" });
+    return errors;
+  }
+
+  payload.data.forEach((order, orderIndex) => {
+    if (!String(order?.orderId || "").trim()) {
+      errors.push({
+        field: `data[${orderIndex}].orderId`,
+        message: "orderId is required",
+      });
+    }
+
+    if (!order.customer_infor || typeof order.customer_infor !== "object" || Array.isArray(order.customer_infor)) {
+      errors.push({
+        field: `data[${orderIndex}].customer_infor`,
+        message: "customer_infor must be an object",
+      });
+    }
+
+    if (!Array.isArray(order.items)) {
+      errors.push({
+        field: `data[${orderIndex}].items`,
+        message: "items must be an array",
+      });
+      return;
+    }
+
+    order.items.forEach((item, itemIndex) => {
+      if (!String(item?.orderItemId || "").trim()) {
+        errors.push({
+          field: `data[${orderIndex}].items[${itemIndex}].orderItemId`,
+          message: "orderItemId is required",
+        });
+      }
+    });
+  });
+
+  return errors;
+};
 
 const getPortalError = (error) => {
   if (error.response) {
@@ -749,6 +800,14 @@ const sendFailedOrdersToFulfillment = async (req, res) => {
     }
 
     const payload = buildPortalPayload(orders);
+    const payloadErrors = validatePortalPayload(payload);
+    if (payloadErrors.length > 0) {
+      return res.status(400).json({
+        message: "Invalid fulfillment payload",
+        errors: payloadErrors,
+      });
+    }
+
     let portalResponse;
 
     try {
@@ -802,7 +861,10 @@ const sendFailedOrdersToFulfillment = async (req, res) => {
 
         for (const item of order.items || []) {
           item.tracking_info = item.tracking_info || {};
-          if (!["Shipped", "Cancelled"].includes(item.tracking_info.status)) {
+          if (
+            item.tracking_info.status !== "Shipped" &&
+            !isCanceledStatus(item.tracking_info.status)
+          ) {
             item.tracking_info.status = "Fulfilled";
           }
           item.tracking_info.updated_at = fulfilledAt;

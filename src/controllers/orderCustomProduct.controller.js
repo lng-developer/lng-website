@@ -46,7 +46,8 @@ const mongoose = require("mongoose");
 
 require("dotenv").config();
 
-const ALLOWED = ["New", "Fulfilled", "Shipped", "Cancelled"];
+const ALLOWED = ["New", "Fulfilled", "Shipping", "Shipped", "Canceled", "Cancelled"];
+const isCanceledStatus = (s) => s === "Canceled" || s === "Cancelled";
 const norm = (s) => (ALLOWED.includes(s) ? s : "New");
 
 async function loadActiveSkuMappingConfigs() {
@@ -2182,7 +2183,7 @@ const getOrderStatistics = async (req, res) => {
 const updateOrderStatus = async (req, res) => {
   try {
     const { orderId, status } = req.body;
-    const allowedStatuses = ["New", "Fulfilled", "Shipped", "Cancelled"];
+    const allowedStatuses = ["New", "Fulfilled", "Shipping", "Shipped", "Canceled", "Cancelled"];
 
     if (!orderId || !status) {
       return res.status(400).json({ message: "Missing orderId or status" });
@@ -4243,14 +4244,16 @@ const computeBaseCostForMany = async (req, res) => {
 
 function computeOrderStatusFromItems(items = []) {
   const itemStatuses = items.map((i) => norm(i?.tracking_info?.status));
-  const active = itemStatuses.filter((s) => s !== "Cancelled");
-  if (active.length === 0) return "Cancelled";
+  const active = itemStatuses.filter((s) => !isCanceledStatus(s));
+  if (active.length === 0) return "Canceled";
   if (active.every((s) => s === "Shipped")) return "Shipped";
   const hasNew = active.includes("New");
+  const hasShipping = active.includes("Shipping");
   const hasFulfilled = active.includes("Fulfilled");
   const allFulfilledOrShipped = active.every(
-    (s) => s === "Fulfilled" || s === "Shipped"
+    (s) => s === "Fulfilled" || s === "Shipping" || s === "Shipped"
   );
+  if (!hasNew && hasShipping && allFulfilledOrShipped) return "Shipping";
   if (!hasNew && hasFulfilled && allFulfilledOrShipped) return "Fulfilled";
   return "New";
 }
@@ -4314,8 +4317,8 @@ const updateItemTracking = async (req, res) => {
     // 2) Ngược lại, nếu có tracking -> ép Shipped
     // 3) Còn lại -> dùng status được truyền (nếu có)
     let nextStatus;
-    if (tStatus === "Cancelled") {
-      nextStatus = "Cancelled";
+    if (isCanceledStatus(tStatus)) {
+      nextStatus = "Canceled";
     } else if (tTracking !== undefined && tTracking.length > 0) {
       nextStatus = "Shipped";
     } else {
@@ -4351,11 +4354,11 @@ const updateItemTracking = async (req, res) => {
     if (nextStatus !== undefined) {
       $set["items.$[].tracking_info.status"] = nextStatus;
 
-      if (nextStatus === "Fulfilled" || nextStatus === "Shipped") {
+      if (nextStatus === "Fulfilled" || nextStatus === "Shipping" || nextStatus === "Shipped") {
         // Item hoàn tất scale, order coi như đã gửi
         $set["items.$[].scale_status"] = "Complete";
         $set["scale_overall_status"] = "Sent";
-      } else if (nextStatus === "Cancelled") {
+      } else if (nextStatus === "Canceled") {
         // Scale item dùng "Failed" để bám bộ trạng thái sẵn có
         $set["items.$[].scale_status"] = "Failed";
         $set["scale_overall_status"] = "Cancelled";
@@ -4412,13 +4415,13 @@ const updateItemTracking = async (req, res) => {
     const responseScaleOverall =
       nextStatus === "Fulfilled" || nextStatus === "Shipped"
         ? "Sent"
-        : nextStatus === "Cancelled"
+        : nextStatus === "Canceled"
           ? "Cancelled"
           : docAfterAllUpdate.scale_overall_status;
 
     return res.json({
       message:
-        "Tracking updated for ALL items (priority: Cancelled > auto-Ship on tracking). Item & order statuses synced.",
+        "Tracking updated for ALL items (priority: Canceled > auto-Ship on tracking). Item & order statuses synced.",
       orderId: docAfterAllUpdate.orderId,
       orderStatus: newOrderStatus,
       scale_overall_status: responseScaleOverall,

@@ -108,7 +108,7 @@ const itemTrackingSchema = new mongoose.Schema(
     tracking: { type: String, trim: true, default: "" }, // mã tracking
     status: {
       type: String,
-      enum: ["New", "Fulfilled", "Shipped", "Cancelled"], // giữ đồng bộ với Order.status
+      enum: ["New", "Fulfilled", "Shipping", "Shipped", "Canceled", "Cancelled"], // Cancelled = legacy
       default: "New",
     },
     note: { type: String, trim: true, default: "" },
@@ -222,7 +222,7 @@ const orderCustomProductSchema = new mongoose.Schema({
 
   status: {
     type: String,
-    enum: ["New", "Fulfilled", "Shipped", "Cancelled", "Refund"],
+    enum: ["New", "Fulfilled", "Shipping", "Shipped", "Canceled", "Cancelled", "Refund"],
     default: "New",
   },
 

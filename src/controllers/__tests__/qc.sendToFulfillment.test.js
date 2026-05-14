@@ -54,8 +54,13 @@ describe("sendFailedOrdersToFulfillment", () => {
     const save = jest.fn().mockResolvedValue(undefined);
     const order = {
       orderId: "ORDER-1",
+      merchantId: null,
+      marketplaceId: null,
+      customer_infor: null,
       status: "New",
       scale_overall_status: "Failed",
+      purchase_date: new Date("2026-05-14T00:00:00.000Z"),
+      shipping_type: undefined,
       fulfillment_portal_submission: { sent: false, attempt_count: 1 },
       items: [
         {
@@ -63,6 +68,12 @@ describe("sendFailedOrdersToFulfillment", () => {
           sku: "SKU-1",
           quantity: 1,
           tracking_info: { status: "New" },
+        },
+        {
+          orderItemId: "ITEM-2",
+          sku: "SKU-2",
+          quantity: 1,
+          tracking_info: { status: "Canceled" },
         },
       ],
       save,
@@ -80,23 +91,41 @@ describe("sendFailedOrdersToFulfillment", () => {
 
     await controller.sendFailedOrdersToFulfillment(req, res);
 
+    const sentPayload = axios.post.mock.calls[0][1];
     expect(axios.post).toHaveBeenCalledWith(
       "https://fulfillment.example/api/orders",
       expect.objectContaining({
         data: [
           expect.objectContaining({
             orderId: "ORDER-1",
+            customer_infor: expect.any(Object),
             status: "Fulfilled",
+            purchase_date: "2026-05-14T00:00:00.000Z",
+            shipping_type: "Standard",
+            items: [
+              expect.objectContaining({
+                orderItemId: "ITEM-1",
+              }),
+              expect.objectContaining({
+                orderItemId: "ITEM-2",
+              }),
+            ],
           }),
         ],
       }),
       expect.objectContaining({
-        headers: expect.objectContaining({ "x-api-key": "test-key" }),
+        headers: {
+          "Content-Type": "application/json",
+          "x-api-key": "test-key",
+        },
+        timeout: 30000,
       })
     );
+    expect(Array.isArray(sentPayload.data)).toBe(true);
     expect(order.scale_overall_status).toBe("Sent");
     expect(order.status).toBe("Fulfilled");
     expect(order.items[0].tracking_info.status).toBe("Fulfilled");
+    expect(order.items[1].tracking_info.status).toBe("Canceled");
     expect(save).toHaveBeenCalledTimes(1);
     expect(logOrderHistory).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -114,6 +143,86 @@ describe("sendFailedOrdersToFulfillment", () => {
       message: "Sent orders to fulfillment successfully",
       sentCount: 1,
       data: { ok: true },
+    });
+  });
+
+  test("rejects payload before calling fulfillment when an item orderItemId is missing", async () => {
+    const save = jest.fn().mockResolvedValue(undefined);
+    const order = {
+      orderId: "ORDER-2",
+      status: "New",
+      scale_overall_status: "Failed",
+      fulfillment_portal_submission: { sent: false, attempt_count: 0 },
+      items: [{ orderItemId: "", sku: "SKU-1", quantity: 1 }],
+      save,
+    };
+    mockFindChain([order]);
+
+    const req = {
+      body: { orderIds: ["ORDER-2"] },
+      user: { role: "Admin", _id: "user-1" },
+      ip: "127.0.0.1",
+      headers: { "user-agent": "jest" },
+    };
+    const res = makeRes();
+
+    await controller.sendFailedOrdersToFulfillment(req, res);
+
+    expect(axios.post).not.toHaveBeenCalled();
+    expect(save).not.toHaveBeenCalled();
+    expect(res.status).toHaveBeenCalledWith(400);
+    expect(res.json).toHaveBeenCalledWith({
+      message: "Invalid fulfillment payload",
+      errors: [
+        {
+          field: "data[0].items[0].orderItemId",
+          message: "orderItemId is required",
+        },
+      ],
+    });
+  });
+
+  test("persists failed submission details when fulfillment returns an error", async () => {
+    const save = jest.fn().mockResolvedValue(undefined);
+    const order = {
+      orderId: "ORDER-3",
+      status: "New",
+      scale_overall_status: "Failed",
+      fulfillment_portal_submission: { sent: false, attempt_count: 2 },
+      items: [{ orderItemId: "ITEM-1", sku: "SKU-1", quantity: 1 }],
+      save,
+    };
+    mockFindChain([order]);
+    axios.post.mockRejectedValue({
+      response: {
+        status: 502,
+        data: { message: "Fulfillment unavailable" },
+      },
+    });
+
+    const req = {
+      body: { orderIds: ["ORDER-3"] },
+      user: { role: "Admin", _id: "user-1" },
+      ip: "127.0.0.1",
+      headers: { "user-agent": "jest" },
+    };
+    const res = makeRes();
+
+    await controller.sendFailedOrdersToFulfillment(req, res);
+
+    expect(order.fulfillment_portal_submission.sent).toBe(false);
+    expect(order.fulfillment_portal_submission.attempt_count).toBe(3);
+    expect(order.fulfillment_portal_submission.last_response).toEqual(
+      expect.objectContaining({
+        error: { message: "Fulfillment unavailable" },
+        at: expect.any(Date),
+      })
+    );
+    expect(save).toHaveBeenCalledTimes(1);
+    expect(res.status).toHaveBeenCalledWith(502);
+    expect(res.json).toHaveBeenCalledWith({
+      message: "Failed to send orders to fulfillment",
+      error: { message: "Fulfillment unavailable" },
     });
   });
 });
