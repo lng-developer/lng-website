@@ -39,6 +39,12 @@ const EtsyAdsDailySummarySchema = new mongoose.Schema(
     totalClicks: { type: Number, default: 0 },
     totalOrders: { type: Number, default: 0 },
     totalRevenue: { type: Number, default: 0 },
+    roas: { type: Number, default: 0 },
+    totalsSource: { type: String, default: "listing_rows_sum_fallback" },
+    overviewApiDate: { type: String, default: null },
+    overviewTotals: { type: mongoose.Schema.Types.Mixed, default: null },
+    sourceMeta: { type: mongoose.Schema.Types.Mixed, default: null },
+    rawOverview: { type: mongoose.Schema.Types.Mixed, default: null },
     totalRows: { type: Number, default: 0 },
 
     lastImportedAt: { type: Date },
