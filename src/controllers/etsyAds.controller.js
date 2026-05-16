@@ -1,6 +1,7 @@
 // src/controllers/etsyAds.controller.js
 const db = require("../models");
 const EtsyAdsDailySummary = db.EtsyAdsDailySummary;
+const EtsyOrder = db.EtsyOrder;
 const mongoose = require("mongoose");
 
 const utcDay = (d) =>
@@ -13,6 +14,71 @@ const toNum = (v) => {
 const round2 = (v) => +toNum(v).toFixed(2);
 const centsToUsd = (v) => round2(toNum(v) / 100);
 
+const pickSkuFromOrderItem = (item) =>
+  String(
+    item?.sku ||
+      item?.SKU ||
+      item?.productSku ||
+      item?.product_sku ||
+      ""
+  ).trim();
+
+const pickListingIdFromOrderItem = (item) =>
+  String(
+    item?.listingId ||
+      item?.listing_id ||
+      item?.listingID ||
+      ""
+  ).trim();
+
+const pickSellerFromOrder = (order) => {
+  if (order?.seller?.sellerCode) return String(order.seller.sellerCode);
+  if (order?.seller?.fullName) return String(order.seller.fullName);
+  if (order?.seller?.name) return String(order.seller.name);
+  if (typeof order?.seller === "string") return order.seller;
+  return "";
+};
+
+async function buildListingSkuMapFromOrders(listingIds = [], shopId) {
+  const ids = Array.from(new Set(listingIds.map(String).filter(Boolean)));
+  const map = new Map();
+
+  if (!ids.length) return map;
+
+  const query = {
+    "items.listingId": { $in: ids },
+  };
+
+  if (shopId && mongoose.Types.ObjectId.isValid(shopId)) {
+    query.shopId = new mongoose.Types.ObjectId(shopId);
+  }
+
+  const orders = await EtsyOrder.find(query, {
+    orderId: 1,
+    seller: 1,
+    items: 1,
+  }).lean();
+
+  for (const order of orders || []) {
+    for (const item of order.items || []) {
+      const lid = pickListingIdFromOrderItem(item);
+      const sku = pickSkuFromOrderItem(item);
+      if (!lid || !sku) continue;
+
+      if (!map.has(lid)) {
+        map.set(lid, {
+          listingId: lid,
+          sku,
+          seller: pickSellerFromOrder(order),
+          source: "etsy_order_items",
+          orderId: order.orderId || "",
+        });
+      }
+    }
+  }
+
+  return map;
+}
 /**
  * POST /api/etsy-ads
  * Body (gửi từ extension):
@@ -82,28 +148,79 @@ const importEtsyAds = async (req, res) => {
       summaryOverviewSource: summary?.overviewSource,
       sourceMetaOverviewSource: sourceMeta?.overviewSource,
       contentSourceMetaOverviewSource: sourceMeta?.contentSourceMeta?.overviewSource,
-      firstRow: Array.isArray(rows) ? rows[0] : null,
+      firstRowSample: Array.isArray(rows) && rows[0]
+        ? {
+            listingId: String(rows[0]?.listingId || ""),
+            title: String(rows[0]?.title || "").slice(0, 80),
+            spend: rows[0]?.spend,
+            revenue: rows[0]?.revenue,
+            orders: rows[0]?.orders,
+            hasSku: !!String(rows[0]?.sku || rows[0]?.SKU || rows[0]?.productSku || "").trim(),
+          }
+        : null,
     });
 
-    // ===== Normalize rows: cents → USD =====
+    const adsListingIds = rows.map((r) => String(r?.listingId || "")).filter(Boolean);
+    const listingSkuMap = await buildListingSkuMapFromOrders(adsListingIds, shopId);
+
+    console.log("[ETSY_ADS_IMPORT][SKU_ENRICH_MAP]", {
+      adsRows: rows.length,
+      uniqueAdsListingIds: new Set(adsListingIds).size,
+      matchedListingIdsFromOrders: listingSkuMap.size,
+      missingListingIds: Array.from(new Set(adsListingIds)).filter((id) => !listingSkuMap.has(id)),
+    });
+
+    // ===== Normalize rows: cents -> USD =====
+    // TODO: Create EtsyListingCatalog collection:
+    // { shopId, etsyShopId, listingId, sku, title, sellerCode, updatedAt }
+    // Ads import should lookup catalog first, then fallback orders.
     const normalized = rows
       .filter((r) => r && r.listingId)
-      .map((r) => ({
-        date: r.date || day,
-        listingId: String(r.listingId),
-        title: r.title || "",
-        state: r.state != null ? String(r.state) : "",
-        spend: round2(toNum(r.spend) / 100),
-        views: toNum(r.views),
-        clicks: toNum(r.clicks),
-        orders: toNum(r.orders),
-        revenue: round2(toNum(r.revenue) / 100),
-        roas: round2(r.roas),
-        clickRate: round2(r.clickRate),
-        rawStats: r.rawStats || null,
-        rawListing: r.rawListing || null,
-      }));
+      .map((r) => {
+        const rowSku = String(r.sku || r.SKU || r.productSku || "").trim();
+        const fallback = listingSkuMap.get(String(r.listingId));
+        const finalSku = rowSku || fallback?.sku || "";
+        const finalSeller = String(r.seller || r.sellerName || fallback?.seller || "").trim();
 
+        return {
+          date: r.date || day,
+          listingId: String(r.listingId),
+          title: r.title || "",
+          state: r.state != null ? String(r.state) : "",
+          sku: finalSku,
+          seller: finalSeller,
+          skuSource: rowSku ? "ads_payload" : fallback?.sku ? "orders_fallback" : "missing",
+          spend: round2(toNum(r.spend) / 100),
+          views: toNum(r.views),
+          clicks: toNum(r.clicks),
+          orders: toNum(r.orders),
+          revenue: round2(toNum(r.revenue) / 100),
+          roas: round2(r.roas),
+          clickRate: round2(r.clickRate),
+          rawStats: r.rawStats || null,
+          rawListing: r.rawListing || null,
+        };
+      });
+
+    const skuAudit = normalized.map((r) => ({
+      listingId: r.listingId,
+      title: String(r.title || "").slice(0, 80),
+      sku: r.sku,
+      seller: r.seller,
+      skuSource: r.skuSource,
+      spend: r.spend,
+      orders: r.orders,
+      revenue: r.revenue,
+    }));
+
+    console.log("[ETSY_ADS_IMPORT][SKU_ENRICH_RESULT]", {
+      totalRows: skuAudit.length,
+      fromAdsPayload: skuAudit.filter((x) => x.skuSource === "ads_payload").length,
+      fromOrdersFallback: skuAudit.filter((x) => x.skuSource === "orders_fallback").length,
+      missing: skuAudit.filter((x) => x.skuSource === "missing").length,
+      missingRows: skuAudit.filter((x) => x.skuSource === "missing"),
+      sample: skuAudit.slice(0, 30),
+    });
     // ===== Aggregate =====
     const totals = normalized.reduce(
       (acc, r) => {
@@ -293,6 +410,30 @@ const listEtsyAds = async (req, res) => {
       .select("-rows.rawStats -rows.rawListing")  // exclude raw để gọn
       .sort({ day: -1 })
       .lean();
+
+    console.log("[ETSY_ADS_LIST][SKU_RESPONSE_CHECK]", {
+      count: docs.length,
+      docs: docs.slice(0, 3).map((doc) => {
+        const rows = doc.rows || [];
+        return {
+          id: doc._id,
+          day: doc.day,
+          totalRows: rows.length,
+          rowsWithSku: rows.filter((r) => !!r.sku).length,
+          rowsMissingSku: rows.filter((r) => !r.sku).length,
+          skuSourceCounts: rows.reduce((acc, r) => {
+            const key = r.skuSource || "unknown";
+            acc[key] = (acc[key] || 0) + 1;
+            return acc;
+          }, {}),
+          sample: rows.slice(0, 10).map((r) => ({
+            listingId: r.listingId,
+            sku: r.sku,
+            skuSource: r.skuSource,
+          })),
+        };
+      }),
+    });
 
     return res.json({ ok: true, count: docs.length, items: docs });
   } catch (err) {
