@@ -11,6 +11,7 @@ const toNum = (v) => {
   return Number.isFinite(n) ? n : 0;
 };
 const round2 = (v) => +toNum(v).toFixed(2);
+const centsToUsd = (v) => round2(toNum(v) / 100);
 
 /**
  * POST /api/etsy-ads
@@ -42,6 +43,9 @@ const importEtsyAds = async (req, res) => {
       etsyShopId,
       shopName,
       rows = [],
+      summary = null,
+      sourceMeta = null,
+      raw = null,
     } = req.body || {};
 
     // ===== Validate =====
@@ -66,6 +70,20 @@ const importEtsyAds = async (req, res) => {
     if (!Array.isArray(rows)) {
       return res.status(400).json({ ok: false, message: "rows must be an array" });
     }
+
+    console.log("[ETSY_ADS_IMPORT][INCOMING]", {
+      day,
+      etsyShopId,
+      shopName,
+      rowsCount: Array.isArray(rows) ? rows.length : 0,
+      hasSummary: !!summary,
+      hasSourceMeta: !!sourceMeta,
+      hasRawOverview: !!raw?.overview,
+      summaryOverviewSource: summary?.overviewSource,
+      sourceMetaOverviewSource: sourceMeta?.overviewSource,
+      contentSourceMetaOverviewSource: sourceMeta?.contentSourceMeta?.overviewSource,
+      firstRow: Array.isArray(rows) ? rows[0] : null,
+    });
 
     // ===== Normalize rows: cents → USD =====
     const normalized = rows
@@ -99,6 +117,88 @@ const importEtsyAds = async (req, res) => {
       { totalSpend: 0, totalViews: 0, totalClicks: 0, totalOrders: 0, totalRevenue: 0 }
     );
 
+    const effectiveSummary =
+      summary ||
+      sourceMeta?.contentSummary ||
+      null;
+
+    const effectiveSourceMeta =
+      sourceMeta?.contentSourceMeta ||
+      sourceMeta ||
+      null;
+
+    const hasOverviewSummary = !!(
+      effectiveSummary &&
+      (
+        effectiveSummary.overviewSource === "etsy_ads_overview_api" ||
+        effectiveSourceMeta?.overviewSource === "etsy_ads_overview_api" ||
+        sourceMeta?.contentSourceMeta?.overviewSource === "etsy_ads_overview_api"
+      )
+    );
+
+    const saveTotals = hasOverviewSummary
+      ? {
+          totalSpend: centsToUsd(effectiveSummary.totalSpend),
+          totalRevenue: centsToUsd(effectiveSummary.totalRevenue),
+          totalViews: toNum(effectiveSummary.totalViews),
+          totalClicks: toNum(effectiveSummary.totalClicks),
+          totalOrders: toNum(effectiveSummary.totalOrders),
+          roas: round2(effectiveSummary.roas),
+          totalsSource: "etsy_ads_overview_api",
+          overviewApiDate:
+            effectiveSummary.overviewApiDate ||
+            effectiveSourceMeta?.overviewApiDate ||
+            effectiveSourceMeta?.etsyApiDate ||
+            sourceMeta?.etsyApiDate ||
+            null,
+          overviewTotals: {
+            spendCents: toNum(effectiveSummary.totalSpend),
+            spendUsd: centsToUsd(effectiveSummary.totalSpend),
+            revenueCents: toNum(effectiveSummary.totalRevenue),
+            revenueUsd: centsToUsd(effectiveSummary.totalRevenue),
+            views: toNum(effectiveSummary.totalViews),
+            clicks: toNum(effectiveSummary.totalClicks),
+            orders: toNum(effectiveSummary.totalOrders),
+            roas: round2(effectiveSummary.roas),
+          },
+        }
+      : {
+          totalSpend: round2(totals.totalSpend),
+          totalRevenue: round2(totals.totalRevenue),
+          totalViews: totals.totalViews,
+          totalClicks: totals.totalClicks,
+          totalOrders: totals.totalOrders,
+          roas: totals.totalSpend > 0 ? round2(totals.totalRevenue / totals.totalSpend) : 0,
+          totalsSource: "listing_rows_sum_fallback",
+          overviewApiDate: null,
+          overviewTotals: null,
+        };
+
+    console.log("[ETSY_ADS_IMPORT][TOTALS_COMPARE]", {
+      day,
+      hasOverviewSummary,
+      rowsTotals: {
+        totalSpend: round2(totals.totalSpend),
+        totalRevenue: round2(totals.totalRevenue),
+        totalViews: totals.totalViews,
+        totalClicks: totals.totalClicks,
+        totalOrders: totals.totalOrders,
+      },
+      summaryTotals: effectiveSummary ? {
+        totalSpendRaw: effectiveSummary.totalSpend,
+        totalSpendUsd: centsToUsd(effectiveSummary.totalSpend),
+        totalRevenueRaw: effectiveSummary.totalRevenue,
+        totalRevenueUsd: centsToUsd(effectiveSummary.totalRevenue),
+        totalViews: effectiveSummary.totalViews,
+        totalClicks: effectiveSummary.totalClicks,
+        totalOrders: effectiveSummary.totalOrders,
+        roas: effectiveSummary.roas,
+        overviewSource: effectiveSummary.overviewSource,
+        overviewApiDate: effectiveSummary.overviewApiDate,
+      } : null,
+      saveTotals,
+    });
+
     // ===== Upsert =====
     const doc = await EtsyAdsDailySummary.findOneAndUpdate(
       { day: dayUTC, shopId: new mongoose.Types.ObjectId(shopId) },
@@ -109,17 +209,38 @@ const importEtsyAds = async (req, res) => {
           etsyShopId: etsyShopId || null,
           shopName: shopName || null,
           rows: normalized,
-          totalSpend: round2(totals.totalSpend),
-          totalViews: totals.totalViews,
-          totalClicks: totals.totalClicks,
-          totalOrders: totals.totalOrders,
-          totalRevenue: round2(totals.totalRevenue),
+          totalSpend: saveTotals.totalSpend,
+          totalViews: saveTotals.totalViews,
+          totalClicks: saveTotals.totalClicks,
+          totalOrders: saveTotals.totalOrders,
+          totalRevenue: saveTotals.totalRevenue,
+          roas: saveTotals.roas,
+          totalsSource: saveTotals.totalsSource,
+          overviewApiDate: saveTotals.overviewApiDate,
+          overviewTotals: saveTotals.overviewTotals,
+          sourceMeta: sourceMeta || null,
+          rawOverview: raw?.overview || null,
           totalRows: normalized.length,
           lastImportedAt: new Date(),
         },
       },
       { upsert: true, new: true, setDefaultsOnInsert: true }
     );
+
+    console.log("[ETSY_ADS_IMPORT][SAVED_DOC_TOTALS]", {
+      id: doc?._id,
+      day: doc?.day,
+      etsyShopId: doc?.etsyShopId,
+      totalSpend: doc?.totalSpend,
+      totalRevenue: doc?.totalRevenue,
+      totalViews: doc?.totalViews,
+      totalClicks: doc?.totalClicks,
+      totalOrders: doc?.totalOrders,
+      roas: doc?.roas,
+      totalsSource: doc?.totalsSource,
+      overviewApiDate: doc?.overviewApiDate,
+      totalRows: doc?.totalRows,
+    });
 
     return res.json({
       ok: true,
@@ -135,6 +256,10 @@ const importEtsyAds = async (req, res) => {
       totalClicks: doc.totalClicks,
       totalOrders: doc.totalOrders,
       totalRevenue: doc.totalRevenue,
+      roas: doc.roas,
+      totalsSource: doc.totalsSource,
+      overviewApiDate: doc.overviewApiDate,
+      overviewTotals: doc.overviewTotals,
       docId: doc._id,
     });
   } catch (err) {
