@@ -2,6 +2,17 @@ const mongoose = require("mongoose");
 
 const etsyListingSchema = new mongoose.Schema(
     {
+        shopId: {
+            type: mongoose.Schema.Types.ObjectId,
+            ref: "Shop",
+            index: true,
+        },
+        etsyShopId: { type: String, index: true },
+        shopName: { type: String, default: "" },
+        listingId: { type: String, index: true },
+        title: { type: String, default: "" },
+        url: { type: String, default: "" },
+        imageUrl: { type: String, default: "" },
         TITLE: { type: String, default: "" },
         IMAGE1: { type: String, default: "" },
         IMAGE2: { type: String, default: "" },
@@ -14,8 +25,25 @@ const etsyListingSchema = new mongoose.Schema(
         IMAGE9: { type: String, default: "" },
         IMAGE10: { type: String, default: "" },
         SKU: { type: String, default: "" },
+        sku: { type: String, default: "" },
+        skus: { type: [String], default: [] },
+        skuSource: { type: String, default: "" },
+        raw: { type: mongoose.Schema.Types.Mixed, default: null },
+        syncedAt: { type: Date },
     },
     { timestamps: true }
 );
+
+etsyListingSchema.index(
+    { shopId: 1, listingId: 1 },
+    {
+        unique: true,
+        partialFilterExpression: {
+            shopId: { $exists: true },
+            listingId: { $type: "string" },
+        },
+    }
+);
+etsyListingSchema.index({ shopId: 1, SKU: 1 });
 
 module.exports = mongoose.model("EtsyListing", etsyListingSchema);

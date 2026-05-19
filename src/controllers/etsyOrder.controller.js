@@ -1220,6 +1220,36 @@ const getEtsyOrderStatistics = async (req, res) => {
 
 const SHIPPING_TYPE_ENUM = ["SecondDay", "Ground", "Overnight", "Economy", "Standard", "Expedited"];
 
+const firstNonBlankString = (...values) => {
+    for (const value of values) {
+        if (value === null || value === undefined) continue;
+        const s = String(value).trim();
+        if (s) return s;
+    }
+    return undefined;
+};
+
+const isMissingValue = (value) => {
+    if (value === null || value === undefined) return true;
+    if (typeof value === "string") return value.trim() === "";
+    return false;
+};
+
+const isEmptyObject = (value) => (
+    value &&
+    typeof value === "object" &&
+    !Array.isArray(value) &&
+    Object.keys(value).length === 0
+);
+
+const deriveSellerCodeFromItems = (items = []) => {
+    for (const item of items) {
+        const sellerCode = getSellerCodeFromSku(item?.sku);
+        if (sellerCode) return sellerCode;
+    }
+    return undefined;
+};
+
 const normalizeItem = (raw, idx) => {
     const transactionId = String(raw?.transactionId ?? "").trim();
     if (!transactionId) {
@@ -1234,8 +1264,15 @@ const normalizeItem = (raw, idx) => {
 
     return {
         transactionId,
-        listingId: raw?.listingId ? String(raw.listingId).trim() : undefined,
-        sku: raw?.sku ? String(raw.sku).trim() : undefined,
+        listingId: firstNonBlankString(raw?.listingId, raw?.listing_id, raw?.listingID, raw?.listing),
+        sku: firstNonBlankString(
+            raw?.sku,
+            raw?.SKU,
+            raw?.productSku,
+            raw?.product_sku,
+            raw?.productIdentifier,
+            raw?.product_identifier
+        ),
         itemName: raw?.itemName ? String(raw.itemName).trim() : undefined,
         quantity: toInt(raw?.quantity),
         unitPrice: toNumber(raw?.unitPrice),
@@ -1282,6 +1319,7 @@ const buildEtsyOrderPayload = (body) => {
     const sellerId = sellerIdRaw && mongoose.Types.ObjectId.isValid(sellerIdRaw)
         ? new mongoose.Types.ObjectId(sellerIdRaw)
         : undefined;
+    const sellerCode = firstNonBlankString(body?.seller?.sellerCode) || deriveSellerCodeFromItems(items);
 
     const shippingType = body?.shipping_type && SHIPPING_TYPE_ENUM.includes(body.shipping_type)
         ? body.shipping_type
@@ -1313,7 +1351,7 @@ const buildEtsyOrderPayload = (body) => {
 
         seller: {
             sellerId,
-            sellerCode: body?.seller?.sellerCode ? String(body.seller.sellerCode).trim() : undefined,
+            sellerCode,
         },
 
         coupon: {
@@ -1361,16 +1399,156 @@ const buildEtsyOrderPayload = (body) => {
     };
 };
 
+const backfillExistingEtsyOrder = async (existing, payload) => {
+    const incomingItems = Array.isArray(payload.items) ? payload.items : [];
+    const existingItems = Array.isArray(existing.items) ? existing.items : [];
+    const existingItemsCount = existingItems.length;
+    const itemByTx = new Map();
+
+    for (const item of existingItems) {
+        if (item?.transactionId) itemByTx.set(String(item.transactionId), item);
+    }
+
+    let matchedItems = 0;
+    let updatedItems = 0;
+    let addedItems = 0;
+    let skuBackfilled = 0;
+    let listingIdBackfilled = 0;
+    const samples = [];
+
+    const backfillField = (target, source, field) => {
+        if (!source || isMissingValue(source[field]) || !isMissingValue(target[field])) return false;
+        target[field] = source[field];
+        return true;
+    };
+
+    for (const incoming of incomingItems) {
+        const tx = String(incoming.transactionId || "");
+        const current = itemByTx.get(tx);
+
+        if (!current) {
+            existing.items.push(incoming);
+            addedItems += 1;
+            samples.push({
+                transactionId: tx,
+                action: "added",
+                oldSku: "",
+                newSku: incoming.sku || "",
+                oldListingId: "",
+                newListingId: incoming.listingId || "",
+            });
+            continue;
+        }
+
+        matchedItems += 1;
+        const oldSku = current.sku || "";
+        const oldListingId = current.listingId || "";
+        let itemChanged = false;
+
+        if (backfillField(current, incoming, "sku")) {
+            skuBackfilled += 1;
+            itemChanged = true;
+        }
+        if (backfillField(current, incoming, "listingId")) {
+            listingIdBackfilled += 1;
+            itemChanged = true;
+        }
+        if (backfillField(current, incoming, "itemName")) itemChanged = true;
+        if (backfillField(current, incoming, "variationsRaw")) itemChanged = true;
+
+        if ((isMissingValue(current.baseImage?.imageUrl)) && incoming.baseImage?.imageUrl) {
+            if (!current.baseImage) current.baseImage = {};
+            current.baseImage.imageUrl = incoming.baseImage.imageUrl;
+            if (isMissingValue(current.baseImage.width) && incoming.baseImage.width != null) current.baseImage.width = incoming.baseImage.width;
+            if (isMissingValue(current.baseImage.height) && incoming.baseImage.height != null) current.baseImage.height = incoming.baseImage.height;
+            itemChanged = true;
+        }
+
+        if ((!current.variations || isEmptyObject(current.variations)) && incoming.variations && !isEmptyObject(incoming.variations)) {
+            current.variations = incoming.variations;
+            itemChanged = true;
+        }
+
+        if ((current.cost_breakdown === null || current.cost_breakdown === undefined) && incoming.cost_breakdown !== null && incoming.cost_breakdown !== undefined) {
+            current.cost_breakdown = incoming.cost_breakdown;
+            itemChanged = true;
+        }
+
+        if (itemChanged) {
+            updatedItems += 1;
+            samples.push({
+                transactionId: tx,
+                action: "backfilled",
+                oldSku,
+                newSku: current.sku || "",
+                oldListingId,
+                newListingId: current.listingId || "",
+            });
+        }
+    }
+
+    let sellerBackfilled = false;
+    if (isMissingValue(existing.seller?.sellerCode) && payload.seller?.sellerCode) {
+        if (!existing.seller) existing.seller = {};
+        existing.seller.sellerCode = payload.seller.sellerCode;
+        sellerBackfilled = true;
+    }
+
+    const backfilled = updatedItems > 0 || addedItems > 0 || sellerBackfilled;
+    if (backfilled) {
+        existing.numberOfItems = existing.items.reduce((sum, item) => sum + (Number(item.quantity) || 0), 0);
+        if (updatedItems > 0 || addedItems > 0) existing.markModified("items");
+        if (sellerBackfilled) existing.markModified("seller");
+        await existing.save();
+    }
+
+    console.log("[ETSY_ORDER_BACKFILL]", {
+        shopId: String(payload.shopId),
+        orderId: payload.orderId,
+        existingItems: existingItemsCount,
+        incomingItems: incomingItems.length,
+        matchedItems,
+        addedItems,
+        skuBackfilled,
+        listingIdBackfilled,
+        sample: samples.slice(0, 20),
+    });
+
+    return {
+        backfilled,
+        updatedItems,
+        addedItems,
+        skuBackfilled,
+        listingIdBackfilled,
+    };
+};
+
 const createOrder = async (req, res) => {
     try {
         const payload = buildEtsyOrderPayload(req.body || {});
 
-        const dup = await EtsyOrder.findOne({ orderId: payload.orderId }).select("_id").lean();
-        if (dup) {
-            return res.status(409).json({ message: `Order ${payload.orderId} already exists`, _id: dup._id });
+        const existing = await EtsyOrder.findOne({ orderId: payload.orderId, shopId: payload.shopId });
+        if (existing) {
+            const result = await backfillExistingEtsyOrder(existing, payload);
+            if (payload.seller?.sellerCode) {
+                await fillSellerIfMissing(payload.orderId, payload.shopId, payload.seller.sellerCode);
+            }
+            return res.status(200).json({
+                ok: true,
+                duplicated: true,
+                backfilled: result.backfilled,
+                orderId: payload.orderId,
+                updatedItems: result.updatedItems,
+                addedItems: result.addedItems,
+                skuBackfilled: result.skuBackfilled,
+                listingIdBackfilled: result.listingIdBackfilled,
+            });
         }
 
         const doc = await EtsyOrder.create(payload);
+        if (payload.seller?.sellerCode) {
+            await fillSellerIfMissing(payload.orderId, payload.shopId, payload.seller.sellerCode);
+        }
         return res.status(201).json(doc);
     } catch (err) {
         if (err?.status === 400) return res.status(400).json({ message: err.message });

@@ -8,6 +8,7 @@ const EtsyAdRowSchema = new mongoose.Schema(
     title: { type: String },
     state: { type: String },
     sku: { type: String, default: "" },
+    skus: { type: [String], default: [] },
     seller: { type: String, default: "" },
     skuSource: { type: String, default: "missing" },
     spend: { type: Number, default: 0 },     // USD (đã /100 từ cents)
