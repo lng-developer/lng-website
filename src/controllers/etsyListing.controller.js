@@ -249,7 +249,92 @@ const syncEtsyListings = async (req, res) => {
     }
 };
 
+const getEtsyListingSyncStatus = async (req, res) => {
+    try {
+        const { shopId } = req.query || {};
+
+        if (!shopId) {
+            return res.status(400).json({ ok: false, message: "shopId is required" });
+        }
+        if (!mongoose.Types.ObjectId.isValid(shopId)) {
+            return res.status(400).json({ ok: false, message: "shopId invalid" });
+        }
+
+        const shopObjectId = new mongoose.Types.ObjectId(shopId);
+        const [stat] = await EtsyListing.aggregate([
+            { $match: { shopId: shopObjectId } },
+            {
+                $project: {
+                    syncedAt: 1,
+                    hasSku: {
+                        $gt: [
+                            {
+                                $size: {
+                                    $filter: {
+                                        input: {
+                                            $setUnion: [
+                                                [{ $ifNull: ["$SKU", ""] }],
+                                                [{ $ifNull: ["$sku", ""] }],
+                                                { $ifNull: ["$skus", []] },
+                                            ],
+                                        },
+                                        as: "sku",
+                                        cond: {
+                                            $gt: [
+                                                { $strLenCP: { $trim: { input: { $toString: "$$sku" } } } },
+                                                0,
+                                            ],
+                                        },
+                                    },
+                                },
+                            },
+                            0,
+                        ],
+                    },
+                },
+            },
+            {
+                $group: {
+                    _id: null,
+                    totalListings: { $sum: 1 },
+                    listingsWithSku: { $sum: { $cond: ["$hasSku", 1, 0] } },
+                    latestSyncedAt: { $max: "$syncedAt" },
+                    oldestSyncedAt: { $min: "$syncedAt" },
+                },
+            },
+        ]);
+
+        const totalListings = stat?.totalListings || 0;
+        const listingsWithSku = stat?.listingsWithSku || 0;
+        const latestSyncedAt = stat?.latestSyncedAt || null;
+        const oldestSyncedAt = stat?.oldestSyncedAt || null;
+        const ageHours = latestSyncedAt
+            ? Number(((Date.now() - new Date(latestSyncedAt).getTime()) / 36e5).toFixed(2))
+            : null;
+
+        return res.json({
+            ok: true,
+            shopId,
+            totalListings,
+            listingsWithSku,
+            listingsMissingSku: Math.max(0, totalListings - listingsWithSku),
+            latestSyncedAt,
+            oldestSyncedAt,
+            ageHours,
+            isEmpty: totalListings === 0,
+        });
+    } catch (error) {
+        console.error("getEtsyListingSyncStatus error:", error);
+        return res.status(500).json({
+            ok: false,
+            message: "Get Etsy listing sync status failed",
+            error: error.message,
+        });
+    }
+};
+
 module.exports = {
     parseEtsyListingFile,
     syncEtsyListings,
+    getEtsyListingSyncStatus,
 };
