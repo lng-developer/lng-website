@@ -6,6 +6,8 @@ const etsyListingController = require("../controllers/etsyListing.controller");
 
 const upload = multer({ dest: "tmp_uploads/" });
 
+router.post("/sync", etsyListingController.syncEtsyListings);
+
 router.post(
     "/parse-excel",
     // authenticateToken, // tạm bỏ auth để test

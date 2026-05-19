@@ -27,7 +27,7 @@ const EtsyOrderItemEmbeddedSchema = new Schema(
 
 const EtsyOrderSchema = new Schema(
     {
-        orderId: { type: String, required: true, unique: true, index: true },
+        orderId: { type: String, required: true, index: true },
         shopId: {
             type: Schema.Types.ObjectId,
             ref: "Shop",
@@ -129,6 +129,9 @@ const EtsyOrderSchema = new Schema(
 );
 
 // Index hỗ trợ query/report
+EtsyOrderSchema.index({ shopId: 1, orderId: 1 }, { unique: true });
+EtsyOrderSchema.index({ shopId: 1, "items.listingId": 1 });
+EtsyOrderSchema.index({ shopId: 1, "items.sku": 1 });
 EtsyOrderSchema.index({ saleDate: -1 });
 EtsyOrderSchema.index({ "items.sku": 1 });
 EtsyOrderSchema.index({ "items.listingId": 1 });

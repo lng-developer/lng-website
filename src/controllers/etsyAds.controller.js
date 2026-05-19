@@ -2,6 +2,7 @@
 const db = require("../models");
 const EtsyAdsDailySummary = db.EtsyAdsDailySummary;
 const EtsyOrder = db.EtsyOrder;
+const EtsyListing = require("../models/etsyListing.model");
 const mongoose = require("mongoose");
 
 const utcDay = (d) =>
@@ -13,6 +14,20 @@ const toNum = (v) => {
 };
 const round2 = (v) => +toNum(v).toFixed(2);
 const centsToUsd = (v) => round2(toNum(v) / 100);
+
+const uniqueStrings = (values = []) =>
+  Array.from(new Set(values.map((value) => String(value || "").trim()).filter(Boolean)));
+
+const pickSkusFromAny = (item) =>
+  uniqueStrings([
+    item?.sku,
+    item?.SKU,
+    item?.productSku,
+    item?.product_sku,
+    item?.productIdentifier,
+    item?.product_identifier,
+    ...(Array.isArray(item?.skus) ? item.skus : []),
+  ]);
 
 const pickSkuFromOrderItem = (item) =>
   String(
@@ -37,6 +52,13 @@ const pickSellerFromOrder = (order) => {
   if (order?.seller?.name) return String(order.seller.name);
   if (typeof order?.seller === "string") return order.seller;
   return "";
+};
+
+const deriveSellerFromSku = (sku) => {
+  const s = String(sku || "").trim();
+  if (!s) return "";
+  const token = s.split("-")[0]?.trim();
+  return token || s.slice(0, 5);
 };
 
 async function buildListingSkuMapFromOrders(listingIds = [], shopId) {
@@ -68,13 +90,62 @@ async function buildListingSkuMapFromOrders(listingIds = [], shopId) {
       if (!map.has(lid)) {
         map.set(lid, {
           listingId: lid,
-          sku,
+          skus: [],
           seller: pickSellerFromOrder(order),
           source: "etsy_order_items",
-          orderId: order.orderId || "",
+          orderIds: [],
         });
       }
+      const entry = map.get(lid);
+      entry.skus = uniqueStrings([...entry.skus, sku]);
+      entry.sku = entry.skus[0] || "";
+      if (order.orderId && !entry.orderIds.includes(order.orderId)) entry.orderIds.push(order.orderId);
+      if (!entry.orderId) entry.orderId = order.orderId || "";
+      if (!entry.seller) entry.seller = pickSellerFromOrder(order);
     }
+  }
+
+  return map;
+}
+
+async function buildListingSkuMapFromListingMaster({ shopId, listingIds = [] } = {}) {
+  const ids = Array.from(new Set(listingIds.map(String).filter(Boolean)));
+  const map = new Map();
+
+  if (!ids.length || !shopId || !mongoose.Types.ObjectId.isValid(shopId)) return map;
+
+  const listings = await EtsyListing.find(
+    {
+      shopId: new mongoose.Types.ObjectId(shopId),
+      listingId: { $in: ids },
+    },
+    {
+      listingId: 1,
+      SKU: 1,
+      sku: 1,
+      skus: 1,
+      raw: 1,
+      title: 1,
+      TITLE: 1,
+      etsyShopId: 1,
+      syncedAt: 1,
+    }
+  ).lean();
+
+  for (const listing of listings || []) {
+    const lid = String(listing?.listingId || "").trim();
+    const skus = uniqueStrings([
+      listing?.SKU,
+      listing?.sku,
+      ...(Array.isArray(listing?.skus) ? listing.skus : []),
+      listing?.raw?.SKU,
+      listing?.raw?.sku,
+      listing?.raw?.product_identifier,
+      listing?.raw?.productIdentifier,
+    ]);
+    if (!lid || !skus.length) continue;
+
+    map.set(lid, uniqueStrings([...(map.get(lid) || []), ...skus]));
   }
 
   return map;
@@ -161,26 +232,46 @@ const importEtsyAds = async (req, res) => {
     });
 
     const adsListingIds = rows.map((r) => String(r?.listingId || "")).filter(Boolean);
-    const listingSkuMap = await buildListingSkuMapFromOrders(adsListingIds, shopId);
+    const orderListingSkuMap = await buildListingSkuMapFromOrders(adsListingIds, shopId);
+    const listingMasterSkuMap = await buildListingSkuMapFromListingMaster({ shopId, listingIds: adsListingIds });
 
     console.log("[ETSY_ADS_IMPORT][SKU_ENRICH_MAP]", {
       adsRows: rows.length,
       uniqueAdsListingIds: new Set(adsListingIds).size,
-      matchedListingIdsFromOrders: listingSkuMap.size,
-      missingListingIds: Array.from(new Set(adsListingIds)).filter((id) => !listingSkuMap.has(id)),
+      matchedListingIdsFromOrders: orderListingSkuMap.size,
+      matchedListingIdsFromListingMaster: listingMasterSkuMap.size,
+      missingListingIds: Array.from(new Set(adsListingIds)).filter((id) => !orderListingSkuMap.has(id) && !listingMasterSkuMap.has(id)),
     });
 
     // ===== Normalize rows: cents -> USD =====
-    // TODO: Create EtsyListingCatalog collection:
-    // { shopId, etsyShopId, listingId, sku, title, sellerCode, updatedAt }
-    // Ads import should lookup catalog first, then fallback orders.
     const normalized = rows
       .filter((r) => r && r.listingId)
       .map((r) => {
-        const rowSku = String(r.sku || r.SKU || r.productSku || "").trim();
-        const fallback = listingSkuMap.get(String(r.listingId));
-        const finalSku = rowSku || fallback?.sku || "";
-        const finalSeller = String(r.seller || r.sellerName || fallback?.seller || "").trim();
+        const rowSkus = pickSkusFromAny(r);
+        const rowSku = rowSkus[0] || "";
+        const orderFallback = orderListingSkuMap.get(String(r.listingId));
+        const listingMasterSkus = listingMasterSkuMap.get(String(r.listingId)) || [];
+        const finalSkus = rowSkus.length
+          ? rowSkus
+          : orderFallback?.skus?.length
+            ? orderFallback.skus
+            : listingMasterSkus.length
+              ? listingMasterSkus
+              : [];
+        const finalSku = finalSkus[0] || "";
+        const skuSource = rowSku
+          ? "ads_row"
+          : orderFallback?.skus?.length
+            ? "orders_fallback"
+            : listingMasterSkus.length
+              ? "listing_master"
+              : "missing";
+        const finalSeller = String(
+          r.seller ||
+            r.sellerName ||
+            orderFallback?.seller ||
+            deriveSellerFromSku(finalSku)
+        ).trim();
 
         return {
           date: r.date || day,
@@ -188,8 +279,9 @@ const importEtsyAds = async (req, res) => {
           title: r.title || "",
           state: r.state != null ? String(r.state) : "",
           sku: finalSku,
+          skus: finalSkus,
           seller: finalSeller,
-          skuSource: rowSku ? "ads_payload" : fallback?.sku ? "orders_fallback" : "missing",
+          skuSource,
           spend: round2(toNum(r.spend) / 100),
           views: toNum(r.views),
           clicks: toNum(r.clicks),
@@ -206,20 +298,79 @@ const importEtsyAds = async (req, res) => {
       listingId: r.listingId,
       title: String(r.title || "").slice(0, 80),
       sku: r.sku,
+      skus: r.skus,
       seller: r.seller,
       skuSource: r.skuSource,
       spend: r.spend,
       orders: r.orders,
       revenue: r.revenue,
     }));
+    const sourceCounts = {
+      fromAdsRow: normalized.filter((x) => x.skuSource === "ads_row").length,
+      fromOrdersFallback: normalized.filter((x) => x.skuSource === "orders_fallback").length,
+      fromListingMaster: normalized.filter((x) => x.skuSource === "listing_master").length,
+      missing: normalized.filter((x) => x.skuSource === "missing").length,
+    };
 
     console.log("[ETSY_ADS_IMPORT][SKU_ENRICH_RESULT]", {
       totalRows: skuAudit.length,
-      fromAdsPayload: skuAudit.filter((x) => x.skuSource === "ads_payload").length,
-      fromOrdersFallback: skuAudit.filter((x) => x.skuSource === "orders_fallback").length,
-      missing: skuAudit.filter((x) => x.skuSource === "missing").length,
+      fromAdsRow: sourceCounts.fromAdsRow,
+      fromOrdersFallback: sourceCounts.fromOrdersFallback,
+      fromListingMaster: sourceCounts.fromListingMaster,
+      missing: sourceCounts.missing,
       missingRows: skuAudit.filter((x) => x.skuSource === "missing"),
       sample: skuAudit.slice(0, 30),
+    });
+
+    console.log("[ETSY_ADS_SKU_ENRICH_DEEP]", {
+      shopId,
+      day,
+      totalRows: normalized.length,
+      uniqueListingIds: new Set(adsListingIds).size,
+      fromAdsRow: sourceCounts.fromAdsRow,
+      fromOrdersFallback: sourceCounts.fromOrdersFallback,
+      fromListingMaster: sourceCounts.fromListingMaster,
+      missing: sourceCounts.missing,
+      ordersFallbackMapSize: orderListingSkuMap.size,
+      listingMasterMapSize: listingMasterSkuMap.size,
+      missingListingIdsSample: Array.from(new Set(
+        normalized.filter((x) => x.skuSource === "missing").map((x) => x.listingId)
+      )).slice(0, 50).map((listingId) => {
+        const row = normalized.find((x) => x.listingId === listingId);
+        return {
+          listingId,
+          title: row?.title || "",
+          spend: row?.spend || 0,
+          orders: row?.orders || 0,
+        };
+      }),
+      listingMasterMatchedSample: normalized
+        .filter((x) => x.skuSource === "listing_master")
+        .slice(0, 30)
+        .map((x) => ({
+          listingId: x.listingId,
+          title: x.title,
+          sku: x.sku,
+          skus: x.skus,
+        })),
+      ordersFallbackMatchedSample: normalized
+        .filter((x) => x.skuSource === "orders_fallback")
+        .slice(0, 30)
+        .map((x) => ({
+          listingId: x.listingId,
+          title: x.title,
+          sku: x.sku,
+          skus: x.skus,
+        })),
+      adsRowMatchedSample: normalized
+        .filter((x) => x.skuSource === "ads_row")
+        .slice(0, 20)
+        .map((x) => ({
+          listingId: x.listingId,
+          title: x.title,
+          sku: x.sku,
+          skus: x.skus,
+        })),
     });
     // ===== Aggregate =====
     const totals = normalized.reduce(
@@ -366,8 +517,13 @@ const importEtsyAds = async (req, res) => {
       shopId,
       etsyShopId: etsyShopId || null,
       shopName: shopName || null,
+      rowsCount: rows.length,
       rowsAccepted: normalized.length,
       rowsRejected: rows.length - normalized.length,
+      fromAdsRow: sourceCounts.fromAdsRow,
+      fromOrdersFallback: sourceCounts.fromOrdersFallback,
+      fromListingMaster: sourceCounts.fromListingMaster,
+      missing: sourceCounts.missing,
       totalSpend: doc.totalSpend,
       totalViews: doc.totalViews,
       totalClicks: doc.totalClicks,
