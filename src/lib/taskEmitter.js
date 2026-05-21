@@ -9,12 +9,13 @@ function todayStr() {
 }
 
 /**
- * Sinh taskId cố định theo type. Cùng input → cùng taskId (idempotent).
+ * Build a stable taskId by task type.
  * Format: <type_lower>:<shopId>:<key>
- *   - IMPORT_ORDERS / IMPORT_FBM_ORDERS         → key = date (YYYY-MM-DD)
- *   - IMPORT_ADS_SPEND                          → key = payload.date || yesterday
- *   - UPLOAD_TRACKING                           → key = batchId
- *   - Khác                                      → key = timestamp ms (không idempotent)
+ *   - IMPORT_ORDERS / IMPORT_FBM_ORDERS -> payload.date || todayStr()
+ *   - IMPORT_ADS_SPEND -> payload.date || todayStr()
+ *   - SYNC_ETSY_LISTINGS / ETSY_SYNC_LISTINGS -> payload.date || payload.mode || todayStr()
+ *   - ETSY_UPLOAD_TRACKING / UPLOAD_TRACKING -> payload.batchId || orderId_trackingNumber || Date.now()
+ *   - Unknown type -> timestamp, not idempotent
  */
 function buildTaskId({ type, shopId, machineId, payload }) {
   const t = String(type || "TASK").toLowerCase();
@@ -29,8 +30,17 @@ function buildTaskId({ type, shopId, machineId, payload }) {
     case "IMPORT_ADS_SPEND":
       key = safeKey(payload?.date || todayStr());
       break;
+    case "SYNC_ETSY_LISTINGS":
+    case "ETSY_SYNC_LISTINGS":
+      key = safeKey(payload?.date || payload?.mode || todayStr());
+      break;
+    case "ETSY_UPLOAD_TRACKING":
     case "UPLOAD_TRACKING":
-      key = safeKey(payload?.batchId || Date.now());
+      key = safeKey(
+        payload?.batchId ||
+        [payload?.orderId, payload?.trackingNumber].filter(Boolean).join("_") ||
+        Date.now()
+      );
       break;
     default:
       key = String(Date.now());
@@ -40,8 +50,7 @@ function buildTaskId({ type, shopId, machineId, payload }) {
 }
 
 /**
- * Gửi task tới 1 machine + lưu DB để có thể resend khi extension reconnect.
- * Trả về object task message đã emit.
+ * Persist and send a task to one machine so it can be resent after reconnect.
  */
 async function emitTaskToMachine(io, { taskId, type, shopId, machineId, payload }) {
   if (!io) throw new Error("io required");
