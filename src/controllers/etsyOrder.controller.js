@@ -11,6 +11,13 @@ const axios = require('axios');
 
 /* ================== UTIL ================== */
 
+const toBooleanStrict = (value) => {
+    if (value === true || value === false) return value;
+    if (String(value).toLowerCase() === "true") return true;
+    if (String(value).toLowerCase() === "false") return false;
+    return null;
+};
+
 const toNumber = (v) => {
     if (v === null || v === undefined) return null;
     const s = String(v).trim();
@@ -585,6 +592,7 @@ const getListOrders = async (req, res) => {
                 status: order.status || "New",
                 purchase_date: order.saleDate || null,
                 createdAt: order.createdAt || null,
+                shopId: shop._id ? String(shop._id) : String(order.shopId || ""),
                 shopName: shop.name || "",
                 shipping_type: order.shipping_type || "Standard",
                 items: (order.items || []).map((item) => {
@@ -623,6 +631,7 @@ const getListOrders = async (req, res) => {
                     };
                 }),
                 base_cost: order.base_cost || 0,
+                sumbittedoetsy: order.sumbittedoetsy ?? false,
                 address_validation: order.address_validation?.isValid ?? null,
                 seller: sellerPopulated ? {
                     _id: sellerPopulated._id,
@@ -1559,10 +1568,66 @@ const createOrder = async (req, res) => {
     }
 };
 
+const updateSumbittedoetsyStatus = async (req, res) => {
+    try {
+        const body = req.body || {};
+        const orderId = String(body.orderId || body.oderid || "").trim();
+        const shopId = String(body.shopId || "").trim();
+        const nextStatus = toBooleanStrict(
+            body.sumbittedoetsy ?? body.submittedToEtsy ?? body.submitted_to_etsy
+        );
+
+        if (!orderId) {
+            return res.status(400).json({ ok: false, message: "orderId is required" });
+        }
+        if (!shopId) {
+            return res.status(400).json({ ok: false, message: "shopId is required" });
+        }
+        if (!mongoose.Types.ObjectId.isValid(shopId)) {
+            return res.status(400).json({ ok: false, message: "shopId must be a valid ObjectId" });
+        }
+        if (nextStatus === null) {
+            return res.status(400).json({
+                ok: false,
+                message: "sumbittedoetsy must be true or false",
+            });
+        }
+
+        const updated = await EtsyOrder.findOneAndUpdate(
+            { orderId, shopId },
+            { $set: { sumbittedoetsy: nextStatus } },
+            { new: true }
+        )
+            .select({ orderId: 1, shopId: 1, sumbittedoetsy: 1, updatedAt: 1 })
+            .lean();
+
+        if (!updated) {
+            return res.status(404).json({
+                ok: false,
+                message: "Etsy order not found",
+                orderId,
+                shopId,
+            });
+        }
+
+        return res.json({
+            ok: true,
+            orderId: updated.orderId,
+            shopId: String(updated.shopId),
+            sumbittedoetsy: updated.sumbittedoetsy ?? false,
+            updatedAt: updated.updatedAt,
+        });
+    } catch (err) {
+        console.error("updateSumbittedoetsyStatus error:", err);
+        return res.status(500).json({ ok: false, message: "Internal Server Error", error: err.message });
+    }
+};
+
 module.exports = {
     importOrders,
     getListOrders,
     computeBaseCostForEtsyOrder,
     getEtsyOrderStatistics,
     createOrder,
+    updateSumbittedoetsyStatus,
 };

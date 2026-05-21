@@ -118,6 +118,7 @@ const EtsyOrderSchema = new Schema(
         base_cost_shipping_groups: { type: Schema.Types.Mixed, default: [] },
 
         numberOfItems: { type: Number, default: 0 },
+        sumbittedoetsy: { type: Boolean, default: false },
 
         items: { type: [EtsyOrderItemEmbeddedSchema], default: [] },
         address_validation: {
