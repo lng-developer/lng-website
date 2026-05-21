@@ -1,6 +1,7 @@
 const db = require("../models");
 const Shop = db.shop;
 const RealtimeLog = db.RealtimeLog;
+const ExtensionTask = db.ExtensionTask || require("../models/extensionTask.model");
 const OrderCustomProduct = db.orderCustomProduct;
 const taskStatusService = require("../service/taskStatus.service");
 const { emitTaskToMachine, buildTaskId } = require("../lib/taskEmitter");
@@ -158,6 +159,58 @@ function normalizeVendorKey(nameOrType) {
   if (["beeful", "merchfox", "merchize", "printway", "mangotee", "ss88", "luxurypro"].includes(s))
     return s;
   return "";
+}
+
+const isObjectIdLike = (value) => /^[a-fA-F0-9]{24}$/.test(String(value || "").trim());
+const isForceTrue = (value) => value === true || String(value).toLowerCase() === "true";
+
+function normalizeEtsyUploadTrackingBody(body = {}) {
+  const payload = body.payload && typeof body.payload === "object" ? body.payload : {};
+  const machineId = norm(
+    body.machineId ||
+    payload.machineId ||
+    body.mongoShopId ||
+    payload.mongoShopId ||
+    body.shopId ||
+    payload.shopId
+  );
+  const shopId = norm(body.shopId || payload.shopId || machineId);
+  const mongoShopId = norm(body.mongoShopId || payload.mongoShopId || machineId);
+  const orderId = norm(payload.orderId || body.orderId);
+  const trackingNumber = norm(payload.trackingNumber || body.trackingNumber);
+  const force = isForceTrue(body.force) || isForceTrue(payload.force);
+
+  if (!machineId) return { ok: false, message: "machineId is required" };
+  if (!shopId) return { ok: false, message: "shopId is required" };
+  if (!mongoShopId) return { ok: false, message: "mongoShopId is required" };
+  if (!isObjectIdLike(machineId)) return { ok: false, message: "machineId must be a valid ObjectId" };
+  if (!isObjectIdLike(shopId)) return { ok: false, message: "shopId must be a valid ObjectId" };
+  if (!isObjectIdLike(mongoShopId)) return { ok: false, message: "mongoShopId must be a valid ObjectId" };
+  if (new Set([machineId, shopId, mongoShopId].filter(Boolean)).size > 1) {
+    return { ok: false, message: "shopId, machineId, and mongoShopId must match for Etsy upload tracking" };
+  }
+  if (!orderId) return { ok: false, message: "orderId is required" };
+  if (!trackingNumber) return { ok: false, message: "trackingNumber is required" };
+
+  return {
+    ok: true,
+    body: {
+      ...body,
+      shopId,
+      machineId,
+      force,
+      type: "ETSY_UPLOAD_TRACKING",
+      payload: {
+        ...payload,
+        machineId,
+        mongoShopId,
+        shopId,
+        orderId,
+        trackingNumber,
+        ...(force ? { force: true } : {}),
+      },
+    },
+  };
 }
 
 /**
@@ -1047,6 +1100,17 @@ async function requestExtension(req, res) {
     console.log(`🚀 [REQUEST-EXT][${startTime.toISOString()}] Starting requestExtension`);
     console.log(`📋 [REQUEST-EXT] Type: ${isAutoCall ? '🤖 AUTO' : '👤 MANUAL'}`);
     
+    const rawBody = req.body || {};
+    const rawType = String(rawBody.type || "").toUpperCase();
+    const shouldNormalizeEtsyTracking = ["ETSY_UPLOAD_TRACKING", "UPLOAD_TRACKING"].includes(rawType);
+    const normalizedBody = shouldNormalizeEtsyTracking
+      ? normalizeEtsyUploadTrackingBody({ ...rawBody, type: rawType })
+      : { ok: true, body: rawBody };
+
+    if (!normalizedBody.ok) {
+      return res.status(400).json({ ok: false, message: normalizedBody.message });
+    }
+
     const {
       shopId,
       machineId,
@@ -1054,7 +1118,8 @@ async function requestExtension(req, res) {
       label = null,
       type,
       payload,
-    } = req.body || {};
+      taskId: providedTaskId,
+    } = normalizedBody.body || {};
     
     console.log(`📋 [REQUEST-EXT] Shop: ${shopId}, Machine: ${machineId}, Task: ${type}`);
     
@@ -1071,7 +1136,7 @@ async function requestExtension(req, res) {
       return res.status(500).json({ ok: false, message: "io missing" });
     }
 
-    const taskId = buildTaskId({ type, shopId, machineId, payload });
+    const taskId = providedTaskId || buildTaskId({ type, shopId, machineId, payload });
     console.log(`📤 [REQUEST-EXT] Sending task ${taskId} to machine:${machineId}`, { type, payload });
 
     // Emit task (persist + send) — payload tự động chèn taskId
@@ -1096,6 +1161,9 @@ async function requestExtension(req, res) {
       case "IMPORT_FBM_ORDERS":
         message = "Start import FBM orders ...";
         break;
+      case "ETSY_UPLOAD_TRACKING":
+        message = "Start Etsy upload tracking ...";
+        break;
       default:
         message = `Start ${type} ...`;
         break;
@@ -1117,7 +1185,14 @@ async function requestExtension(req, res) {
     console.log(`✅ [REQUEST-EXT][${endTime.toISOString()}] Completed successfully`);
     console.log(`⏱️  [REQUEST-EXT] Duration: ${duration}ms`);
 
-    return res.json({ ok: true, taskId: emitted.taskId });
+    const responseBody = { ok: true, taskId: emitted.taskId };
+    if (["ETSY_UPLOAD_TRACKING", "UPLOAD_TRACKING"].includes(String(type || "").toUpperCase())) {
+      responseBody.type = type;
+      responseBody.machineId = machineId;
+      responseBody.shopId = shopId;
+    }
+
+    return res.json(responseBody);
   } catch (e) {
     const endTime = new Date();
     const duration = endTime - startTime;
@@ -1334,6 +1409,63 @@ const autoRequestExtensionAll = async (req, res) => {
   }
 };
 
+const etsyUploadTracking = async (req, res) => {
+  const normalized = normalizeEtsyUploadTrackingBody({
+    ...(req.body || {}),
+    type: "ETSY_UPLOAD_TRACKING",
+    action: (req.body || {}).action || "click",
+    label: (req.body || {}).label || "Upload Etsy Tracking",
+  });
+
+  if (!normalized.ok) {
+    return res.status(400).json({ ok: false, message: normalized.message });
+  }
+
+  const { type, shopId, machineId, payload, force } = normalized.body;
+  const taskId = buildTaskId({ type, shopId, machineId, payload });
+
+  if (ExtensionTask && typeof ExtensionTask.findOne === "function" && !isForceTrue(force)) {
+    const existing = await ExtensionTask.findOne({ taskId }).lean();
+    if (["sent", "received"].includes(existing?.status)) {
+      return res.status(409).json({
+        ok: false,
+        reason: "TASK_ALREADY_RUNNING",
+        taskId,
+        status: existing.status,
+        message: "Etsy upload tracking task is already pending/running",
+      });
+    }
+    if (existing?.status === "completed") {
+      return res.status(200).json({
+        ok: true,
+        skipped: true,
+        reason: "TASK_ALREADY_COMPLETED",
+        taskId,
+        status: existing.status,
+        message: "Etsy upload tracking task already completed",
+      });
+    }
+  }
+
+  console.log("[ETSY_UPLOAD_TRACKING] Sending task", {
+    type,
+    machineId,
+    shopId,
+    orderId: payload.orderId,
+    trackingNumber: payload.trackingNumber,
+    taskId,
+  });
+
+  const mockReq = {
+    ...req,
+    body: { ...normalized.body, taskId },
+    headers: req.headers || {},
+    app: req.app,
+  };
+
+  return requestExtension(mockReq, res);
+};
+
 const getClientOnline = async (req, res) => {
   try {
     const presence = req.app.get("presence");
@@ -1529,6 +1661,7 @@ module.exports = {
   testConnection,
   broadcastMessage,
   taskResultRest,
+  etsyUploadTracking,
 
   // vendor sync APIs
   vendorSyncOne,
