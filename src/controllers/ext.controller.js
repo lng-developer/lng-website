@@ -164,6 +164,11 @@ function normalizeVendorKey(nameOrType) {
 const isObjectIdLike = (value) => /^[a-fA-F0-9]{24}$/.test(String(value || "").trim());
 const isForceTrue = (value) => value === true || String(value).toLowerCase() === "true";
 
+function getMaxEtsyTrackingBatchItems() {
+  const n = Number(process.env.ETSY_TRACKING_BATCH_MAX || 100);
+  return Number.isFinite(n) && n > 0 ? n : 100;
+}
+
 function normalizeEtsyUploadTrackingBody(body = {}) {
   const payload = body.payload && typeof body.payload === "object" ? body.payload : {};
   const machineId = norm(
@@ -211,6 +216,70 @@ function normalizeEtsyUploadTrackingBody(body = {}) {
       },
     },
   };
+}
+
+function normalizeEtsyUploadTrackingBatchBody(body = {}) {
+  const machineId = norm(body.machineId || body.mongoShopId || body.shopId);
+  const shopId = norm(body.shopId || machineId);
+  const mongoShopId = norm(body.mongoShopId || machineId);
+  const force = isForceTrue(body.force);
+
+  if (!machineId) return { ok: false, message: "machineId is required" };
+  if (!shopId) return { ok: false, message: "shopId is required" };
+  if (!mongoShopId) return { ok: false, message: "mongoShopId is required" };
+  if (!isObjectIdLike(machineId)) return { ok: false, message: "machineId must be a valid ObjectId" };
+  if (!isObjectIdLike(shopId)) return { ok: false, message: "shopId must be a valid ObjectId" };
+  if (!isObjectIdLike(mongoShopId)) return { ok: false, message: "mongoShopId must be a valid ObjectId" };
+  if (new Set([machineId, shopId, mongoShopId].filter(Boolean)).size > 1) {
+    return { ok: false, message: "shopId, machineId, and mongoShopId must match for Etsy upload tracking" };
+  }
+  if (!Array.isArray(body.items) || body.items.length === 0) {
+    return { ok: false, message: "items must be a non-empty array" };
+  }
+  const maxItems = getMaxEtsyTrackingBatchItems();
+  if (body.items.length > maxItems) {
+    return { ok: false, message: `items exceeds max batch size ${maxItems}` };
+  }
+
+  return {
+    ok: true,
+    body: {
+      machineId,
+      shopId,
+      mongoShopId,
+      force,
+      items: body.items,
+    },
+  };
+}
+
+async function getEtsyTrackingDuplicateSkip({ taskId, force }) {
+  if (isForceTrue(force)) return null;
+  if (!ExtensionTask || typeof ExtensionTask.findOne !== "function") return null;
+
+  const existing = await ExtensionTask.findOne({ taskId }).lean();
+  if (["sent", "received"].includes(existing?.status)) {
+    return {
+      ok: true,
+      skipped: true,
+      reason: "TASK_ALREADY_RUNNING",
+      status: existing.status,
+      taskId,
+      message: "Etsy upload tracking task is already pending/running",
+    };
+  }
+  if (existing?.status === "completed") {
+    return {
+      ok: true,
+      skipped: true,
+      reason: "TASK_ALREADY_COMPLETED",
+      status: existing.status,
+      taskId,
+      message: "Etsy upload tracking task already completed",
+    };
+  }
+
+  return null;
 }
 
 /**
@@ -1424,27 +1493,18 @@ const etsyUploadTracking = async (req, res) => {
   const { type, shopId, machineId, payload, force } = normalized.body;
   const taskId = buildTaskId({ type, shopId, machineId, payload });
 
-  if (ExtensionTask && typeof ExtensionTask.findOne === "function" && !isForceTrue(force)) {
-    const existing = await ExtensionTask.findOne({ taskId }).lean();
-    if (["sent", "received"].includes(existing?.status)) {
-      return res.status(409).json({
-        ok: false,
-        reason: "TASK_ALREADY_RUNNING",
-        taskId,
-        status: existing.status,
-        message: "Etsy upload tracking task is already pending/running",
-      });
-    }
-    if (existing?.status === "completed") {
-      return res.status(200).json({
-        ok: true,
-        skipped: true,
-        reason: "TASK_ALREADY_COMPLETED",
-        taskId,
-        status: existing.status,
-        message: "Etsy upload tracking task already completed",
-      });
-    }
+  const duplicateSkip = await getEtsyTrackingDuplicateSkip({ taskId, force });
+  if (duplicateSkip?.reason === "TASK_ALREADY_RUNNING") {
+    return res.status(409).json({
+      ok: false,
+      reason: duplicateSkip.reason,
+      taskId,
+      status: duplicateSkip.status,
+      message: duplicateSkip.message,
+    });
+  }
+  if (duplicateSkip?.reason === "TASK_ALREADY_COMPLETED") {
+    return res.status(200).json(duplicateSkip);
   }
 
   console.log("[ETSY_UPLOAD_TRACKING] Sending task", {
@@ -1464,6 +1524,156 @@ const etsyUploadTracking = async (req, res) => {
   };
 
   return requestExtension(mockReq, res);
+};
+
+const etsyUploadTrackingBatch = async (req, res) => {
+  const normalized = normalizeEtsyUploadTrackingBatchBody(req.body || {});
+  if (!normalized.ok) {
+    return res.status(400).json({ ok: false, message: normalized.message });
+  }
+
+  const io = req.app?.get?.("io");
+  if (!io) {
+    return res.status(500).json({ ok: false, message: "io missing" });
+  }
+
+  const { machineId, shopId, mongoShopId, force, items } = normalized.body;
+  const type = "ETSY_UPLOAD_TRACKING";
+  const batchGroupId = `etsy_upload_tracking_batch:${machineId}:${Date.now()}`;
+  const results = [];
+
+  let created = 0;
+  let skipped = 0;
+  let failed = 0;
+  const seenItemKeys = new Set();
+
+  for (let index = 0; index < items.length; index += 1) {
+    const rawItem = items[index] || {};
+    const orderId = norm(rawItem.orderId);
+    const trackingNumber = norm(rawItem.trackingNumber || rawItem.tracking_number);
+
+    if (!orderId) {
+      failed += 1;
+      results.push({
+        index,
+        orderId,
+        trackingNumber,
+        ok: false,
+        reason: "ORDER_ID_REQUIRED",
+        message: "orderId is required",
+      });
+      continue;
+    }
+    if (!trackingNumber) {
+      failed += 1;
+      results.push({
+        index,
+        orderId,
+        trackingNumber,
+        ok: false,
+        reason: "TRACKING_NUMBER_REQUIRED",
+        message: "trackingNumber is required",
+      });
+      continue;
+    }
+
+    const itemKey = `${orderId}_${trackingNumber}`;
+    if (seenItemKeys.has(itemKey)) {
+      skipped += 1;
+      results.push({
+        index,
+        orderId,
+        trackingNumber,
+        ok: true,
+        skipped: true,
+        reason: "DUPLICATE_IN_BATCH",
+        message: "Duplicate orderId + trackingNumber in the same batch request",
+      });
+      continue;
+    }
+    seenItemKeys.add(itemKey);
+
+    const payload = {
+      machineId,
+      mongoShopId,
+      shopId,
+      orderId,
+      trackingNumber,
+      batchGroupId,
+      batchIndex: index,
+      batchTotal: items.length,
+      ...(force ? { force: true } : {}),
+    };
+    const taskId = buildTaskId({ type, shopId, machineId, payload });
+
+    try {
+      const duplicateSkip = await getEtsyTrackingDuplicateSkip({ taskId, force });
+      if (duplicateSkip) {
+        skipped += 1;
+        results.push({
+          index,
+          orderId,
+          trackingNumber,
+          ok: true,
+          skipped: true,
+          reason: duplicateSkip.reason,
+          status: duplicateSkip.status,
+          taskId,
+          message: duplicateSkip.message,
+        });
+        continue;
+      }
+
+      await emitTaskToMachine(io, {
+        taskId,
+        type,
+        shopId,
+        machineId,
+        payload,
+      });
+      created += 1;
+      results.push({
+        index,
+        orderId,
+        trackingNumber,
+        ok: true,
+        taskId,
+      });
+    } catch (err) {
+      failed += 1;
+      results.push({
+        index,
+        orderId,
+        trackingNumber,
+        ok: false,
+        taskId,
+        reason: "EMIT_FAILED",
+        message: err.message,
+      });
+    }
+  }
+
+  await RealtimeLog.create({
+    shopId,
+    machineId,
+    label: "Upload Etsy Tracking Batch",
+    action: "batch",
+    level: "info",
+    message: `Start Etsy upload tracking batch: created=${created}, skipped=${skipped}, failed=${failed}`,
+    ts: new Date(),
+  });
+
+  return res.json({
+    ok: true,
+    batchGroupId,
+    machineId,
+    shopId,
+    total: items.length,
+    created,
+    skipped,
+    failed,
+    results,
+  });
 };
 
 const getClientOnline = async (req, res) => {
@@ -1662,6 +1872,7 @@ module.exports = {
   broadcastMessage,
   taskResultRest,
   etsyUploadTracking,
+  etsyUploadTrackingBatch,
 
   // vendor sync APIs
   vendorSyncOne,

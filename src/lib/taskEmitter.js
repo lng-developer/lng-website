@@ -15,6 +15,10 @@ function todayStr() {
  *   - IMPORT_ADS_SPEND -> payload.date || todayStr()
  *   - SYNC_ETSY_LISTINGS / ETSY_SYNC_LISTINGS -> payload.date || payload.mode || todayStr()
  *   - ETSY_UPLOAD_TRACKING / UPLOAD_TRACKING -> payload.batchId || orderId_trackingNumber || Date.now()
+ *     WARNING:
+ *     For Etsy tracking batch flow, use payload.batchGroupId for grouping only.
+ *     Do NOT pass a shared payload.batchId to multiple tracking tasks,
+ *     because payload.batchId is part of taskId generation and would make tasks collide.
  *   - Unknown type -> timestamp, not idempotent
  */
 function buildTaskId({ type, shopId, machineId, payload }) {
