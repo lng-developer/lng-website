@@ -21,6 +21,14 @@ const EtsyOrderItemEmbeddedSchema = new Schema(
             width: Number,
             height: Number,
         },
+
+        tracking_info: {
+            fulfillment: { type: String },
+            tracking: { type: String },
+            status: { type: String },
+            note: { type: String },
+            updated_at: { type: Date },
+        },
     },
     { _id: false }
 );
