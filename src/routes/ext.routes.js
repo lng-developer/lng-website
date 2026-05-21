@@ -8,6 +8,7 @@ const upload = multer({ storage: multer.memoryStorage() });
 // Gửi lệnh cho 1 client (theo machineId + shopId)
 router.post("/command", extController.requestExtension);
 router.post("/etsy/upload-tracking", extController.etsyUploadTracking);
+router.post("/etsy/upload-tracking-batch", extController.etsyUploadTrackingBatch);
 
 // Broadcast lệnh pull orders cho tất cả client đang online
 router.post("/pull-all", extController.pullAllOrder);
