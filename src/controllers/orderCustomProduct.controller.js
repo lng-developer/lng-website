@@ -9,8 +9,6 @@ const axios = require("axios");
 const sharp = require("sharp");
 const MAX_CLOUDINARY_BYTES = 10 * 1024 * 1024; // 10MB theo plan hiện tại
 const AdmZip = require("adm-zip");
-const streamifier = require("streamifier");
-const cloudinary = require("../utils/cloudinary");
 const Shop = db.shop;
 const ConfigCostCenter = db.configCostCenter;
 const VendorCostCenter = db.vendorCostCenter;
@@ -122,12 +120,14 @@ const importOrderJson = async (req, res) => {
 
     const baseImageFromPayload =
       jsonData?.customizationData?.children?.[0]?.baseImage || {};
+    const incomingSnapshotImage =
+      (Array.isArray(jsonData?.cloudinarySnapshots)
+        ? jsonData.cloudinarySnapshots.find(Boolean)
+        : "") || "";
     const baseImageUrlForCreate =
       item?.baseImage?.imageUrl ||
       baseImageFromPayload?.imageUrl ||
-      (Array.isArray(jsonData?.cloudinarySnapshots)
-        ? jsonData.cloudinarySnapshots[0]
-        : "") ||
+      incomingSnapshotImage ||
       "";
 
     // 🔎 tìm listing + lấy nested psd.status
@@ -195,14 +195,25 @@ const importOrderJson = async (req, res) => {
     // Nếu psd.status === 'Available' thì không tạo task
 
     // ===== Nếu item đã có customization/snapshot → dừng sớm (đã link listing) =====
-    if (item.customization || item.snapshotImage) {
-      return res.status(409).json({
-        message: "Item already has customization data. Listing linked.",
+    if (item.customization) {
+      let snapshotBackfilled = false;
+      if (!item.snapshotImage && incomingSnapshotImage) {
+        item.snapshotImage = incomingSnapshotImage;
+        await order.save();
+        snapshotBackfilled = true;
+      }
+
+      return res.status(snapshotBackfilled ? 200 : 409).json({
+        message: snapshotBackfilled
+          ? "Item already has customization data. Snapshot image backfilled."
+          : "Item already has customization data. Listing linked.",
         orderId: order.orderId,
         orderItemId: item.orderItemId,
         asin,
         listingLinked: true,
         listingId: String(item.listingId),
+        snapshotImage: item.snapshotImage || "",
+        snapshotBackfilled,
         psdStatus: listingDoc?.psd?.status || "Unavailable",
         createdPsdTask,
         psdTaskId,
@@ -275,9 +286,7 @@ const importOrderJson = async (req, res) => {
       height: baseImageFromPayload?.dimension?.height || null,
     };
     item.snapshotImage =
-      (Array.isArray(jsonData?.cloudinarySnapshots)
-        ? jsonData.cloudinarySnapshots[0]
-        : "") || "";
+      incomingSnapshotImage || item.snapshotImage || "";
     item.svgFile = jsonData?.customizationData?.children?.[0]?.svg || "";
     item.totalCustomizationPrice = totalCustomizationPrice;
 
@@ -1313,7 +1322,10 @@ const updateOrdersFromXlsx = async (req, res) => {
               ? String(bodyShopId)
               : null;
 
-          skipProcessingZip = true;
+          skipProcessingZip = !(
+            row.customized_url &&
+            (!existingItem?.snapshotImage || !existingItem?.customization)
+          );
 
           if (
             autoCompute &&
@@ -1432,7 +1444,7 @@ const updateOrdersFromXlsx = async (req, res) => {
                   : imageName.replace(/\.(png|jpg|jpeg)$/i, "") +
                   "_compressed.jpg";
 
-              const cloudinaryUrl = await uploadToCloudinary(
+              const cloudinaryUrl = await uploadSnapshotToCloud(
                 bufferForUpload,
                 finalName
               );
@@ -1450,7 +1462,7 @@ const updateOrdersFromXlsx = async (req, res) => {
                     const finalName =
                       imageName.replace(/\.(png|jpg|jpeg)$/i, "") +
                       "_compressed_last.jpg";
-                    const url = await uploadToCloudinary(lastTry, finalName);
+                    const url = await uploadSnapshotToCloud(lastTry, finalName);
                     cloudinaryUrls.push(url);
                     continue;
                   }
@@ -1665,21 +1677,17 @@ const updateOrdersFromXlsx = async (req, res) => {
   }
 };
 
-const uploadToCloudinary = (buffer, filename) => {
-  return new Promise((resolve, reject) => {
-    const stream = cloudinary.uploader.upload_stream(
-      {
-        resource_type: "image",
-        folder: "snapshot_images",
-        public_id: path.parse(filename).name,
-      },
-      (error, result) => {
-        if (error) reject(error);
-        else resolve(result.secure_url);
-      }
-    );
-    streamifier.createReadStream(buffer).pipe(stream);
+const uploadSnapshotToCloud = async (buffer, filename) => {
+  const { uploadBufferToR2 } = require("../service/cloudflareR2/r2.service");
+  const up = await uploadBufferToR2({
+    buffer,
+    originalName: filename,
+    mimeType: filename && /\.jpe?g$/i.test(filename) ? "image/jpeg" : "image/png",
+    size: buffer?.length,
+    folder: "snapshot_images",
   });
+
+  return up.url;
 };
 
 // const getAllOrders = async (req, res) => {

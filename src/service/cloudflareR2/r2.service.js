@@ -27,6 +27,7 @@ const ALLOWED_FOLDERS = [
   "temp",
   "exports",
   "fulfillment_files",
+  "snapshot_images",
 ];
 
 const r2Client = new S3Client({
