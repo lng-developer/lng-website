@@ -22,6 +22,8 @@ const upload = multer({ storage });
 router.post('/import', upload.array('files', 2), etsyOrderController.importOrders);
 router.get('/statistic', etsyOrderController.getEtsyOrderStatistics);
 router.patch('/sumbittedoetsy', etsyOrderController.updateSumbittedoetsyStatus);
+router.patch('/:orderId/items/:transactionId/tracking', etsyOrderController.updateEtsyOrderItemTracking);
+router.put('/:orderId/items/:transactionId/tracking', etsyOrderController.updateEtsyOrderItemTracking);
 router.get('/', etsyOrderController.getListOrders);
 router.post('/', etsyOrderController.createOrder);
 router.post('/compute-base-cost', etsyOrderController.computeBaseCostForEtsyOrder);
