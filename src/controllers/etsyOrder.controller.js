@@ -18,6 +18,20 @@ const toBooleanStrict = (value) => {
     return null;
 };
 
+const ETSY_TRACKING_STATUSES = ["New", "In progress", "Fulfilled", "Shipping", "Shipped", "Canceled", "Cancelled"];
+const isEtsyCanceledStatus = (status) => ["Canceled", "Cancelled"].includes(String(status || "").trim());
+
+function computeEtsyOrderStatusFromItems(items = []) {
+    const statuses = (items || []).map((item) => String(item?.tracking_info?.status || "New").trim());
+    const active = statuses.filter((status) => !isEtsyCanceledStatus(status));
+    if (active.length === 0 && statuses.length > 0) return "Canceled";
+    if (active.length > 0 && active.every((status) => status === "Shipped")) return "Shipped";
+    if (active.includes("Shipping")) return "Shipping";
+    if (active.includes("Fulfilled")) return "Fulfilled";
+    if (active.includes("In progress")) return "In progress";
+    return "New";
+}
+
 const toNumber = (v) => {
     if (v === null || v === undefined) return null;
     const s = String(v).trim();
@@ -1623,6 +1637,98 @@ const updateSumbittedoetsyStatus = async (req, res) => {
     }
 };
 
+const updateEtsyOrderItemTracking = async (req, res) => {
+    try {
+        const orderId = String(req.params.orderId || "").trim();
+        const transactionId = String(req.params.transactionId || req.params.orderItemId || "").trim();
+        const body = req.body || {};
+
+        const fulfillment = body.fulfillment !== undefined ? String(body.fulfillment).trim() : undefined;
+        const tracking = body.tracking !== undefined ? String(body.tracking).trim() : undefined;
+        const note = body.note !== undefined ? String(body.note) : undefined;
+        const status = body.status !== undefined ? String(body.status).trim() : undefined;
+
+        if (!orderId) return res.status(400).json({ ok: false, message: "orderId is required" });
+        if (!transactionId) return res.status(400).json({ ok: false, message: "transactionId is required" });
+        if (
+            fulfillment === undefined &&
+            tracking === undefined &&
+            status === undefined &&
+            note === undefined
+        ) {
+            return res.status(400).json({
+                ok: false,
+                message: "No updatable fields provided (fulfillment/tracking/status/note)",
+            });
+        }
+        if (status && !ETSY_TRACKING_STATUSES.includes(status)) {
+            return res.status(400).json({
+                ok: false,
+                message: "Invalid status",
+                allowed: ETSY_TRACKING_STATUSES,
+            });
+        }
+
+        let nextStatus;
+        if (isEtsyCanceledStatus(status)) {
+            nextStatus = "Canceled";
+        } else if (tracking !== undefined && tracking.length > 0) {
+            nextStatus = "Shipped";
+        } else {
+            nextStatus = status;
+        }
+
+        const set = {
+            "items.$.tracking_info.updated_at": new Date(),
+        };
+        if (fulfillment !== undefined) set["items.$.tracking_info.fulfillment"] = fulfillment;
+        if (tracking !== undefined) set["items.$.tracking_info.tracking"] = tracking;
+        if (note !== undefined) set["items.$.tracking_info.note"] = note;
+        if (nextStatus !== undefined) set["items.$.tracking_info.status"] = nextStatus;
+
+        const updated = await EtsyOrder.findOneAndUpdate(
+            { orderId, "items.transactionId": transactionId },
+            { $set: set },
+            { new: true }
+        ).lean();
+
+        if (!updated) {
+            return res.status(404).json({
+                ok: false,
+                message: "Etsy order or item not found",
+                orderId,
+                transactionId,
+            });
+        }
+
+        const orderStatus = computeEtsyOrderStatusFromItems(updated.items || []);
+        if (orderStatus !== updated.status) {
+            await EtsyOrder.updateOne({ _id: updated._id }, { $set: { status: orderStatus } });
+            updated.status = orderStatus;
+        }
+
+        const item = (updated.items || []).find((entry) => String(entry.transactionId) === transactionId);
+
+        return res.json({
+            ok: true,
+            orderId: updated.orderId,
+            shopId: String(updated.shopId || ""),
+            transactionId,
+            orderStatus: updated.status,
+            tracking_info: item?.tracking_info || {},
+            applied: {
+                fulfillment,
+                tracking,
+                status: nextStatus,
+                note,
+            },
+        });
+    } catch (err) {
+        console.error("updateEtsyOrderItemTracking error:", err);
+        return res.status(500).json({ ok: false, message: "Internal Server Error", error: err.message });
+    }
+};
+
 module.exports = {
     importOrders,
     getListOrders,
@@ -1630,4 +1736,5 @@ module.exports = {
     getEtsyOrderStatistics,
     createOrder,
     updateSumbittedoetsyStatus,
+    updateEtsyOrderItemTracking,
 };
