@@ -1657,7 +1657,7 @@ const etsyUploadTrackingBatch = async (req, res) => {
     shopId,
     machineId,
     label: "Upload Etsy Tracking Batch",
-    action: "batch",
+    action: "click",
     level: "info",
     message: `Start Etsy upload tracking batch: created=${created}, skipped=${skipped}, failed=${failed}`,
     ts: new Date(),
