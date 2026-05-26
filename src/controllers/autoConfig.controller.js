@@ -111,8 +111,8 @@ const getAll = async (req, res) => {
 // Thêm mới
 const create = async (req, res) => {
   try {
-    const { type, status, time, shopId, shopName, describe } = req.body;
-    const config = await AutoConfig.create({ type, status, time, shopId, shopName, describe });
+    const { type, status, time, shopId, shopName, shopType, describe } = req.body;
+    const config = await AutoConfig.create({ type, status, time, shopId, shopName, shopType, describe });
     res.status(201).json({ success: true, data: config });
   } catch (err) {
     res.status(400).json({ success: false, message: err.message });
