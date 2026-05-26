@@ -23,6 +23,10 @@ const autoConfigSchema = new mongoose.Schema(
       type: String,
       required: true,
     },
+    shopType: {
+      type: String,
+      default: "",
+    },
     describe: {
       type: String,
       default: "",
