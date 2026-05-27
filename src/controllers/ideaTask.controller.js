@@ -389,15 +389,16 @@ const uploadPsd = async (req, res) => {
       const task = await IdeaTask.findById(req.params.id);
       if (!task) return res.status(404).json({ message: "Not found" });
 
-      // RBAC: Admin/DL hoặc Designer được assign
+      // RBAC: Admin/DL hoặc Designer/Customer Service được assign
       const me = String(req.user?.userId || "");
       const r = req.user?.role;
       const isDesigner = hasRole(r, "Designer");
       const isAdmin = hasRole(r, "Admin");
       const isDL = hasRole(r, "Design Leader");
+      const isCS = hasRole(r, "Customer Service");
       const isAssignee = task.assignedTo?.toString?.() === me;
 
-      if (!(isAdmin || isDL || (isDesigner && isAssignee))) {
+      if (!(isAdmin || isDL || ((isDesigner || isCS) && isAssignee))) {
         return res.status(403).json({ message: "Access denied" });
       }
 
