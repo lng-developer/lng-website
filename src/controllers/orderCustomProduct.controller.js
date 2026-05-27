@@ -4253,7 +4253,7 @@ const computeBaseCostForMany = async (req, res) => {
 function computeOrderStatusFromItems(items = []) {
   const itemStatuses = items.map((i) => norm(i?.tracking_info?.status));
   const active = itemStatuses.filter((s) => !isCanceledStatus(s));
-  if (active.length === 0) return "Canceled";
+  if (active.length === 0) return "Cancelled";
   if (active.every((s) => s === "Shipped")) return "Shipped";
   const hasNew = active.includes("New");
   const hasShipping = active.includes("Shipping");
@@ -4326,7 +4326,7 @@ const updateItemTracking = async (req, res) => {
     // 3) Còn lại -> dùng status được truyền (nếu có)
     let nextStatus;
     if (isCanceledStatus(tStatus)) {
-      nextStatus = "Canceled";
+      nextStatus = "Cancelled";
     } else if (tTracking !== undefined && tTracking.length > 0) {
       nextStatus = "Shipped";
     } else {
@@ -4366,7 +4366,7 @@ const updateItemTracking = async (req, res) => {
         // Item hoàn tất scale, order coi như đã gửi
         $set["items.$[].scale_status"] = "Complete";
         $set["scale_overall_status"] = "Sent";
-      } else if (nextStatus === "Canceled") {
+      } else if (nextStatus === "Cancelled") {
         // Scale item dùng "Failed" để bám bộ trạng thái sẵn có
         $set["items.$[].scale_status"] = "Failed";
         $set["scale_overall_status"] = "Cancelled";
@@ -4423,13 +4423,13 @@ const updateItemTracking = async (req, res) => {
     const responseScaleOverall =
       nextStatus === "Fulfilled" || nextStatus === "Shipped"
         ? "Sent"
-        : nextStatus === "Canceled"
+        : nextStatus === "Cancelled"
           ? "Cancelled"
           : docAfterAllUpdate.scale_overall_status;
 
     return res.json({
       message:
-        "Tracking updated for ALL items (priority: Canceled > auto-Ship on tracking). Item & order statuses synced.",
+        "Tracking updated for ALL items (priority: Cancelled > auto-Ship on tracking). Item & order statuses synced.",
       orderId: docAfterAllUpdate.orderId,
       orderStatus: newOrderStatus,
       scale_overall_status: responseScaleOverall,
