@@ -29,6 +29,12 @@ const EtsyOrderItemEmbeddedSchema = new Schema(
             note: { type: String },
             updated_at: { type: Date },
         },
+
+        manual_vendor_cost_center_id: {
+            type: Schema.Types.ObjectId,
+            ref: "VendorCostCenter",
+            default: null,
+        },
     },
     { _id: false }
 );
@@ -124,6 +130,12 @@ const EtsyOrderSchema = new Schema(
         base_cost: { type: Number, default: 0 },
         base_cost_computed_at: { type: Date, default: null },
         base_cost_shipping_groups: { type: Schema.Types.Mixed, default: [] },
+
+        forced_vendor_id: {
+            type: Schema.Types.ObjectId,
+            ref: "Vendor",
+            default: null,
+        },
 
         numberOfItems: { type: Number, default: 0 },
         sumbittedoetsy: { type: Boolean, default: false },

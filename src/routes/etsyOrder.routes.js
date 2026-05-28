@@ -5,6 +5,8 @@ const path = require('path');
 const fs = require('fs');
 
 const { etsyOrderController } = require("../controllers");
+const orderCustomProductController = require("../controllers/orderCustomProduct.controller");
+const { authenticateToken } = require("../middlewares/auth.middleware");
 
 const uploadDir = path.join(process.cwd(), 'tmp_uploads');
 if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir, { recursive: true });
@@ -22,6 +24,7 @@ const upload = multer({ storage });
 router.post('/import', upload.array('files', 2), etsyOrderController.importOrders);
 router.get('/statistic', etsyOrderController.getEtsyOrderStatistics);
 router.patch('/sumbittedoetsy', etsyOrderController.updateSumbittedoetsyStatus);
+router.put('/manual-mapping', authenticateToken, orderCustomProductController.applyManualVendorMapping);
 router.patch('/:orderId/items/:transactionId/tracking', etsyOrderController.updateEtsyOrderItemTracking);
 router.put('/:orderId/items/:transactionId/tracking', etsyOrderController.updateEtsyOrderItemTracking);
 router.get('/', etsyOrderController.getListOrders);
