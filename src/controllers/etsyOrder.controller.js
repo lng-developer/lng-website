@@ -862,6 +862,30 @@ async function calculateEtsyCost(order) {
         const configCode = parseConfigCodeFromSKU(usedSku);
         if (!configCode) { stagedItems.push({ transactionId: itemId, sku: originalSku, mapped_sku: mappedSku, used_sku: usedSku, status: "failed", reason: "Cannot parse config code" }); continue; }
 
+        if (item.manual_vendor_cost_center_id) {
+            const vcc = await VendorCostCenter.findById(item.manual_vendor_cost_center_id).lean();
+            if (vcc && Number(vcc.base_cost || 0) > 0) {
+                const vId = await cachedVendorId(vcc.vendor_product);
+                preItems.push({
+                    item,
+                    itemId,
+                    sku: originalSku,
+                    mapped_sku: mappedSku,
+                    used_sku: usedSku,
+                    configCode,
+                    productTypeValue: null,
+                    matchedBy: "manual",
+                    sizeValue: vcc.vendor_size,
+                    colorValue: vcc.vendor_color,
+                    manualVcc: vcc,
+                    vendorId: vId,
+                });
+                candidateSetsPerItem.push(new Set(vId ? [vId] : []));
+                continue;
+            }
+            console.warn(`[calculateEtsyCost] Manual VCC ${item.manual_vendor_cost_center_id} not found or has 0 cost. Falling back to auto.`);
+        }
+
         const labelValueMap = extractLabelValueMapFromEtsyItem(item);
         const { cfg, productTypeValue, matchedBy, reason: cfgReason } = await cachedSelectConfig(configCode, labelValueMap);
 
@@ -897,11 +921,16 @@ async function calculateEtsyCost(order) {
         candidateSetsPerItem.push(vendorSet);
     }
 
-    let preferredVendorId = null;
+    let preferredVendorId = order.forced_vendor_id ? String(order.forced_vendor_id) : null;
     if (preItems.length >= 2) {
         const vendorRank = new Map();
-        for (const pre of preItems) { for (const it of toArray(pre.pfItems)) { const vpId = it?.vendor_product; if (!vpId) continue; const vId = String(it?.vendor_id || it?.vendor?._id || (await cachedVendorId(vpId)) || ""); if (!vId) continue; vendorRank.set(vId, Math.min(vendorRank.get(vId) ?? 999, it.order ?? 999)); } }
-        preferredVendorId = choosePreferredVendorIdStable(candidateSetsPerItem, vendorRank) || null;
+        for (const pre of preItems) {
+            if (pre.manualVcc) continue;
+            for (const it of toArray(pre.pfItems)) { const vpId = it?.vendor_product; if (!vpId) continue; const vId = String(it?.vendor_id || it?.vendor?._id || (await cachedVendorId(vpId)) || ""); if (!vId) continue; vendorRank.set(vId, Math.min(vendorRank.get(vId) ?? 999, it.order ?? 999)); }
+        }
+        if (!preferredVendorId) {
+            preferredVendorId = choosePreferredVendorIdStable(candidateSetsPerItem, vendorRank) || null;
+        }
     }
 
     // ===== PASS 2: Detailed calculation =====
@@ -911,6 +940,17 @@ async function calculateEtsyCost(order) {
         const { pfItems } = pre;
 
         const vendorSelection = await (async () => {
+            if (pre.manualVcc) {
+                return {
+                    success: true,
+                    vendorProductId: pre.manualVcc.vendor_product,
+                    matched: pre.manualVcc,
+                    selectedOrder: -1,
+                    itemDisplayName: "Manual Selection",
+                    vendorId: pre.vendorId,
+                };
+            }
+
             const byOrder = (a, b) => (a.order || 999) - (b.order || 999);
             const actives = pfItems.filter((it) => String(it.status || "").toLowerCase() === "active").sort(byOrder);
             let itemsToCheck = actives.length ? actives : [...pfItems].sort(byOrder);
@@ -949,7 +989,7 @@ async function calculateEtsyCost(order) {
         if (["EBM", "EBMA"].includes(configCode.toUpperCase())) additionalCosts.embroidery = Number(matched?.additional_costs?.embroidery || 0);
         const totalAdditionalCost = additionalCosts.embroidery + additionalCosts.two_sided_print + additionalCosts.two_position_print;
 
-        const rec = { transactionId: itemId, sku, used_sku: sku, configCode, productTypeValue: productTypeValue || null, selectedConfigBy: matchedBy || "unknown", sizeValue, colorValue, vendorProductId, vendorId, selectedOrder, itemDisplayName, baseEach, qty, eco: rate.eco, add: rate.add, shipProfile: rate.profile, matchedSku: matched?.sku || null, additionalCosts, totalAdditionalCost, status: "ok" };
+        const rec = { transactionId: itemId, sku, mapped_sku, used_sku, configCode, productTypeValue: productTypeValue || null, selectedConfigBy: matchedBy || "unknown", sizeValue, colorValue, vendorProductId, vendorId, selectedOrder, itemDisplayName, baseEach, qty, eco: rate.eco, add: rate.add, shipProfile: rate.profile, matchedSku: matched?.sku || null, additionalCosts, totalAdditionalCost, status: "ok" };
         stagedItems.push(rec);
         const key = `${vendorId}::profile=${rate.profile}::eco=${rate.eco}::add=${rate.add}`;
         const g = groups.get(key) || { vendorId, shipProfile: rate.profile, items: [], economyMax: 0 };

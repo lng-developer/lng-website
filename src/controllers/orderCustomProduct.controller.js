@@ -1,5 +1,6 @@
 const db = require("../models");
 const OrderCustomProduct = db.orderCustomProduct;
+const EtsyOrder = db.EtsyOrder;
 const multer = require("multer");
 const fs = require("fs");
 const XLSX = require("xlsx");
@@ -4721,7 +4722,98 @@ const applyManualVendorMapping = async (req, res) => {
     if (!orderId) return res.status(400).json({ message: "orderId is required" });
 
     const order = await OrderCustomProduct.findOne({ orderId });
-    if (!order) return res.status(404).json({ message: "Order not found" });
+    if (!order) {
+      const etsyOrder = await EtsyOrder.findOne({ orderId });
+      if (!etsyOrder) return res.status(404).json({ message: "Order not found" });
+
+      const changes = [];
+      const oldForcedVendorId = etsyOrder.forced_vendor_id
+        ? String(etsyOrder.forced_vendor_id)
+        : null;
+
+      if (forcedVendorId !== undefined) {
+        const nextForcedVendorId = forcedVendorId || null;
+        const nextForcedVendorIdStr = nextForcedVendorId
+          ? String(nextForcedVendorId)
+          : null;
+
+        if (oldForcedVendorId !== nextForcedVendorIdStr) {
+          changes.push({
+            field: "forced_vendor_id",
+            from: oldForcedVendorId,
+            to: nextForcedVendorIdStr,
+          });
+        }
+
+        etsyOrder.forced_vendor_id = nextForcedVendorId;
+      }
+
+      if (Array.isArray(items)) {
+        for (const override of items) {
+          const overrideItemId = override.transactionId || override.orderItemId;
+          const item = etsyOrder.items.find(
+            (i) => String(i.transactionId) === String(overrideItemId)
+          );
+          if (item) {
+            const oldManualVendorCostCenterId = item.manual_vendor_cost_center_id
+              ? String(item.manual_vendor_cost_center_id)
+              : null;
+            const nextManualVendorCostCenterId = override.vendorCostCenterId || null;
+            const nextManualVendorCostCenterIdStr = nextManualVendorCostCenterId
+              ? String(nextManualVendorCostCenterId)
+              : null;
+
+            if (oldManualVendorCostCenterId !== nextManualVendorCostCenterIdStr) {
+              changes.push({
+                field: `items[transactionId=${item.transactionId}].manual_vendor_cost_center_id`,
+                from: oldManualVendorCostCenterId,
+                to: nextManualVendorCostCenterIdStr,
+              });
+            }
+
+            item.manual_vendor_cost_center_id = nextManualVendorCostCenterId;
+
+            if (!override.vendorCostCenterId) {
+              item.cost_breakdown = null;
+            }
+          }
+        }
+      }
+
+      await etsyOrder.save();
+
+      if (changes.length > 0) {
+        await logOrderHistory({
+          orderDoc: etsyOrder,
+          action: "UPDATE_MANUAL_VENDOR_MAPPING",
+          description: "Manual vendor mapping updated for Etsy order",
+          changes,
+          user: req.user,
+          context: {
+            source: "PORTAL",
+            ip: req.ip,
+            userAgent: req.headers["user-agent"],
+          },
+        });
+      }
+
+      let computedResult = null;
+      const { computeBaseCostForEtsyOrder } = require("./etsyOrder.controller");
+      const mockReq = { body: { orderId } };
+      const mockRes = {
+        status: function () { return this; },
+        json: function (data) { computedResult = data; return this; }
+      };
+
+      await computeBaseCostForEtsyOrder(mockReq, mockRes);
+
+      return res.json({
+        message: "Manual mapping applied successfully",
+        platform: "etsy",
+        orderId,
+        computed_info: computedResult
+      });
+    }
 
     const changes = [];
     const oldForcedVendorId = order.forced_vendor_id
