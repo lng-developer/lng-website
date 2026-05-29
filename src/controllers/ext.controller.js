@@ -3,6 +3,7 @@ const Shop = db.shop;
 const RealtimeLog = db.RealtimeLog;
 const ExtensionTask = db.ExtensionTask || require("../models/extensionTask.model");
 const OrderCustomProduct = db.orderCustomProduct;
+const EtsyOrder = db.EtsyOrder;
 const taskStatusService = require("../service/taskStatus.service");
 const { emitTaskToMachine, buildTaskId } = require("../lib/taskEmitter");
 
@@ -330,6 +331,31 @@ function groupItemsByVendorWithMap(doc, vpidToVendor) {
     groups[key].itemIndexes.push(i);
   }
   return groups;
+}
+
+function getVendorFulfillmentName(vendorKey) {
+  return (
+    {
+      beeful: "Beeful",
+      merchfox: "MerchFox",
+      merchize: "Merchize",
+      printway: "Printway",
+      mangotee: "MangoTee",
+      ss88: "SS88",
+      luxurypro: "LuxuryPro",
+    }[vendorKey] || ""
+  );
+}
+
+async function fetchTrackingByVendorKey(vendorKey, orderId, doc) {
+  if (vendorKey === "beeful") return fetchBeeful(orderId);
+  if (vendorKey === "merchfox") return fetchMerchFox(orderId);
+  if (vendorKey === "merchize") return fetchMerchize(orderId);
+  if (vendorKey === "printway") return fetchPrintway(orderId, doc);
+  if (vendorKey === "mangotee") return fetchMangoTee(orderId);
+  if (vendorKey === "ss88") return fetchSS88(orderId);
+  if (vendorKey === "luxurypro") return fetchLuxuryPro(orderId);
+  throw new Error(`Unsupported vendor: ${vendorKey}`);
 }
 
 // ====== VENDOR FETCHERS ======
@@ -1044,6 +1070,197 @@ async function runBatch({ max = 1100, dryRun = false } = {}) {
   return { ok, fail, scanned: filtered.length };
 }
 
+function buildTrackingNote(prevNote, carrier) {
+  const normalizedCarrier = norm(carrier);
+  if (!normalizedCarrier) return norm(prevNote);
+
+  const carrierNote = `carrier:${normalizedCarrier}`;
+  const parts = norm(prevNote)
+    .split("|")
+    .map((part) => norm(part))
+    .filter(Boolean);
+
+  if (!parts.includes(carrierNote)) parts.push(carrierNote);
+  return parts.join(" | ");
+}
+
+function applyToEtsyItemsOfVendor(doc, vendorKey, { tracking, carrier, shipped }) {
+  let changed = 0;
+  const fulfillment = getVendorFulfillmentName(vendorKey);
+
+  doc.items = (doc.items || []).map((it) => {
+    const vpid = it?.cost_breakdown?.vendorProductId;
+    const cached = vpid ? doc.__vpidToVendor?.get(String(vpid)) : null;
+    const thisVendorKey = cached?.vendorKey || "";
+
+    if (thisVendorKey !== vendorKey) {
+      return it.toObject?.() ? it.toObject() : it;
+    }
+
+    const ti = it.tracking_info || {};
+    const prevTracking = norm(ti.tracking);
+    const prevStatus = norm(ti.status);
+    const nextTI = {
+      ...ti,
+      fulfillment: fulfillment || norm(ti.fulfillment),
+      tracking: tracking || prevTracking,
+      status: shipped ? "Shipped" : prevStatus || "New",
+      updated_at: new Date(),
+      note: buildTrackingNote(ti.note, carrier),
+    };
+
+    if (
+      nextTI.tracking !== prevTracking ||
+      nextTI.status !== prevStatus ||
+      nextTI.fulfillment !== ti.fulfillment ||
+      nextTI.note !== ti.note
+    ) {
+      changed++;
+    }
+
+    return { ...(it.toObject?.() ? it.toObject() : it), tracking_info: nextTI };
+  });
+
+  return changed;
+}
+
+async function updateEtsyOrderByVendors(orderId, options = {}) {
+  const trimmedOrderId = norm(orderId);
+  const query = { orderId: trimmedOrderId };
+  if (options.shopId) query.shopId = options.shopId;
+
+  const doc = await EtsyOrder.findOne(query);
+  if (!doc) {
+    throw new Error(
+      `Etsy order not found in DB: ${trimmedOrderId}${options.shopId ? ` shopId=${options.shopId}` : ""}`
+    );
+  }
+
+  const vpidSet = new Set();
+  for (const it of doc.items || []) {
+    const vpid = it?.cost_breakdown?.vendorProductId;
+    if (vpid) vpidSet.add(String(vpid));
+  }
+
+  const vpidToVendor =
+    options.vpidToVendorPrefetched || (await buildVendorMapsFromVpidSet(vpidSet));
+  doc.__vpidToVendor = vpidToVendor;
+
+  const knownKeys = new Set(["beeful", "merchfox", "merchize", "printway", "mangotee", "ss88", "luxurypro"]);
+  const groups = groupItemsByVendorWithMap(doc, vpidToVendor);
+  const vendorKeys = Object.keys(groups).filter((k) => knownKeys.has(k));
+
+  if (vendorKeys.length === 0) {
+    throw new Error(
+      `No known vendor mapping from etsyorders.items.cost_breakdown.vendorProductId for ${trimmedOrderId}`
+    );
+  }
+
+  let totalChanged = 0;
+  const vendorResults = [];
+
+  for (const vk of vendorKeys) {
+    try {
+      const result = await fetchTrackingByVendorKey(vk, trimmedOrderId, doc);
+      const changed = applyToEtsyItemsOfVendor(doc, vk, result);
+      totalChanged += changed;
+      vendorResults.push({
+        vendorKey: vk,
+        ok: true,
+        changed,
+        tracking: result.tracking || "",
+        carrier: result.carrier || "",
+        shipped: !!result.shipped,
+      });
+    } catch (e) {
+      vendorResults.push({ vendorKey: vk, ok: false, message: e.message });
+      console.error(`[ETSY VENDOR FAIL][${vk}] ${trimmedOrderId}:`, e.message);
+    }
+  }
+
+  const allShipped =
+    (doc.items || []).length > 0 &&
+    (doc.items || []).every((it) => lower(it?.tracking_info?.status) === "shipped");
+  let orderStatusChanged = false;
+  if (allShipped && doc.status !== "Shipped") {
+    doc.status = "Shipped";
+    doc.shippedAt = doc.shippedAt || new Date();
+    orderStatusChanged = true;
+  }
+
+  await doc.save();
+  return {
+    updatedItems: totalChanged,
+    orderStatusChanged,
+    vendorResults,
+  };
+}
+
+async function runEtsyVendorBatch({ max = 1100, dryRun = false, shopId = null, status = "Fulfilled" } = {}) {
+  const query = {
+    "items.cost_breakdown.vendorProductId": { $exists: true, $ne: null },
+  };
+  if (status) query.status = status;
+  if (shopId) query.shopId = shopId;
+
+  const candidates = await EtsyOrder.find(query)
+    .sort({ createdAt: -1 })
+    .limit(max)
+    .lean();
+
+  const vpidSet = new Set();
+  for (const o of candidates) {
+    for (const it of o.items || []) {
+      const vpid = it?.cost_breakdown?.vendorProductId;
+      if (vpid) vpidSet.add(String(vpid));
+    }
+  }
+
+  const vpidToVendor = await buildVendorMapsFromVpidSet(vpidSet);
+  const knownKeys = new Set(["beeful", "merchfox", "merchize", "printway", "mangotee", "ss88", "luxurypro"]);
+  const filtered = candidates.filter((o) => {
+    const groups = groupItemsByVendorWithMap(o, vpidToVendor);
+    return Object.keys(groups).some((k) => knownKeys.has(k));
+  });
+
+  if (dryRun) {
+    return {
+      ok: true,
+      mode: "dry-run",
+      scanned: filtered.length,
+      orderIds: filtered.map((o) => o.orderId),
+      vendorsPerOrder: filtered.map((o) => {
+        const g = groupItemsByVendorWithMap(o, vpidToVendor);
+        return {
+          orderId: o.orderId,
+          shopId: String(o.shopId || ""),
+          vendorKeys: Object.keys(g).filter((k) => knownKeys.has(k)),
+        };
+      }),
+    };
+  }
+
+  let ok = 0;
+  let fail = 0;
+  const details = [];
+
+  for (const o of filtered) {
+    try {
+      const result = await updateEtsyOrderByVendors(o.orderId, {
+        shopId: o.shopId,
+        vpidToVendorPrefetched: vpidToVendor,
+      });
+      ok++;
+      details.push({ orderId: o.orderId, shopId: String(o.shopId || ""), ok: true, ...result });
+    } catch (err) {
+      fail++;
+      details.push({ orderId: o.orderId, shopId: String(o.shopId || ""), ok: false, message: err.message });
+    }
+  }
+
+  return { ok, fail, scanned: filtered.length, details };
+}
+
 // ====== API HANDLERS CHO VENDOR SYNC ======
 
 /**
@@ -1111,6 +1328,81 @@ const vendorSyncBatch = async (req, res) => {
     const result = await runBatch({
       max: Number(max) || 100,
       dryRun: Boolean(dryRun),
+    });
+    return res.json({ ok: true, processedOrders: result.scanned, ...result });
+  } catch (e) {
+    return res.status(500).json({ ok: false, message: e.message });
+  }
+};
+
+/**
+ * POST /api/ext/etsy/vendor-sync/one
+ * body: { orderId: "xxx", shopId?: "..." }
+ */
+const etsyVendorSyncOne = async (req, res) => {
+  try {
+    const { orderId, shopId } = req.body || {};
+    if (!orderId) {
+      return res.status(400).json({ ok: false, message: "orderId required" });
+    }
+
+    const result = await updateEtsyOrderByVendors(orderId, { shopId });
+    return res.json({ ok: true, orderId, ...(shopId ? { shopId } : {}), ...result });
+  } catch (e) {
+    return res.status(500).json({ ok: false, message: e.message });
+  }
+};
+
+/**
+ * POST /api/ext/etsy/vendor-sync/list
+ * body: { orderIds: ["...", "..."], shopId?: "..." }
+ */
+const etsyVendorSyncList = async (req, res) => {
+  try {
+    const { orderIds = [], shopId } = req.body || {};
+    if (!Array.isArray(orderIds) || !orderIds.length) {
+      return res
+        .status(400)
+        .json({ ok: false, message: "orderIds[] required" });
+    }
+
+    let ok = 0;
+    let fail = 0;
+    const details = [];
+
+    for (const id of orderIds) {
+      try {
+        const r = await updateEtsyOrderByVendors(id, { shopId });
+        details.push({ orderId: id, ...(shopId ? { shopId } : {}), ok: true, ...r });
+        ok++;
+      } catch (err) {
+        details.push({ orderId: id, ...(shopId ? { shopId } : {}), ok: false, message: err.message });
+        fail++;
+      }
+    }
+
+    return res.json({
+      ok: true,
+      summary: { ok, fail, scanned: orderIds.length },
+      details,
+    });
+  } catch (e) {
+    return res.status(500).json({ ok: false, message: e.message });
+  }
+};
+
+/**
+ * POST /api/ext/etsy/vendor-sync/batch
+ * body: { max?: number, dryRun?: boolean, shopId?: string, status?: string }
+ */
+const etsyVendorSyncBatch = async (req, res) => {
+  try {
+    const { max = 1100, dryRun = false, shopId = null, status = "Fulfilled" } = req.body || {};
+    const result = await runEtsyVendorBatch({
+      max: Number(max) || 100,
+      dryRun: isForceTrue(dryRun),
+      shopId,
+      status,
     });
     return res.json({ ok: true, processedOrders: result.scanned, ...result });
   } catch (e) {
@@ -1878,11 +2170,16 @@ module.exports = {
   vendorSyncOne,
   vendorSyncList,
   vendorSyncBatch,
+  etsyVendorSyncOne,
+  etsyVendorSyncList,
+  etsyVendorSyncBatch,
 
   // auto request extension
   autoRequestExtensionAll,
 
   // nếu cần dùng nội bộ
   updateOrderByVendors,
+  updateEtsyOrderByVendors,
   runBatch,
+  runEtsyVendorBatch,
 };

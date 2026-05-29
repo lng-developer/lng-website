@@ -48,4 +48,18 @@ router.post("/vendor-sync/list", extController.vendorSyncList);
 // body: { max?: number, dryRun?: boolean }
 router.post("/vendor-sync/batch", extController.vendorSyncBatch);
 
+// ================= ETSY VENDOR SYNC TRACKING =================
+
+// Sync tracking Etsy cho 1 order
+// body: { orderId: "xxx", shopId?: "..." }
+router.post("/etsy/vendor-sync/one", extController.etsyVendorSyncOne);
+
+// Sync tracking Etsy cho list order
+// body: { orderIds: ["xxx", "yyy"], shopId?: "..." }
+router.post("/etsy/vendor-sync/list", extController.etsyVendorSyncList);
+
+// Chay batch sync tracking Etsy tu collection etsyorders
+// body: { max?: number, dryRun?: boolean, shopId?: string, status?: string }
+router.post("/etsy/vendor-sync/batch", extController.etsyVendorSyncBatch);
+
 module.exports = router;
