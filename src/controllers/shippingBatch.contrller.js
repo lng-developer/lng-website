@@ -516,6 +516,10 @@ function buildCompletedShippingFile(completed, options = {}) {
       finalShipMethod = "YunExpress Global Direct line (standard )-Tracked";
     }
 
+    if (tracking.startsWith("TBA")) {
+      finalCarrierCode = "Amazon Shipping";
+      finalShipMethod = "Standard Shipping";
+    }
 
     content += [
       orderId,
@@ -2002,9 +2006,9 @@ const _calcStats = (orders, filteredCount) => {
 
 async function checkOrdersStatusRealTime(machineId, options) {
   const { limit, fromDate, toDate, status, filterType } = options;
-  
+
   console.log(`⚡ [REAL_TIME] Using real-time query for shop: ${machineId}`);
-  
+
   // Logic gốc của checkOrdersStatus
   const orderFilter = {
     status: { $in: Array.isArray(status) ? status : [status] },
