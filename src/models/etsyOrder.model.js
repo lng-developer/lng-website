@@ -30,6 +30,21 @@ const EtsyOrderItemEmbeddedSchema = new Schema(
             updated_at: { type: Date },
         },
 
+        fulfillment_file: {
+            type: Map,
+            of: String,
+            default: {},
+        },
+
+        scale_status: {
+            type: String,
+            enum: ["Need Scale", "Pending", "Complete", "QC Rejected", "Cancelled"],
+            default: "Need Scale",
+        },
+
+        qc_note: { type: String, trim: true, default: "" },
+        cs_note: { type: String, trim: true, default: "" },
+
         manual_vendor_cost_center_id: {
             type: Schema.Types.ObjectId,
             ref: "VendorCostCenter",
@@ -130,6 +145,52 @@ const EtsyOrderSchema = new Schema(
         base_cost: { type: Number, default: 0 },
         base_cost_computed_at: { type: Date, default: null },
         base_cost_shipping_groups: { type: Schema.Types.Mixed, default: [] },
+
+        scale_overall_status: {
+            type: String,
+            enum: [
+                "Need Scale",
+                "Pending",
+                "Ready",
+                "Sent",
+                "Failed",
+                "QC Rejected",
+                "Cancelled",
+                "Address Invalid",
+            ],
+            default: "Need Scale",
+            index: true,
+        },
+
+        scaleId: {
+            type: Schema.Types.ObjectId,
+            ref: "User",
+            default: null,
+        },
+
+        csAssigneeId: {
+            type: Schema.Types.ObjectId,
+            ref: "User",
+            default: null,
+        },
+
+        csAssignedBy: {
+            type: Schema.Types.ObjectId,
+            ref: "User",
+            default: null,
+        },
+
+        csAssignedAt: {
+            type: Date,
+            default: null,
+        },
+
+        cs_assignment_status: {
+            type: String,
+            enum: ["Unassigned", "Assigned", "In Progress", "Done"],
+            default: "Unassigned",
+            index: true,
+        },
 
         forced_vendor_id: {
             type: Schema.Types.ObjectId,
