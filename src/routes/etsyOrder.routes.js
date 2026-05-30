@@ -6,7 +6,7 @@ const fs = require('fs');
 
 const { etsyOrderController } = require("../controllers");
 const orderCustomProductController = require("../controllers/orderCustomProduct.controller");
-const { authenticateToken } = require("../middlewares/auth.middleware");
+const { authenticateToken, authorizeRoles } = require("../middlewares/auth.middleware");
 
 const uploadDir = path.join(process.cwd(), 'tmp_uploads');
 if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir, { recursive: true });
@@ -64,6 +64,18 @@ router.put(
     '/:orderId/items/:transactionId/qc-note',
     authenticateToken,
     etsyOrderController.updateEtsyQCNoteForItem
+);
+router.put(
+    '/:orderId/assign-cs',
+    authenticateToken,
+    authorizeRoles("Admin", "Design Leader", "Designer"),
+    etsyOrderController.assignEtsyOrderToCS
+);
+router.put(
+    '/:orderId/unassign-cs',
+    authenticateToken,
+    authorizeRoles("Admin", "Design Leader", "Designer"),
+    etsyOrderController.unassignEtsyOrderFromCS
 );
 router.patch('/:orderId/items/:transactionId/tracking', etsyOrderController.updateEtsyOrderItemTracking);
 router.put('/:orderId/items/:transactionId/tracking', etsyOrderController.updateEtsyOrderItemTracking);

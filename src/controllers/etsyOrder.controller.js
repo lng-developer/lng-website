@@ -3,6 +3,7 @@ const mongoose = require('mongoose');
 const EtsyOrder = db.EtsyOrder;
 const EtsyListing = require('../models/etsyListing.model');
 const User = db.user;
+const Role = db.role;
 const Store = db.shop;
 
 const fs = require('fs');
@@ -2340,6 +2341,116 @@ const updateEtsyItemNote = (field) => async (req, res) => {
 const updateEtsyQCNoteForItem = updateEtsyItemNote("qc_note");
 const updateEtsyCSNoteForItem = updateEtsyItemNote("cs_note");
 
+const assignEtsyOrderToCS = async (req, res) => {
+    try {
+        const { orderId } = req.params;
+        const { csUserId } = req.body || {};
+        const assignedBy = req.user?.userId || req.user?.id || req.user?._id || null;
+
+        if (!mongoose.Types.ObjectId.isValid(csUserId)) {
+            return res.status(400).json({ message: "Invalid csUserId" });
+        }
+
+        const order = await EtsyOrder.findOne(buildEtsyOrderLookup(req));
+        if (!order) {
+            return res.status(404).json({ message: "Etsy order not found" });
+        }
+
+        const csUser = await User.findById(csUserId)
+            .select("_id full_name email role_id")
+            .lean();
+
+        if (!csUser) {
+            return res.status(404).json({ message: "CS user not found" });
+        }
+
+        if (!csUser.role_id || !mongoose.Types.ObjectId.isValid(csUser.role_id)) {
+            return res.status(400).json({ message: "User does not have a valid role_id" });
+        }
+
+        const role = await Role.findById(csUser.role_id).select("name").lean();
+        const roleName = String(role?.name || "").trim().toLowerCase();
+        const allowedRoleNames = new Set([
+            "customer service",
+            "designer",
+            "design leader",
+        ]);
+
+        if (!allowedRoleNames.has(roleName)) {
+            return res.status(400).json({
+                message: "Selected user must be Customer Service, Designer, or Design Leader",
+                debug: {
+                    userId: csUser._id,
+                    role_id: csUser.role_id,
+                    role_name: role?.name || null,
+                },
+            });
+        }
+
+        order.csAssigneeId = csUser._id;
+        order.csAssignedBy = assignedBy && mongoose.Types.ObjectId.isValid(assignedBy)
+            ? new mongoose.Types.ObjectId(assignedBy)
+            : null;
+        order.csAssignedAt = new Date();
+        order.cs_assignment_status = "Assigned";
+
+        await order.save();
+
+        return res.json({
+            message: "Assigned Etsy order to CS successfully",
+            data: {
+                orderId: order.orderId,
+                shopId: String(order.shopId || ""),
+                csAssigneeId: order.csAssigneeId,
+                csAssignedBy: order.csAssignedBy,
+                csAssignedAt: order.csAssignedAt,
+                cs_assignment_status: order.cs_assignment_status,
+                cs_assignee: {
+                    _id: csUser._id,
+                    full_name: csUser.full_name,
+                    email: csUser.email,
+                    role_name: role?.name || null,
+                },
+            },
+        });
+    } catch (err) {
+        return res.status(500).json({
+            message: "Assign Etsy order to CS failed",
+            error: err.message,
+        });
+    }
+};
+
+const unassignEtsyOrderFromCS = async (req, res) => {
+    try {
+        const order = await EtsyOrder.findOne(buildEtsyOrderLookup(req));
+        if (!order) {
+            return res.status(404).json({ message: "Etsy order not found" });
+        }
+
+        order.csAssigneeId = null;
+        order.csAssignedBy = null;
+        order.csAssignedAt = null;
+        order.cs_assignment_status = "Unassigned";
+
+        await order.save();
+
+        return res.json({
+            message: "Unassigned Etsy CS successfully",
+            data: {
+                orderId: order.orderId,
+                shopId: String(order.shopId || ""),
+                cs_assignment_status: order.cs_assignment_status,
+            },
+        });
+    } catch (err) {
+        return res.status(500).json({
+            message: "Unassign Etsy CS failed",
+            error: err.message,
+        });
+    }
+};
+
 module.exports = {
     importOrders,
     getListOrders,
@@ -2356,4 +2467,6 @@ module.exports = {
     confirmEtsyScaleForItem,
     updateEtsyQCNoteForItem,
     updateEtsyCSNoteForItem,
+    assignEtsyOrderToCS,
+    unassignEtsyOrderFromCS,
 };
