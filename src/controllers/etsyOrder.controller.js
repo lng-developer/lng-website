@@ -3,11 +3,17 @@ const mongoose = require('mongoose');
 const EtsyOrder = db.EtsyOrder;
 const EtsyListing = require('../models/etsyListing.model');
 const User = db.user;
+const Role = db.role;
 const Store = db.shop;
 
 const fs = require('fs');
+const path = require('path');
 const { parse } = require('csv-parse');
 const axios = require('axios');
+const multer = require("multer");
+const { uploadBufferToR2 } = require("../service/cloudflareR2/r2.service");
+
+const etsyScaleUpload = multer({ storage: multer.memoryStorage() });
 
 /* ================== UTIL ================== */
 
@@ -1769,6 +1775,682 @@ const updateEtsyOrderItemTracking = async (req, res) => {
     }
 };
 
+const ETSY_SCALE_KNOWN = [
+    "Need Scale",
+    "Pending",
+    "Ready",
+    "Sent",
+    "Failed",
+    "QC Rejected",
+    "Cancelled",
+    "Address Invalid",
+];
+
+const ETSY_SCALE_ACTIVE = ["Need Scale", "Pending", "Sent", "QC Rejected"];
+const ETSY_QC_ACTIVE = ["Pending", "Sent", "QC Rejected", "Ready", "Address Invalid"];
+
+const hasRole = (userRole, target) => {
+    if (!userRole) return false;
+    const normalize = (value) => String(value || "").trim().replace(/\s+/g, " ").toLowerCase();
+    const wanted = normalize(target);
+    if (Array.isArray(userRole)) return userRole.some((role) => normalize(role) === wanted);
+    if (typeof userRole === "object" && Array.isArray(userRole.roles)) {
+        return userRole.roles.some((role) => normalize(role) === wanted);
+    }
+    return normalize(userRole) === wanted;
+};
+
+const canonScaleStatus = (value) => {
+    const status = String(value || "").trim();
+    if (!status) return "";
+    if (/^complete$/i.test(status)) return "Ready";
+    if (/^qc\s*reject(?:ed)?$/i.test(status)) return "QC Rejected";
+    if (/^addr(?:ess)?\s*invalid$/i.test(status)) return "Address Invalid";
+    return status;
+};
+
+function computeEtsyOverallScaleStatus(items = []) {
+    if (!Array.isArray(items) || items.length === 0) return "Need Scale";
+    const statuses = items.map((item) => String(item?.scale_status || "Need Scale"));
+    if (statuses.some((status) => status === "QC Rejected")) return "QC Rejected";
+    if (statuses.every((status) => status === "Complete")) return "Ready";
+    if (statuses.every((status) => status === "Pending" || status === "Complete")) return "Pending";
+    return "Need Scale";
+}
+
+const toPlainFulfillmentFile = (value) => {
+    if (!value) return {};
+    if (value instanceof Map) return Object.fromEntries(value);
+    if (typeof value === "object" && !Array.isArray(value)) return value;
+    if (typeof value === "string") return { file: value };
+    return {};
+};
+
+const hasAnyFulfillmentFile = (value) => Object.values(toPlainFulfillmentFile(value)).some(Boolean);
+
+const getRequester = (req) => ({
+    userId: req.user?.userId || req.user?.id || req.user?._id || "",
+    role: req.user?.role,
+});
+
+const isSellerOnlyUser = (role) =>
+    hasRole(role, "Seller") &&
+    !(hasRole(role, "Admin") || hasRole(role, "Customer Service") || hasRole(role, "Design Leader"));
+
+const buildEtsyOrderLookup = (req) => {
+    const orderId = String(req.params.orderId || req.body?.orderId || "").trim();
+    const shopId = String(req.query.shopId || req.body?.shopId || "").trim();
+    const query = { orderId };
+    if (shopId && mongoose.Types.ObjectId.isValid(shopId)) query.shopId = new mongoose.Types.ObjectId(shopId);
+    return query;
+};
+
+const ensureSellerCanAccessEtsyOrder = (req, order) => {
+    const { userId, role } = getRequester(req);
+    if (!isSellerOnlyUser(role)) return null;
+    if (!mongoose.Types.ObjectId.isValid(userId)) return "Invalid user id in token";
+    if (String(order?.seller?.sellerId || "") !== String(userId)) {
+        return "You can only access your own Etsy orders";
+    }
+    return null;
+};
+
+const buildEtsyScalePipeline = (req, activeStatuses) => {
+    const {
+        from,
+        to,
+        scale_status,
+        search,
+        shopName,
+        cs_unassigned = "",
+        cs_assignee_id = "",
+        cs_assignment_status = "",
+        sellerId,
+    } = req.query;
+
+    const { userId, role } = getRequester(req);
+    const isSellerOnly = isSellerOnlyUser(role);
+    const isCS = hasRole(role, "Customer Service");
+
+    const matchStage = {};
+    if (from && to) matchStage.createdAt = { $gte: new Date(from), $lte: new Date(to) };
+    if (isSellerOnly && mongoose.Types.ObjectId.isValid(userId)) {
+        matchStage["seller.sellerId"] = new mongoose.Types.ObjectId(userId);
+    }
+    if (isCS && mongoose.Types.ObjectId.isValid(userId)) {
+        matchStage.csAssigneeId = new mongoose.Types.ObjectId(userId);
+    }
+
+    const pipeline = [
+        { $match: matchStage },
+        {
+            $lookup: {
+                from: "shops",
+                localField: "shopId",
+                foreignField: "_id",
+                as: "shop",
+            },
+        },
+        { $unwind: { path: "$shop", preserveNullAndEmptyArrays: true } },
+        {
+            $lookup: {
+                from: "users",
+                localField: "seller.sellerId",
+                foreignField: "_id",
+                as: "sellerUser",
+            },
+        },
+        { $unwind: { path: "$sellerUser", preserveNullAndEmptyArrays: true } },
+        {
+            $lookup: {
+                from: "users",
+                localField: "scaleId",
+                foreignField: "_id",
+                as: "scaledBy",
+            },
+        },
+        { $unwind: { path: "$scaledBy", preserveNullAndEmptyArrays: true } },
+        {
+            $lookup: {
+                from: "users",
+                localField: "csAssigneeId",
+                foreignField: "_id",
+                as: "cs_assignee",
+            },
+        },
+        { $unwind: { path: "$cs_assignee", preserveNullAndEmptyArrays: true } },
+        ...(shopName && shopName.trim()
+            ? [{ $match: { "shop.name": { $regex: new RegExp(shopName.trim(), "i") } } }]
+            : []),
+    ];
+
+    if (!isSellerOnly && sellerId && mongoose.Types.ObjectId.isValid(sellerId)) {
+        pipeline.push({ $match: { "sellerUser._id": new mongoose.Types.ObjectId(sellerId) } });
+    }
+
+    if (search && search.trim()) {
+        const keyword = new RegExp(search.trim(), "i");
+        pipeline.push({
+            $match: {
+                $or: [
+                    { orderId: keyword },
+                    { "items.sku": keyword },
+                    { "items.transactionId": keyword },
+                    { "items.itemName": keyword },
+                    { "buyer.fullName": keyword },
+                    { "buyer.display": keyword },
+                    { "shipping.name": keyword },
+                    { "sellerUser.full_name": keyword },
+                    { "sellerUser.email": keyword },
+                ],
+            },
+        });
+    }
+
+    if (String(cs_unassigned || "").toLowerCase() === "true") {
+        pipeline.push({
+            $match: {
+                $or: [
+                    { csAssigneeId: { $exists: false } },
+                    { csAssigneeId: null },
+                    { cs_assignment_status: "Unassigned" },
+                ],
+            },
+        });
+    }
+    if (cs_assignee_id && mongoose.Types.ObjectId.isValid(cs_assignee_id)) {
+        pipeline.push({ $match: { csAssigneeId: new mongoose.Types.ObjectId(cs_assignee_id) } });
+    }
+    if (cs_assignment_status && String(cs_assignment_status).trim()) {
+        pipeline.push({ $match: { cs_assignment_status: String(cs_assignment_status).trim() } });
+    }
+
+    pipeline.push({
+        $addFields: {
+            hasPendingItem: {
+                $anyElementTrue: {
+                    $map: {
+                        input: { $ifNull: ["$items", []] },
+                        as: "it",
+                        in: { $eq: [{ $ifNull: ["$$it.scale_status", "Need Scale"] }, "Pending"] },
+                    },
+                },
+            },
+            overall_status_bucket: {
+                $let: {
+                    vars: { s: { $ifNull: ["$scale_overall_status", "Need Scale"] } },
+                    in: { $cond: [{ $in: ["$$s", ETSY_SCALE_KNOWN] }, "$$s", "Other"] },
+                },
+            },
+        },
+    });
+
+    let onlyPending = false;
+    if (scale_status && String(scale_status).trim()) {
+        if (/^all$/i.test(String(scale_status).trim())) {
+            pipeline.push({ $match: { overall_status_bucket: { $in: activeStatuses } } });
+        } else {
+            const wanted = String(scale_status).split(",").map(canonScaleStatus).filter(Boolean);
+            const valid = wanted.filter((status) => ETSY_SCALE_KNOWN.includes(status));
+            pipeline.push({ $match: { overall_status_bucket: { $in: valid.length ? valid : ["__NO_MATCH__"] } } });
+            onlyPending = valid.length === 1 && valid[0] === "Pending";
+        }
+    } else {
+        pipeline.push({ $match: { overall_status_bucket: { $in: activeStatuses } } });
+    }
+
+    if (onlyPending) {
+        pipeline.push({
+            $addFields: {
+                items: {
+                    $filter: {
+                        input: { $ifNull: ["$items", []] },
+                        as: "it",
+                        cond: { $eq: [{ $ifNull: ["$$it.scale_status", "Need Scale"] }, "Pending"] },
+                    },
+                },
+            },
+        });
+        pipeline.push({ $match: { $expr: { $gt: [{ $size: { $ifNull: ["$items", []] } }, 0] } } });
+    }
+
+    return pipeline;
+};
+
+const mapEtsyScaleOrder = (order) => ({
+    orderId: order.orderId,
+    shopId: order.shopId ? String(order.shopId) : null,
+    shopName: order.shop?.name || null,
+    status: order.status || "",
+    saleDate: order.saleDate,
+    createdAt: order.createdAt,
+    shipping_type: order.shipping_type || "Standard",
+    customer_infor: {
+        email: "",
+        name: order.shipping?.name || order.buyer?.fullName || order.buyer?.display || "",
+        address: order.shipping?.address1 || "",
+        address_2: order.shipping?.address2 || "",
+        city: order.shipping?.city || "",
+        state: order.shipping?.state || "",
+        zip_code: order.shipping?.zipcode || "",
+        country: order.shipping?.country || "",
+        phone_number: "",
+    },
+    buyer: order.buyer || {},
+    shipping: order.shipping || {},
+    items: (order.items || []).map((item) => {
+        const vendorProductId = item?.cost_breakdown?.vendorProductId || null;
+        return {
+            orderItemId: item.transactionId || null,
+            transactionId: item.transactionId || null,
+            listingId: item.listingId || null,
+            sku: item.sku || "",
+            title: item.itemName || "",
+            itemName: item.itemName || "",
+            quantity: item.quantity || 1,
+            variations: item.variations || {},
+            variationsRaw: item.variationsRaw || "",
+            baseImageUrl: item.baseImage?.imageUrl || null,
+            cost_center: {
+                vendorProductId,
+                sizeValue: item?.cost_breakdown?.sizeValue || null,
+                colorValue: item?.cost_breakdown?.colorValue || null,
+                vendorProductSKU: item?.cost_breakdown?.matchedSku || null,
+            },
+            tracking_info: item.tracking_info || {},
+            fulfillment_file: toPlainFulfillmentFile(item.fulfillment_file),
+            scale_status: item.scale_status || "Need Scale",
+            qc_note: item.qc_note || "",
+            cs_note: item.cs_note || "",
+        };
+    }),
+    base_cost: order.base_cost || 0,
+    address_validation: order.address_validation?.isValid,
+    scale_overall_status: order.scale_overall_status || "Need Scale",
+    scaledBy: order.scaledBy
+        ? { _id: order.scaledBy._id, full_name: order.scaledBy.full_name, email: order.scaledBy.email }
+        : null,
+    cs_assignment_status: order.cs_assignment_status || "Unassigned",
+    csAssignedAt: order.csAssignedAt || null,
+    cs_assignee: order.cs_assignee
+        ? { _id: order.cs_assignee._id, full_name: order.cs_assignee.full_name, email: order.cs_assignee.email }
+        : null,
+    seller: order.sellerUser
+        ? { _id: order.sellerUser._id, full_name: order.sellerUser.full_name, email: order.sellerUser.email }
+        : null,
+});
+
+const getEtsyScaleList = async (req, res) => {
+    try {
+        const { page = 1, perPage = 10 } = req.query;
+        const pipeline = buildEtsyScalePipeline(req, ETSY_SCALE_ACTIVE);
+        const countResult = await EtsyOrder.aggregate([...pipeline, { $count: "total" }]);
+        const totalCount = countResult?.[0]?.total || 0;
+        const isAll = String(perPage).toLowerCase() === "all";
+        const pageNum = parseInt(page, 10) || 1;
+        const limitNum = isAll ? totalCount || 1 : parseInt(perPage, 10) || 10;
+        const skip = isAll ? 0 : (pageNum - 1) * limitNum;
+
+        pipeline.push({ $sort: { saleDate: 1, createdAt: 1 } });
+        if (!isAll) pipeline.push({ $skip: skip }, { $limit: limitNum });
+
+        const orders = await EtsyOrder.aggregate(pipeline);
+        return res.json({
+            data: orders.map(mapEtsyScaleOrder),
+            totalCount,
+            totalPages: isAll ? 1 : Math.ceil(totalCount / limitNum),
+            currentPage: pageNum,
+        });
+    } catch (err) {
+        console.error("getEtsyScaleList error:", err);
+        return res.status(500).json({ message: "Failed to retrieve Etsy scale list", error: err.message });
+    }
+};
+
+const getEtsyQCList = async (req, res) => {
+    try {
+        const { page = 1, perPage = 10 } = req.query;
+        const pipeline = buildEtsyScalePipeline(req, ETSY_QC_ACTIVE);
+        const countResult = await EtsyOrder.aggregate([...pipeline, { $count: "total" }]);
+        const totalCount = countResult?.[0]?.total || 0;
+        const isAll = String(perPage).toLowerCase() === "all";
+        const pageNum = parseInt(page, 10) || 1;
+        const limitNum = isAll ? totalCount || 1 : parseInt(perPage, 10) || 10;
+        const skip = isAll ? 0 : (pageNum - 1) * limitNum;
+
+        pipeline.push({ $sort: { createdAt: -1 } });
+        if (!isAll) pipeline.push({ $skip: skip }, { $limit: limitNum });
+
+        const orders = await EtsyOrder.aggregate(pipeline);
+        return res.json({
+            data: orders.map(mapEtsyScaleOrder),
+            totalCount,
+            totalPages: isAll ? 1 : Math.ceil(totalCount / limitNum),
+            currentPage: pageNum,
+        });
+    } catch (err) {
+        console.error("getEtsyQCList error:", err);
+        return res.status(500).json({ message: "Failed to retrieve Etsy QC list", error: err.message });
+    }
+};
+
+const getEtsyScaleStatistics = async (req, res) => {
+    try {
+        const pipeline = buildEtsyScalePipeline(req, ETSY_SCALE_ACTIVE);
+        const [raw] = await EtsyOrder.aggregate([
+            ...pipeline,
+            { $group: { _id: "$overall_status_bucket", orders: { $sum: 1 }, pending: { $sum: { $cond: ["$hasPendingItem", 1, 0] } } } },
+            { $group: { _id: null, totalOrders: { $sum: "$orders" }, byStatus: { $push: { k: "$_id", v: "$orders" } }, pendingAdj: { $sum: "$pending" } } },
+            { $project: { _id: 0, totalOrders: 1, counts: { $arrayToObject: "$byStatus" }, pendingAdj: 1 } },
+        ]);
+        const c = raw?.counts || {};
+        const counts = {
+            "Need Scale": c["Need Scale"] || 0,
+            Pending: raw?.pendingAdj || c.Pending || 0,
+            Ready: c.Ready || 0,
+            Sent: c.Sent || 0,
+            Failed: c.Failed || 0,
+            "QC Rejected": c["QC Rejected"] || 0,
+            Other: c.Other || 0,
+        };
+        counts.All = counts["Need Scale"] + counts.Pending + counts.Sent + counts["QC Rejected"];
+        return res.json({ overall: { totalOrders: raw?.totalOrders || 0, counts }, breakdown: [], timeseries: [] });
+    } catch (err) {
+        return res.status(500).json({ message: "Failed to retrieve Etsy scale statistics", error: err.message });
+    }
+};
+
+const getEtsyQCStatistics = async (req, res) => {
+    try {
+        const pipeline = buildEtsyScalePipeline(req, ETSY_QC_ACTIVE);
+        const [raw] = await EtsyOrder.aggregate([
+            ...pipeline,
+            { $group: { _id: "$overall_status_bucket", orders: { $sum: 1 } } },
+            { $group: { _id: null, totalOrders: { $sum: "$orders" }, byStatus: { $push: { k: "$_id", v: "$orders" } } } },
+            { $project: { _id: 0, totalOrders: 1, counts: { $arrayToObject: "$byStatus" } } },
+        ]);
+        const c = raw?.counts || {};
+        const counts = {
+            "Need Scale": c["Need Scale"] || 0,
+            Pending: c.Pending || 0,
+            Ready: c.Ready || 0,
+            Sent: c.Sent || 0,
+            Failed: c.Failed || 0,
+            "QC Rejected": c["QC Rejected"] || 0,
+            "Address Invalid": c["Address Invalid"] || 0,
+            Other: c.Other || 0,
+        };
+        counts.All = counts.Pending + counts.Sent + counts["QC Rejected"] + counts.Ready + counts["Address Invalid"];
+        return res.json({ overall: { totalOrders: counts.All, counts } });
+    } catch (err) {
+        return res.status(500).json({ message: "Failed to retrieve Etsy QC statistics", error: err.message });
+    }
+};
+
+const uploadEtsyFulfillmentFileForItem = [
+    etsyScaleUpload.array("files"),
+    async (req, res) => {
+        try {
+            const { transactionId } = req.params;
+            const userId = req.user?.userId || req.user?.id || req.user?._id || null;
+            if (!req.files?.length) return res.status(400).json({ message: "Missing files" });
+
+            let positions = [];
+            try {
+                positions = JSON.parse(req.body?.meta || "[]");
+            } catch {
+                return res.status(400).json({ message: "Invalid meta JSON" });
+            }
+            if (positions.length !== req.files.length) {
+                return res.status(400).json({ message: "Files count not match positions" });
+            }
+
+            const order = await EtsyOrder.findOne(buildEtsyOrderLookup(req));
+            if (!order) return res.status(404).json({ message: "Etsy order not found" });
+            const accessError = ensureSellerCanAccessEtsyOrder(req, order);
+            if (accessError) return res.status(accessError.startsWith("Invalid") ? 400 : 403).json({ message: accessError });
+
+            const item = (order.items || []).find((entry) => String(entry.transactionId) === String(transactionId));
+            if (!item) return res.status(404).json({ message: "Etsy order item not found" });
+
+            if (!item.fulfillment_file || !(item.fulfillment_file instanceof Map)) {
+                item.fulfillment_file = new Map(Object.entries(toPlainFulfillmentFile(item.fulfillment_file)));
+            }
+
+            for (let i = 0; i < req.files.length; i += 1) {
+                const file = req.files[i];
+                const pos = String(positions[i]?.position || "").trim().toLowerCase();
+                if (!pos) return res.status(400).json({ message: `Missing position for file index ${i}` });
+                const ext = path.extname(file.originalname || "").toLowerCase() || ".png";
+                const safeOrderId = String(order.orderId).replace(/[^\w.-]+/g, "_");
+                const safeTx = String(transactionId).replace(/[^\w.-]+/g, "_");
+                const safePos = pos.replace(/[^\w.-]+/g, "_");
+                const up = await uploadBufferToR2({
+                    buffer: file.buffer,
+                    originalName: file.originalname,
+                    mimeType: file.mimetype,
+                    size: file.size,
+                    folder: "fulfillment_files",
+                    key: `fulfillment_files/etsy-${safeOrderId}-${safeTx}-${safePos}${ext}`,
+                });
+                item.fulfillment_file.set(pos, up.url);
+            }
+
+            item.scale_status = "Pending";
+            order.scale_overall_status = computeEtsyOverallScaleStatus(order.items);
+            if (userId && mongoose.Types.ObjectId.isValid(userId)) order.scaleId = new mongoose.Types.ObjectId(userId);
+            order.markModified("items");
+            await order.save();
+
+            return res.json({
+                message: "Uploaded Etsy fulfillment files successfully",
+                fulfillment_file: toPlainFulfillmentFile(item.fulfillment_file),
+                item_scale_status: item.scale_status,
+                order_scale_overall_status: order.scale_overall_status,
+            });
+        } catch (err) {
+            console.error("uploadEtsyFulfillmentFileForItem error:", err);
+            return res.status(500).json({ message: "Upload failed", error: err.message });
+        }
+    },
+];
+
+const confirmEtsyScaleForItem = async (req, res) => {
+    try {
+        const { transactionId } = req.params;
+        const { decision, note } = req.body || {};
+        const d = String(decision || "").toLowerCase();
+        if (!["approve", "reject"].includes(d)) {
+            return res.status(400).json({ message: 'Invalid decision. Must be "approve" or "reject".' });
+        }
+
+        const order = await EtsyOrder.findOne(buildEtsyOrderLookup(req));
+        if (!order) return res.status(404).json({ message: "Etsy order not found" });
+        const accessError = ensureSellerCanAccessEtsyOrder(req, order);
+        if (accessError) return res.status(accessError.startsWith("Invalid") ? 400 : 403).json({ message: accessError });
+
+        const item = (order.items || []).find((entry) => String(entry.transactionId) === String(transactionId));
+        if (!item) return res.status(404).json({ message: "Etsy order item not found" });
+
+        if (d === "reject") {
+            item.scale_status = "QC Rejected";
+            item.fulfillment_file = new Map();
+            if (note !== undefined) item.qc_note = String(note || "").trim();
+            order.scale_overall_status = "QC Rejected";
+        } else {
+            if (!hasAnyFulfillmentFile(item.fulfillment_file)) {
+                return res.status(400).json({
+                    message: "Missing print files. Please upload fulfillment_file before approval.",
+                });
+            }
+            item.scale_status = "Complete";
+            if (note !== undefined) item.qc_note = String(note || "").trim();
+            order.scale_overall_status = computeEtsyOverallScaleStatus(order.items);
+            if (order.scale_overall_status === "Ready" && order.address_validation?.isValid === false) {
+                order.scale_overall_status = "Address Invalid";
+            }
+        }
+
+        order.markModified("items");
+        await order.save();
+
+        return res.json({
+            message: d === "reject"
+                ? "Etsy scale rejected. Item set to QC Rejected."
+                : order.scale_overall_status === "Ready"
+                    ? "Etsy item approved. Order is Ready."
+                    : "Etsy item approved. Waiting for other items to be approved.",
+            item_scale_status: item.scale_status,
+            qc_note: item.qc_note || "",
+            order_scale_overall_status: order.scale_overall_status,
+        });
+    } catch (err) {
+        return res.status(500).json({ message: "Confirm failed", error: err.message });
+    }
+};
+
+const updateEtsyItemNote = (field) => async (req, res) => {
+    try {
+        const { transactionId } = req.params;
+        const noteValue = String(req.body?.[field] || "").trim();
+        if (noteValue.length > 2000) {
+            return res.status(400).json({ message: `${field} exceeds 2000 characters.` });
+        }
+        const order = await EtsyOrder.findOne(buildEtsyOrderLookup(req));
+        if (!order) return res.status(404).json({ message: "Etsy order not found" });
+        const accessError = ensureSellerCanAccessEtsyOrder(req, order);
+        if (accessError) return res.status(accessError.startsWith("Invalid") ? 400 : 403).json({ message: accessError });
+
+        const item = (order.items || []).find((entry) => String(entry.transactionId) === String(transactionId));
+        if (!item) return res.status(404).json({ message: "Etsy order item not found" });
+        item[field] = noteValue;
+        order.markModified("items");
+        await order.save();
+
+        return res.json({
+            message: `Etsy ${field} updated.`,
+            orderId: order.orderId,
+            transactionId,
+            [field]: item[field],
+        });
+    } catch (err) {
+        return res.status(500).json({ message: `Update ${field} failed`, error: err.message });
+    }
+};
+
+const updateEtsyQCNoteForItem = updateEtsyItemNote("qc_note");
+const updateEtsyCSNoteForItem = updateEtsyItemNote("cs_note");
+
+const assignEtsyOrderToCS = async (req, res) => {
+    try {
+        const { orderId } = req.params;
+        const { csUserId } = req.body || {};
+        const assignedBy = req.user?.userId || req.user?.id || req.user?._id || null;
+
+        if (!mongoose.Types.ObjectId.isValid(csUserId)) {
+            return res.status(400).json({ message: "Invalid csUserId" });
+        }
+
+        const order = await EtsyOrder.findOne(buildEtsyOrderLookup(req));
+        if (!order) {
+            return res.status(404).json({ message: "Etsy order not found" });
+        }
+
+        const csUser = await User.findById(csUserId)
+            .select("_id full_name email role_id")
+            .lean();
+
+        if (!csUser) {
+            return res.status(404).json({ message: "CS user not found" });
+        }
+
+        if (!csUser.role_id || !mongoose.Types.ObjectId.isValid(csUser.role_id)) {
+            return res.status(400).json({ message: "User does not have a valid role_id" });
+        }
+
+        const role = await Role.findById(csUser.role_id).select("name").lean();
+        const roleName = String(role?.name || "").trim().toLowerCase();
+        const allowedRoleNames = new Set([
+            "customer service",
+            "designer",
+            "design leader",
+        ]);
+
+        if (!allowedRoleNames.has(roleName)) {
+            return res.status(400).json({
+                message: "Selected user must be Customer Service, Designer, or Design Leader",
+                debug: {
+                    userId: csUser._id,
+                    role_id: csUser.role_id,
+                    role_name: role?.name || null,
+                },
+            });
+        }
+
+        order.csAssigneeId = csUser._id;
+        order.csAssignedBy = assignedBy && mongoose.Types.ObjectId.isValid(assignedBy)
+            ? new mongoose.Types.ObjectId(assignedBy)
+            : null;
+        order.csAssignedAt = new Date();
+        order.cs_assignment_status = "Assigned";
+
+        await order.save();
+
+        return res.json({
+            message: "Assigned Etsy order to CS successfully",
+            data: {
+                orderId: order.orderId,
+                shopId: String(order.shopId || ""),
+                csAssigneeId: order.csAssigneeId,
+                csAssignedBy: order.csAssignedBy,
+                csAssignedAt: order.csAssignedAt,
+                cs_assignment_status: order.cs_assignment_status,
+                cs_assignee: {
+                    _id: csUser._id,
+                    full_name: csUser.full_name,
+                    email: csUser.email,
+                    role_name: role?.name || null,
+                },
+            },
+        });
+    } catch (err) {
+        return res.status(500).json({
+            message: "Assign Etsy order to CS failed",
+            error: err.message,
+        });
+    }
+};
+
+const unassignEtsyOrderFromCS = async (req, res) => {
+    try {
+        const order = await EtsyOrder.findOne(buildEtsyOrderLookup(req));
+        if (!order) {
+            return res.status(404).json({ message: "Etsy order not found" });
+        }
+
+        order.csAssigneeId = null;
+        order.csAssignedBy = null;
+        order.csAssignedAt = null;
+        order.cs_assignment_status = "Unassigned";
+
+        await order.save();
+
+        return res.json({
+            message: "Unassigned Etsy CS successfully",
+            data: {
+                orderId: order.orderId,
+                shopId: String(order.shopId || ""),
+                cs_assignment_status: order.cs_assignment_status,
+            },
+        });
+    } catch (err) {
+        return res.status(500).json({
+            message: "Unassign Etsy CS failed",
+            error: err.message,
+        });
+    }
+};
+
 module.exports = {
     importOrders,
     getListOrders,
@@ -1777,4 +2459,14 @@ module.exports = {
     createOrder,
     updateSumbittedoetsyStatus,
     updateEtsyOrderItemTracking,
+    getEtsyScaleList,
+    getEtsyScaleStatistics,
+    getEtsyQCList,
+    getEtsyQCStatistics,
+    uploadEtsyFulfillmentFileForItem,
+    confirmEtsyScaleForItem,
+    updateEtsyQCNoteForItem,
+    updateEtsyCSNoteForItem,
+    assignEtsyOrderToCS,
+    unassignEtsyOrderFromCS,
 };
