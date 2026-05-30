@@ -226,3 +226,165 @@ describe("sendFailedOrdersToFulfillment", () => {
     });
   });
 });
+
+describe("pushPlatformOrders", () => {
+  const oldEnv = process.env;
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    process.env = {
+      ...oldEnv,
+      FULFILLMENT_API_BASE_URL: "https://platform.example",
+      FULFILLMENT_TENANT_API_KEY: "tenant-key",
+      FULFILLMENT_API_TIMEOUT_MS: "30000",
+    };
+  });
+
+  afterAll(() => {
+    process.env = oldEnv;
+  });
+
+  test("pushes selected DB orders to Fulfillment Platform without mutating portal orders", async () => {
+    const save = jest.fn().mockResolvedValue(undefined);
+    const order = {
+      orderId: "112-0745906-0345025-R1",
+      status: "New",
+      scale_overall_status: "Ready",
+      customer_infor: { name: "Jane Buyer" },
+      items: [
+        {
+          orderItemId: "ITEM-1",
+          sku: "SKU-1",
+          fulfillment_file: new Map([["front", "https://cdn.example/front.png"]]),
+          tracking_info: { status: "New", tracking: "" },
+        },
+      ],
+      save,
+    };
+    mockFindChain([order]);
+    axios.post.mockResolvedValue({
+      data: {
+        success: true,
+        received: 1,
+        inserted: 1,
+        updated: 0,
+        skipped: 0,
+        errorsCount: 0,
+        errors: [],
+        orders: [],
+        internalDebug: "not returned unless whitelisted",
+      },
+    });
+
+    const req = {
+      body: { orderIds: ["112-0745906-0345025-R1"] },
+      user: { role: "Admin", _id: "user-1" },
+      ip: "127.0.0.1",
+      headers: { "user-agent": "jest" },
+    };
+    const res = makeRes();
+
+    await controller.pushPlatformOrders(req, res);
+
+    expect(axios.post).toHaveBeenCalledWith(
+      "https://platform.example/api/portal/orders",
+      {
+        data: [
+          expect.objectContaining({
+            orderId: "112-0745906-0345025-R1",
+            status: "New",
+            scale_overall_status: "Ready",
+            items: [
+              expect.objectContaining({
+                orderItemId: "ITEM-1",
+                fulfillment_file: { front: "https://cdn.example/front.png" },
+              }),
+            ],
+          }),
+        ],
+      },
+      {
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: "Bearer tenant-key",
+        },
+        timeout: 30000,
+      }
+    );
+    expect(order.status).toBe("New");
+    expect(order.scale_overall_status).toBe("Ready");
+    expect(order.items[0].tracking_info.status).toBe("New");
+    expect(save).not.toHaveBeenCalled();
+    expect(logOrderHistory).not.toHaveBeenCalled();
+    expect(res.json).toHaveBeenCalledWith({
+      message: "Pushed orders to Fulfillment Platform",
+      attemptedCount: 1,
+      fulfillment: {
+        success: true,
+        received: 1,
+        inserted: 1,
+        updated: 0,
+        skipped: 0,
+        errorsCount: 0,
+        errors: [],
+        orders: [],
+      },
+    });
+  });
+
+  test("does not save or write order history when Fulfillment Platform rejects the push", async () => {
+    const save = jest.fn().mockResolvedValue(undefined);
+    const order = {
+      orderId: "ORDER-REJECTED",
+      status: "New",
+      scale_overall_status: "Ready",
+      items: [{ orderItemId: "ITEM-1" }],
+      save,
+    };
+    mockFindChain([order]);
+    axios.post.mockRejectedValue({
+      response: {
+        status: 409,
+        data: {
+          success: false,
+          received: 1,
+          inserted: 0,
+          updated: 0,
+          skipped: 1,
+          errorsCount: 0,
+          errors: [],
+          orders: [],
+          stack: "do not return",
+        },
+      },
+    });
+
+    const req = {
+      body: { orderIds: ["ORDER-REJECTED"] },
+      user: { role: "Admin", _id: "user-1" },
+      ip: "127.0.0.1",
+      headers: { "user-agent": "jest" },
+    };
+    const res = makeRes();
+
+    await controller.pushPlatformOrders(req, res);
+
+    expect(save).not.toHaveBeenCalled();
+    expect(logOrderHistory).not.toHaveBeenCalled();
+    expect(res.status).toHaveBeenCalledWith(409);
+    expect(res.json).toHaveBeenCalledWith({
+      message: "Failed to push orders to Fulfillment Platform",
+      attemptedCount: 1,
+      fulfillment: {
+        success: false,
+        received: 1,
+        inserted: 0,
+        updated: 0,
+        skipped: 1,
+        errorsCount: 0,
+        errors: [],
+        orders: [],
+      },
+    });
+  });
+});

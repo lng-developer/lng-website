@@ -210,6 +210,107 @@ const getPortalError = (error) => {
   return { status: 502, error: error.message };
 };
 
+const normalizeOrderIds = (rawOrderIds) => {
+  if (!Array.isArray(rawOrderIds) || rawOrderIds.length === 0) {
+    return null;
+  }
+
+  return [
+    ...new Set(
+      rawOrderIds
+        .map((orderId) =>
+          typeof orderId === "string" ? orderId.trim() : String(orderId || "").trim()
+        )
+        .filter(Boolean)
+    ),
+  ];
+};
+
+const serializeForPlatform = (value) => {
+  if (value === null || value === undefined) return value;
+  if (value instanceof Date) return value.toISOString();
+  if (value instanceof Map) {
+    return Object.fromEntries(
+      Array.from(value.entries()).map(([key, mapValue]) => [
+        key,
+        serializeForPlatform(mapValue),
+      ])
+    );
+  }
+  if (Array.isArray(value)) return value.map(serializeForPlatform);
+  if (typeof value.toObject === "function") {
+    return serializeForPlatform(
+      value.toObject({
+        depopulate: false,
+        flattenMaps: true,
+        versionKey: false,
+      })
+    );
+  }
+  if (typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value)
+        .filter(([, objectValue]) => typeof objectValue !== "function")
+        .map(([key, objectValue]) => [key, serializeForPlatform(objectValue)])
+    );
+  }
+  return value;
+};
+
+const toSafeFulfillmentSummary = (data, fallbackSuccess = true) => {
+  const source = data && typeof data === "object" ? data : {};
+  const numberOrZero = (value) => {
+    const num = Number(value);
+    return Number.isFinite(num) ? num : 0;
+  };
+  const safeErrors = (value) =>
+    Array.isArray(value)
+      ? value.map((error) => {
+          if (typeof error === "string") return { message: error };
+          if (!error || typeof error !== "object") return { message: String(error) };
+          return {
+            orderId: error.orderId,
+            field: error.field,
+            code: error.code,
+            message: error.message || error.error,
+          };
+        })
+      : [];
+  const safeOrders = (value) =>
+    Array.isArray(value)
+      ? value.map((order) => {
+          if (typeof order === "string") return { orderId: order };
+          if (!order || typeof order !== "object") return { orderId: String(order) };
+          return {
+            orderId: order.orderId,
+            status: order.status,
+            action: order.action,
+            skipped: order.skipped,
+            message: order.message,
+          };
+        })
+      : [];
+
+  const errors = safeErrors(source.errors);
+  const errorsCount =
+    source.errorsCount !== undefined ? numberOrZero(source.errorsCount) : errors.length;
+
+  return {
+    success:
+      typeof source.success === "boolean" ? source.success : Boolean(fallbackSuccess),
+    received: numberOrZero(source.received),
+    inserted: numberOrZero(source.inserted),
+    updated: numberOrZero(source.updated),
+    skipped: numberOrZero(source.skipped),
+    errorsCount,
+    errors,
+    orders: safeOrders(source.orders),
+  };
+};
+
+const buildFulfillmentPlatformUrl = (baseUrl) =>
+  `${String(baseUrl || "").replace(/\/+$/, "")}/api/portal/orders`;
+
 // ====== GET QC LIST ======
 const getQCList = async (req, res) => {
   try {
@@ -916,9 +1017,110 @@ const sendFailedOrdersToFulfillment = async (req, res) => {
   }
 };
 
+const pushPlatformOrders = async (req, res) => {
+  const apiBaseUrl = String(process.env.FULFILLMENT_API_BASE_URL || "").trim();
+  const tenantApiKey = String(process.env.FULFILLMENT_TENANT_API_KEY || "").trim();
+  const timeoutMs = Number(process.env.FULFILLMENT_API_TIMEOUT_MS || 30000);
+
+  if (!apiBaseUrl || !tenantApiKey) {
+    return res.status(500).json({
+      message: "Fulfillment Platform configuration is missing",
+    });
+  }
+
+  const orderIds = normalizeOrderIds(req.body?.orderIds);
+  if (!orderIds) {
+    return res.status(400).json({
+      message: "orderIds must be a non-empty array",
+    });
+  }
+
+  if (orderIds.length === 0) {
+    return res.status(400).json({
+      message: "orderIds must contain at least one valid order id",
+    });
+  }
+
+  try {
+    const userRole = req.user?.role;
+    const userId = req.user?.userId || req.user?.id || req.user?._id || "";
+    const isSeller = hasRole(userRole, "Seller");
+    const isAdmin = hasRole(userRole, "Admin");
+    const isCS = hasRole(userRole, "Customer Service");
+    const isSellerOnly = isSeller && !(isAdmin || isCS);
+
+    const query = { orderId: { $in: orderIds } };
+    if (isSellerOnly) {
+      if (!mongoose.Types.ObjectId.isValid(userId)) {
+        return res.status(400).json({ message: "Invalid user id in token" });
+      }
+      query.sellerId = new mongoose.Types.ObjectId(userId);
+    }
+
+    const orders = await OrderCustomProduct.find(query)
+      .populate({ path: "shopId", select: "name" })
+      .populate({ path: "sellerId", select: "full_name email" })
+      .populate({ path: "scaleId", select: "full_name email" })
+      .populate({ path: "items.listingId", select: "asin_type product_image psd" });
+
+    const foundOrderIds = new Set(orders.map((order) => order.orderId));
+    const missingOrderIds = orderIds.filter((orderId) => !foundOrderIds.has(orderId));
+    if (missingOrderIds.length > 0) {
+      return res.status(404).json({
+        message: "Some orders were not found or are not accessible",
+        orderIds: missingOrderIds,
+      });
+    }
+
+    const payload = {
+      data: orders.map(serializeForPlatform),
+    };
+
+    const platformResponse = await axios.post(
+      buildFulfillmentPlatformUrl(apiBaseUrl),
+      payload,
+      {
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${tenantApiKey}`,
+        },
+        timeout: Number.isFinite(timeoutMs) ? timeoutMs : 30000,
+      }
+    );
+
+    return res.json({
+      message: "Pushed orders to Fulfillment Platform",
+      attemptedCount: orders.length,
+      fulfillment: toSafeFulfillmentSummary(platformResponse?.data, true),
+    });
+  } catch (err) {
+    if (err.response) {
+      return res.status(err.response.status || 502).json({
+        message: "Failed to push orders to Fulfillment Platform",
+        attemptedCount: orderIds.length,
+        fulfillment: toSafeFulfillmentSummary(err.response.data, false),
+      });
+    }
+
+    return res.status(502).json({
+      message: "Failed to push orders to Fulfillment Platform",
+      attemptedCount: orderIds.length,
+      fulfillment: toSafeFulfillmentSummary(
+        {
+          success: false,
+          errorsCount: 1,
+          errors: [{ message: err.message || "Fulfillment Platform request failed" }],
+        },
+        false
+      ),
+    });
+  }
+};
+
 module.exports = {
   getQCList,
   getQCStatistics,
   updateQCNoteForItem,
   sendFailedOrdersToFulfillment,
+  pushPlatformOrders,
 };

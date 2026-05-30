@@ -7,6 +7,8 @@ router.get('/', authenticateToken, authorizeRoles('Customer Service', "Admin", "
 
 router.get('/statistics', authenticateToken, authorizeRoles('Customer Service', "Admin", "Seller"), QCController.getQCStatistics);
 
+router.post('/push-platform-orders', authenticateToken, authorizeRoles('Customer Service', "Admin", "Seller"), QCController.pushPlatformOrders);
+
 router.post('/send-to-fulfillment', authenticateToken, authorizeRoles('Customer Service', "Admin", "Seller"), QCController.sendFailedOrdersToFulfillment);
 
 router.put('/orders/:orderId/items/:orderItemId/qc-note', authenticateToken, authorizeRoles('Customer Service', "Admin", "Seller"), QCController.updateQCNoteForItem);
