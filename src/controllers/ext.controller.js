@@ -364,13 +364,6 @@ async function fetchBeeful(orderId) {
   const res = await httpBeeful.get(url, {
     params: { api_key: GRABINK_API_KEY },
   });
-  if (DEBUG)
-    console.log(
-      "[Beeful][HTTP]",
-      res.status,
-      "| keys:",
-      Object.keys(res.data || {})
-    );
   if (!res.data || typeof res.data !== "object")
     throw new Error(`Beeful empty (HTTP ${res.status})`);
   if (
@@ -430,7 +423,6 @@ async function fetchMerchFox(orderId) {
     data: qs.stringify({ mfid: orderId }),
     transformResponse: [(d) => d],
   });
-  if (DEBUG) console.log("[MerchFox][TRY GET+BODY]", res1.status);
   try {
     const data = parseMerchFoxResp(orderId, res1);
 
@@ -451,8 +443,6 @@ async function fetchMerchFox(orderId) {
       params: { mfid: orderId },
       transformResponse: [(d) => d],
     });
-    if (DEBUG) console.log("[MerchFox][TRY GET?mfid=]", res2.status);
-
     const data = parseMerchFoxResp(orderId, res2);
 
     const rawTracking = norm(data?.tracking?.number);
@@ -469,13 +459,6 @@ async function fetchMerchize(orderId) {
   let res = await httpMerchize.get("/order/external/orders/tracking", {
     params: { external_number: orderId },
   });
-  if (DEBUG)
-    console.log(
-      "[Merchize][HTTP tracking]",
-      res.status,
-      "| keys:",
-      Object.keys(res.data || {})
-    );
   if (res.status >= 400)
     throw new Error(`Merchize HTTP ${res.status} (tracking)`);
 
@@ -496,13 +479,6 @@ async function fetchMerchize(orderId) {
   res = await httpMerchize.get("/order/external/orders/order-detail", {
     params: { external_number: orderId },
   });
-  if (DEBUG)
-    console.log(
-      "[Merchize][HTTP detail]",
-      res.status,
-      "| keys:",
-      Object.keys(res.data || {})
-    );
   if (res.status >= 400)
     throw new Error(`Merchize HTTP ${res.status} (detail)`);
 
@@ -564,9 +540,6 @@ async function fetchPrintway(orderId, doc) {
       params: t.body,
       transformResponse: [(d) => d], // giữ raw string để tự parse
     });
-
-    if (DEBUG)
-      console.log("[Printway v3][HTTP]", res.status, "| body:", t.body);
 
     if (res.status >= 400) {
       lastErr = new Error(`Printway v3 HTTP ${res.status}`);
@@ -659,7 +632,6 @@ async function fetchMangoTee(orderId) {
   const url = `/orders/${encodeURIComponent(orderId)}`;
 
   const res = await httpMangoTee.get(url);
-  if (DEBUG) console.log("[MangoTee][HTTP]", res.status);
 
   if (res.status >= 400) throw new Error(`MangoTee HTTP ${res.status}`);
 
@@ -703,7 +675,6 @@ async function fetchSS88(orderId) {
   const url = `/orders/${encodeURIComponent(orderId)}`;
   const res = await httpSS88.get(url);
 
-  if (DEBUG) console.log("[SS88][HTTP]", res.status);
 
   if (res.status >= 400)
     throw new Error(`SS88 HTTP ${res.status} for ${orderId}`);
@@ -822,7 +793,6 @@ async function fetchLuxuryPro(orderId) {
 
   const url = buildLuxuryProTrackingUrl(orderId);
   const res = await httpLuxuryPro.get(url, { headers });
-  if (DEBUG) console.log("[LuxuryPro][HTTP]", res.status, "| url:", url);
 
   if (res.status >= 400) {
     throw new Error(`LuxuryPro HTTP ${res.status}: ${res.data?.message || res.data?.error || "Error"}`);
@@ -968,16 +938,6 @@ async function updateOrderByVendors(orderId, vpidToVendorPrefetched = null) {
     ["beeful", "merchfox", "merchize", "printway", "mangotee", "ss88", "luxurypro"].includes(k)
   );
 
-  // --- DIAGNOSTIC LOG (xoá sau khi debug xong) ---
-  console.log(`[DIAG][${orderId}] vpidSet=`, [...vpidSet]);
-  console.log(`[DIAG][${orderId}] vpidToVendor=`, [...vpidToVendor.entries()]);
-  console.log(`[DIAG][${orderId}] groups=`, JSON.stringify(groups));
-  console.log(`[DIAG][${orderId}] vendorKeys=`, vendorKeys);
-  for (const it of doc.items || []) {
-    console.log(`[DIAG][${orderId}] item tracking_info=`, JSON.stringify(it?.tracking_info));
-  }
-  // --- END DIAGNOSTIC LOG ---
-
   if (vendorKeys.length === 0) {
     throw new Error(
       `No known vendor mapping from items.cost_breakdown.vendorProductId for ${orderId}`
@@ -998,9 +958,7 @@ async function updateOrderByVendors(orderId, vpidToVendorPrefetched = null) {
       else continue;
 
       totalChanged += applyToItemsOfVendor(doc, vk, res);
-    } catch (e) {
-      console.error(`[VENDOR FAIL][${vk}] ${orderId}:`, e.message);
-    }
+    } catch (_) { }
   }
 
   const allShipped = (doc.items || []).every(
@@ -1174,7 +1132,6 @@ async function updateEtsyOrderByVendors(orderId, options = {}) {
       });
     } catch (e) {
       vendorResults.push({ vendorKey: vk, ok: false, message: e.message });
-      console.error(`[ETSY VENDOR FAIL][${vk}] ${trimmedOrderId}:`, e.message);
     }
   }
 
@@ -2183,3 +2140,4 @@ module.exports = {
   runBatch,
   runEtsyVendorBatch,
 };
+

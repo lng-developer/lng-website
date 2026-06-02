@@ -9,6 +9,7 @@ const http = require("http");
 const connectDB = require("./src/config/db.config");
 const registerSocketHandlers = require("./src/socket/index");
 const presence = require("./src/lib/presence");
+const etsyVendorSyncScheduler = require("./src/service/etsyVendorSyncScheduler");
 
 // ===== App
 const app = express();
@@ -119,6 +120,9 @@ const io = new Server(httpServer, {
 
 function shutdown() {
   try {
+    etsyVendorSyncScheduler.stop();
+  } catch { }
+  try {
     io.close();
   } catch { }
   try {
@@ -160,7 +164,9 @@ app.use((err, _req, res, _next) => {
 });
 
 const PORT = process.env.PORT || 5000;
-connectDB();
-httpServer.listen(PORT, "0.0.0.0", () => {
-  console.log(`🚀 API running at http://localhost:${PORT}`);
+connectDB().then(() => {
+  etsyVendorSyncScheduler.start();
+  httpServer.listen(PORT, "0.0.0.0", () => {
+    console.log(`API running at http://localhost:${PORT}`);
+  });
 });

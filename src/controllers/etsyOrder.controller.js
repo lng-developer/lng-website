@@ -725,12 +725,22 @@ function extractLabelValueMapFromEtsyItem(item) {
 }
 
 async function selectConfigByProductType(configCode, labelValueMap, mapOptionValue = null) {
-    const cfgCandidates = await ConfigCostCenter.find({
+    let cfgCandidates = await ConfigCostCenter.find({
         config_code: configCode,
+        platform: "Etsy",
         is_deleted: { $in: [false, null] },
     })
         .populate("product_for_seller")
         .lean();
+
+    if (!cfgCandidates.length) {
+        cfgCandidates = await ConfigCostCenter.find({
+            config_code: configCode,
+            is_deleted: { $in: [false, null] },
+        })
+            .populate("product_for_seller")
+            .lean();
+    }
 
     if (!cfgCandidates.length)
         return { cfg: null, reason: "No config cost center found by config_code" };
@@ -813,9 +823,46 @@ async function mapOptionValue({ configCode, key, rawValue }) {
     return { value: val, ruleId: null, matchType: null };
 }
 
+function decodeEtsyHtmlEntities(value) {
+    return String(value || "")
+        .replace(/&#39;/g, "'")
+        .replace(/&#x27;/gi, "'")
+        .replace(/&quot;/g, '"')
+        .replace(/&#34;/g, '"')
+        .replace(/&amp;/g, "&")
+        .replace(/&lt;/g, "<")
+        .replace(/&gt;/g, ">");
+}
+
+function normalizeEtsyCostValue(value) {
+    return decodeEtsyHtmlEntities(value)
+        .trim()
+        .toLowerCase()
+        .replace(/[“”]/g, '"')
+        .replace(/[‘’]/g, "'")
+        .replace(/′′/g, '"')
+        .replace(/″/g, '"')
+        .replace(/''/g, '"')
+        .replace(/\s+/g, " ");
+}
+
+function formatEtsyCostValueForDisplay(value) {
+    return decodeEtsyHtmlEntities(value)
+        .trim()
+        .replace(/[“”]/g, '"')
+        .replace(/[‘’]/g, "'")
+        .replace(/′′/g, '"')
+        .replace(/″/g, '"')
+        .replace(/''/g, '"')
+        .replace(/\s+/g, " ");
+}
+
 function findBestCostCenter(candidates, sizeValue, colorValue, { strict = true } = {}) {
-    const norm = (s) => String(s || "").toLowerCase().trim();
-    const hit = candidates.find((c) => norm(c.vendor_size) === norm(sizeValue) && norm(c.vendor_color) === norm(colorValue));
+    const hit = candidates.find((c) =>
+        normalizeEtsyCostValue(c.vendor_size) === normalizeEtsyCostValue(sizeValue) &&
+        normalizeEtsyCostValue(c.vendor_color) === normalizeEtsyCostValue(colorValue)
+    );
+
     if (hit) return hit;
     if (strict) return null;
     return null;
@@ -898,7 +945,7 @@ async function calculateEtsyCost(order) {
         if (!cfg) { stagedItems.push({ transactionId: itemId, sku: originalSku, mapped_sku: mappedSku, used_sku: usedSku, configCode, status: "failed", reason: cfgReason }); continue; }
 
         const sizeRaw = pickValueByKeys(labelValueMap, cfg.customize_size_key || []);
-        const colorRaw = pickValueByKeys(labelValueMap, cfg.customize_color_key || []);
+        const colorRaw = pickValueByKeys(labelValueMap, cfg.customize_color_key || []) || cfg.default_color || "";
         // mapOptionValue: convert size/color raw → vendor-compatible value
         const sizeMap = await cachedMapOption({ configCode, key: "size", rawValue: sizeRaw });
         const colorMap = await cachedMapOption({ configCode, key: "color", rawValue: colorRaw });
@@ -1006,9 +1053,18 @@ async function calculateEtsyCost(order) {
     const perItemResults = [];
     const groupBreakdowns = [];
     for (const rec of stagedItems) {
-        if (rec.status !== "ok") { perItemResults.push(rec); continue; }
+        const displaySizeValue = formatEtsyCostValueForDisplay(rec.sizeValue);
+        const displayColorValue = formatEtsyCostValueForDisplay(rec.colorValue);
+        if (rec.status !== "ok") {
+            perItemResults.push({
+                ...rec,
+                sizeValue: displaySizeValue,
+                colorValue: displayColorValue,
+            });
+            continue;
+        }
         perItemResults.push({
-            transactionId: rec.transactionId, sku: rec.sku, configCode: rec.configCode, sizeValue: rec.sizeValue, colorValue: rec.colorValue, productTypeValue: rec.productTypeValue, selectedConfigBy: rec.selectedConfigBy,
+            transactionId: rec.transactionId, sku: rec.sku, configCode: rec.configCode, sizeValue: displaySizeValue, colorValue: displayColorValue, productTypeValue: rec.productTypeValue, selectedConfigBy: rec.selectedConfigBy,
             vendorProductId: rec.vendorProductId, vendorId: rec.vendorId, matchedSku: rec.matchedSku, selectedOrder: rec.selectedOrder, itemDisplayName: rec.itemDisplayName,
             base_cost_each: rec.baseEach, quantity: rec.qty,
             additional_costs_breakdown: rec.additionalCosts, total_additional_cost_per_item: rec.totalAdditionalCost * rec.qty,
