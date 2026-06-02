@@ -1725,6 +1725,7 @@ const getScaleListForDesign = async (req, res) => {
             $match: {
               $or: [
                 { orderId: keyword },
+                { "items.asin": keyword },
                 { "items.sku": keyword },
                 { "items.orderItemId": keyword },
                 { "customer_infor.email": keyword },
