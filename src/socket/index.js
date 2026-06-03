@@ -111,6 +111,47 @@ module.exports = function registerSocketHandlers({ app, io }) {
       }
     });
 
+    socket.on("client:etsy_message", async (payload = {}, ack) => {
+      try {
+        const messages = payload?.result?.messages || [];
+
+        console.log("[SOCKET][client:etsy_message]", {
+          shopId,
+          machineId,
+          eventId: payload.eventId,
+          messagesCount: messages.length,
+          totalThreads: payload?.result?.totalThreads,
+        });
+
+        // TODO: save DB ở bước sau
+
+        io.to(`shop:${shopId}`).emit("etsy_message:new", {
+          shopId,
+          machineId,
+          eventId: payload.eventId,
+          messages,
+          totalThreads: payload?.result?.totalThreads || 0,
+          syncedAt: payload?.result?.syncedAt || new Date().toISOString(),
+          at: Date.now(),
+        });
+
+        if (typeof ack === "function") {
+          ack({
+            ok: true,
+            received: true,
+            eventId: payload.eventId,
+            messagesCount: messages.length,
+          });
+        }
+      } catch (err) {
+        console.error("[SOCKET][client:etsy_message] error:", err.message);
+
+        if (typeof ack === "function") {
+          ack({ ok: false, message: err.message });
+        }
+      }
+    });
+
     // client:task — Extension gửi status received/completed/failed (idempotent theo eventId)
     socket.on("client:task", async (payload = {}, ack) => {
       try {
@@ -197,7 +238,7 @@ module.exports = function registerSocketHandlers({ app, io }) {
     socket.on("ext:task-ack", (data) => {
       const { taskId, receivedAt } = data;
       console.log(`✅ [SOCKET] Task acknowledged: ${taskId} by ${machineId} at ${new Date(receivedAt).toISOString()}`);
-      
+
       // Broadcast task acknowledgment to monitoring clients
       io.to(`shop:${shopId}`).emit("task:acknowledged", {
         taskId,
@@ -213,7 +254,7 @@ module.exports = function registerSocketHandlers({ app, io }) {
     socket.on("ext:task-result", (data) => {
       const { taskId, success, result, error, duration, completedAt } = data;
       console.log(`📊 [SOCKET] Task result: ${taskId} - Success: ${success} - Duration: ${duration}ms`);
-      
+
       // Broadcast task result to monitoring clients
       io.to(`shop:${shopId}`).emit("task:completed", {
         taskId,
@@ -237,7 +278,7 @@ module.exports = function registerSocketHandlers({ app, io }) {
     socket.on("ext:task-progress", (data) => {
       const { taskId, progress, message, currentStep, totalSteps } = data;
       console.log(`🔄 [SOCKET] Task progress: ${taskId} - ${progress}% - ${message}`);
-      
+
       // Broadcast progress to monitoring clients
       io.to(`shop:${shopId}`).emit("task:progress", {
         taskId,
@@ -255,7 +296,7 @@ module.exports = function registerSocketHandlers({ app, io }) {
     socket.on("ext:realtime-data", (data) => {
       const { type, payload, timestamp } = data;
       console.log(`📡 [SOCKET] Real-time data from ${machineId}:`, { type, timestamp });
-      
+
       // Broadcast to monitoring clients and other relevant clients
       io.to(`shop:${shopId}`).emit("client:realtime-data", {
         machineId,
@@ -272,9 +313,9 @@ module.exports = function registerSocketHandlers({ app, io }) {
       const { timestamp, testId } = data;
       const now = Date.now();
       const latency = now - timestamp;
-      
+
       console.log(`🏓 [SOCKET] Ping from ${machineId} - Latency: ${latency}ms`);
-      
+
       // Gửi pong ngược lại client
       socket.emit("server:pong", {
         testId,
@@ -282,7 +323,7 @@ module.exports = function registerSocketHandlers({ app, io }) {
         serverTimestamp: now,
         latency
       });
-      
+
       // Broadcast connection quality to monitoring
       io.to(`shop:${shopId}`).emit("connection:quality", {
         machineId,
@@ -297,7 +338,7 @@ module.exports = function registerSocketHandlers({ app, io }) {
     socket.on("ext:system-stats", (data) => {
       const { cpu, memory, activeOrders, queueSize, errors, uptime } = data;
       console.log(`📊 [SOCKET] System stats from ${machineId}:`, { cpu, memory, activeOrders });
-      
+
       // Update presence with system info
       presence.updateStats(machineId, {
         cpu,
@@ -308,7 +349,7 @@ module.exports = function registerSocketHandlers({ app, io }) {
         uptime,
         lastStatsUpdate: Date.now()
       });
-      
+
       // Broadcast to monitoring dashboard
       io.to(`shop:${shopId}`).emit("client:stats", {
         machineId,
@@ -322,7 +363,7 @@ module.exports = function registerSocketHandlers({ app, io }) {
     socket.on("ext:error-report", (data) => {
       const { error, context, severity, timestamp } = data;
       console.error(`🚨 [SOCKET] Error from ${machineId}:`, { error, severity, context });
-      
+
       // Broadcast error to monitoring
       io.to(`shop:${shopId}`).emit("client:error", {
         machineId,
