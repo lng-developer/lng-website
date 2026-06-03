@@ -57,6 +57,7 @@ const {
   ToDoListRoutes,
   EtsyOrderRoutes,
   EtsyListingRoutes,
+  EtsyMessagesRoutes,
   autoConfigRoutes,
   extensionLogRoutes,
   etsyAdsRoutes
@@ -93,6 +94,7 @@ app.use("/api/shipping-batches", ShippingBatchRoutes); // ✅ Alias để hỗ t
 app.use("/api/to-do", ToDoListRoutes);
 app.use("/api/etsy", EtsyOrderRoutes);
 app.use("/api/etsy-listing", EtsyListingRoutes);
+app.use("/api/etsy-messages", EtsyMessagesRoutes);
 app.use("/api/etsy-ads", etsyAdsRoutes);
 app.use("/api/auto-config", autoConfigRoutes);
 app.use("/api/ext/logs", extensionLogRoutes);
