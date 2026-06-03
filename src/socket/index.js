@@ -1,6 +1,7 @@
 // src/socket/index.js
 const presence = require("../lib/presence");
 const taskStatusService = require("../service/taskStatus.service");
+const { upsertEtsyMessageThreads } = require("../service/etsyMessage.service");
 
 module.exports = function registerSocketHandlers({ app, io }) {
   app.set("io", io);
@@ -113,23 +114,32 @@ module.exports = function registerSocketHandlers({ app, io }) {
 
     socket.on("client:etsy_message", async (payload = {}, ack) => {
       try {
-        const messages = payload?.result?.messages || [];
+        const messages = Array.isArray(payload?.result?.messages)
+          ? payload.result.messages
+          : [];
+        const targetShopId = String(payload.shopId || shopId);
+        const targetMachineId = String(payload.machineId || machineId);
 
         console.log("[SOCKET][client:etsy_message]", {
-          shopId,
-          machineId,
+          shopId: targetShopId,
+          machineId: targetMachineId,
           eventId: payload.eventId,
           messagesCount: messages.length,
           totalThreads: payload?.result?.totalThreads,
         });
 
-        // TODO: save DB ở bước sau
+        const saveResult = await upsertEtsyMessageThreads({
+          ...payload,
+          shopId: targetShopId,
+          machineId: targetMachineId,
+        });
 
-        io.to(`shop:${shopId}`).emit("etsy_message:new", {
-          shopId,
-          machineId,
+        io.to(`shop:${targetShopId}`).emit("etsy_message:new", {
+          shopId: targetShopId,
+          machineId: targetMachineId,
           eventId: payload.eventId,
-          messages,
+          messages: saveResult.items,
+          messagesCount: saveResult.saved,
           totalThreads: payload?.result?.totalThreads || 0,
           syncedAt: payload?.result?.syncedAt || new Date().toISOString(),
           at: Date.now(),
@@ -137,17 +147,20 @@ module.exports = function registerSocketHandlers({ app, io }) {
 
         if (typeof ack === "function") {
           ack({
-            ok: true,
+            ok: saveResult.ok === true,
             received: true,
             eventId: payload.eventId,
             messagesCount: messages.length,
+            saved: saveResult.saved,
+            failed: saveResult.failed || 0,
+            errors: saveResult.errors || [],
           });
         }
       } catch (err) {
-        console.error("[SOCKET][client:etsy_message] error:", err.message);
+        console.error("[SOCKET][client:etsy_message] error:", err.message || err);
 
         if (typeof ack === "function") {
-          ack({ ok: false, message: err.message });
+          ack({ ok: false, message: err.message || String(err) });
         }
       }
     });
