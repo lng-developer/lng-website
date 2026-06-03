@@ -571,6 +571,7 @@ const getQCList = async (req, res) => {
           fulfillment_file: item.fulfillment_file,
           scale_status: item.scale_status,
           qc_note: item.qc_note,
+          cs_note: item?.tracking_info?.note || "",
           listingId: item.listingId,
           listing: ldoc
             ? {
