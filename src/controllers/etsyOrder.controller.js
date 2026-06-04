@@ -211,7 +211,7 @@ const validateAddressWithSmarty = async (address) => {
     }
 };
 
-const validateAddressIfNeeded = async (orderDoc) => {
+const validateAddressIfNeeded = async (orderDoc, { force = false } = {}) => {
     if (!orderDoc) return;
 
     if (
@@ -219,10 +219,14 @@ const validateAddressIfNeeded = async (orderDoc) => {
         orderDoc.shipping?.country !== "US"
     ) return;
 
-    if (
-        orderDoc.address_validation?.isValid === null &&
-        orderDoc.address_validation?.smartyResponse === null
-    ) {
+    const hasAddressValidation =
+        orderDoc.address_validation?.isValid !== null &&
+        orderDoc.address_validation?.isValid !== undefined;
+    const hasSmartyResponse =
+        orderDoc.address_validation?.smartyResponse !== null &&
+        orderDoc.address_validation?.smartyResponse !== undefined;
+
+    if (force || (!hasAddressValidation && !hasSmartyResponse)) {
         const result = await validateAddressWithSmarty({
             address: orderDoc.shipping?.address1,
             address_2: orderDoc.shipping?.address2,
@@ -419,7 +423,7 @@ const importOrders = async (req, res) => {
                     );
 
                     const order = await EtsyOrder.findOne({ orderId: oid, shopId });
-                    await validateAddressIfNeeded(order);
+                    await validateAddressIfNeeded(order, { force: true });
 
                     try {
                         // Tự động tính toán cost breakdown sau khi import
@@ -1205,6 +1209,7 @@ const computeBaseCostForEtsyOrder = async (req, res) => {
             // Lưu order mới vào DB
             order = new EtsyOrder(orderData);
             await order.save();
+            await validateAddressIfNeeded(order, { force: true });
         }
 
         if (!Array.isArray(order.items) || order.items.length === 0) {
@@ -1619,11 +1624,30 @@ const backfillExistingEtsyOrder = async (existing, payload) => {
         sellerBackfilled = true;
     }
 
-    const backfilled = updatedItems > 0 || addedItems > 0 || sellerBackfilled;
+    let shippingBackfilled = false;
+    const shippingFields = ["name", "address1", "address2", "city", "state", "zipcode", "country"];
+    for (const field of shippingFields) {
+        if (!payload.shipping || isMissingValue(payload.shipping[field])) continue;
+        if (!existing.shipping) existing.shipping = {};
+        if (isMissingValue(existing.shipping[field]) || existing.shipping[field] !== payload.shipping[field]) {
+            existing.shipping[field] = payload.shipping[field];
+            shippingBackfilled = true;
+        }
+    }
+
+    if (shippingBackfilled) {
+        existing.address_validation = { isValid: null, smartyResponse: null };
+    }
+
+    const backfilled = updatedItems > 0 || addedItems > 0 || sellerBackfilled || shippingBackfilled;
     if (backfilled) {
         existing.numberOfItems = existing.items.reduce((sum, item) => sum + (Number(item.quantity) || 0), 0);
         if (updatedItems > 0 || addedItems > 0) existing.markModified("items");
         if (sellerBackfilled) existing.markModified("seller");
+        if (shippingBackfilled) {
+            existing.markModified("shipping");
+            existing.markModified("address_validation");
+        }
         await existing.save();
     }
 
@@ -1636,6 +1660,7 @@ const backfillExistingEtsyOrder = async (existing, payload) => {
         addedItems,
         skuBackfilled,
         listingIdBackfilled,
+        shippingBackfilled,
         sample: samples.slice(0, 20),
     });
 
@@ -1645,6 +1670,7 @@ const backfillExistingEtsyOrder = async (existing, payload) => {
         addedItems,
         skuBackfilled,
         listingIdBackfilled,
+        shippingBackfilled,
     };
 };
 
@@ -1658,6 +1684,7 @@ const createOrder = async (req, res) => {
             if (payload.seller?.sellerCode) {
                 await fillSellerIfMissing(payload.orderId, payload.shopId, payload.seller.sellerCode);
             }
+            await validateAddressIfNeeded(existing, { force: true });
             return res.status(200).json({
                 ok: true,
                 duplicated: true,
@@ -1667,10 +1694,12 @@ const createOrder = async (req, res) => {
                 addedItems: result.addedItems,
                 skuBackfilled: result.skuBackfilled,
                 listingIdBackfilled: result.listingIdBackfilled,
+                shippingBackfilled: result.shippingBackfilled,
             });
         }
 
         const doc = await EtsyOrder.create(payload);
+        await validateAddressIfNeeded(doc, { force: true });
         if (payload.seller?.sellerCode) {
             await fillSellerIfMissing(payload.orderId, payload.shopId, payload.seller.sellerCode);
         }
