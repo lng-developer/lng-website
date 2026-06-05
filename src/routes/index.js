@@ -33,6 +33,7 @@ const EtsyListingRoutes = require("./etsyListing.routes");
 const autoConfigRoutes = require("./autoConfig.routes");
 const etsyAdsRoutes = require("./etsyAds.routes");
 const EtsyMessagesRoutes = require("./etsyMessages.routes");
+const devRoutes = require("./dev.routes");
 
 module.exports = {
   roleRoutes,
@@ -70,4 +71,5 @@ module.exports = {
   autoConfigRoutes,
   etsyAdsRoutes,
   EtsyMessagesRoutes,
+  devRoutes,
 };
