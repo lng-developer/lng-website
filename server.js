@@ -60,7 +60,8 @@ const {
   EtsyMessagesRoutes,
   autoConfigRoutes,
   extensionLogRoutes,
-  etsyAdsRoutes
+  etsyAdsRoutes,
+  devRoutes
 } = require("./src/routes");
 
 app.use("/api/role", roleRoutes);
@@ -98,6 +99,7 @@ app.use("/api/etsy-messages", EtsyMessagesRoutes);
 app.use("/api/etsy-ads", etsyAdsRoutes);
 app.use("/api/auto-config", autoConfigRoutes);
 app.use("/api/ext/logs", extensionLogRoutes);
+app.use("/api/dev", devRoutes);
 
 app.use("/api/r2-test", require("./src/routes/upload.router.R2"));
 // ===== HTTP server

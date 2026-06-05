@@ -182,61 +182,478 @@ const fillSellerIfMissing = async (orderId, shopId, sellerCode) => {
 
 /* ================== ADDRESS VALIDATION ================== */
 
-const validateAddressWithSmarty = async (address) => {
+const last4 = (value) => {
+    const text = String(value || "");
+    return text ? text.slice(-4) : "";
+};
+
+const getEtsySmartyEnv = () => {
+    const authId = process.env.ETSY_US_STREET_SMARTY_AUTH_ID;
+    const authToken = process.env.ETSY_US_STREET_SMARTY_AUTH_TOKEN;
+    const license = String(process.env.ETSY_US_STREET_SMARTY_LICENSE || "").trim() || undefined;
+    const configuredTimeout = Number(process.env.ETSY_US_STREET_SMARTY_TIMEOUT_MS || 15000);
+    const timeoutMs = Number.isFinite(configuredTimeout) && configuredTimeout > 0
+        ? configuredTimeout
+        : 15000;
+
+    return {
+        authId,
+        authToken,
+        license,
+        timeoutMs,
+        hasAuthId: !!authId,
+        hasAuthToken: !!authToken,
+        hasLicense: !!license,
+        authIdLast4: last4(authId),
+        authTokenLast4: last4(authToken),
+        envSource: "ETSY_US_STREET_SMARTY_*",
+    };
+};
+
+const buildSmartyDebugAddress = (address = {}) => ({
+    street: String(address.address || address.street || "").trim(),
+    street2: String(address.address_2 || address.street2 || "").trim(),
+    city: String(address.city || "").trim(),
+    state: String(address.state || "").trim(),
+    zipcode: String(address.zip_code || address.zipcode || "").trim(),
+});
+
+const logEtsySmartyAddressValidation = (message, details = {}) => {
+    console.warn("[ETSY_SMARTY_ADDRESS_VALIDATION]", {
+        message,
+        ...details,
+    });
+};
+
+const buildEtsySmartyValidationResult = ({
+    status,
+    isValid,
+    httpStatus = null,
+    errorCode = null,
+    errorMessage = null,
+    retryable = false,
+    accountIssue = false,
+    request,
+    smartyResponse = null,
+}) => ({
+    provider: "smarty",
+    scope: "etsy_us_street",
+    envSource: "ETSY_US_STREET_SMARTY_*",
+    status,
+    isValid,
+    checkedAt: new Date(),
+    httpStatus,
+    errorCode,
+    errorMessage,
+    retryable,
+    accountIssue,
+    request,
+    smartyResponse,
+});
+
+const isUsShippingCountry = (country) => {
+    const normalized = String(country || "").trim().toLowerCase().replace(/\./g, "");
+    return ["us", "usa", "united states", "united states of america"].includes(normalized);
+};
+
+const isConfirmedInvalidAddress = (addressValidation) => (
+    addressValidation?.isValid === false &&
+    (
+        addressValidation?.status === "invalid" ||
+        !addressValidation?.status
+    )
+);
+
+const shouldPreserveExistingAddressValidation = (current, next) => {
+    if (!current || !next) return false;
+    if (current.status !== "valid" || current.isValid !== true) return false;
+    return next.isValid === null && [
+        "credentials_missing",
+        "auth_error",
+        "subscription_error",
+        "rate_limit",
+        "service_error",
+        "unexpected_status",
+    ].includes(next.status);
+};
+
+const validateAddressWithSmarty = async (address, context = {}) => {
+    const env = getEtsySmartyEnv();
+    const debugAddress = buildSmartyDebugAddress(address);
+    const request = {
+        orderId: context.orderId || null,
+        shopId: context.shopId ? String(context.shopId) : null,
+        address: debugAddress,
+    };
+    const logContext = {
+        orderId: request.orderId,
+        shopId: request.shopId,
+        address: debugAddress,
+        authIdLast4: env.authIdLast4,
+        authTokenLast4: env.authTokenLast4,
+        hasLicense: env.hasLicense,
+    };
+
+    if (!env.hasAuthId || !env.hasAuthToken) {
+        const result = buildEtsySmartyValidationResult({
+            status: "credentials_missing",
+            isValid: null,
+            errorCode: "ETSY_SMARTY_CREDENTIALS_MISSING",
+            errorMessage: "Missing ETSY_US_STREET_SMARTY_AUTH_ID or ETSY_US_STREET_SMARTY_AUTH_TOKEN",
+            accountIssue: true,
+            request,
+        });
+        logEtsySmartyAddressValidation("Missing Etsy Smarty credentials", {
+            ...logContext,
+            status: result.status,
+            errorCode: result.errorCode,
+        });
+        return result;
+    }
+
+    const missingFields = Object.entries(debugAddress)
+        .filter(([field, value]) => field !== "street2" && !value)
+        .map(([field]) => field);
+    if (missingFields.length > 0) {
+        const result = buildEtsySmartyValidationResult({
+            status: "invalid",
+            isValid: false,
+            errorCode: "SMARTY_ADDRESS_FIELDS_MISSING",
+            errorMessage: "Missing required address fields",
+            request,
+            smartyResponse: {
+                missingFields,
+                request,
+            },
+        });
+        logEtsySmartyAddressValidation("Missing required address fields", {
+            ...logContext,
+            status: result.status,
+            errorCode: result.errorCode,
+            missingFields,
+        });
+        return result;
+    }
+
+    const params = {
+        "auth-id": env.authId,
+        "auth-token": env.authToken,
+        street: debugAddress.street,
+        city: debugAddress.city,
+        state: debugAddress.state,
+        zipcode: debugAddress.zipcode,
+        candidates: 10,
+    };
+    if (debugAddress.street2) params.street2 = debugAddress.street2;
+    if (env.license) params.license = env.license;
+
     try {
         const response = await axios.get(
             "https://us-street.api.smarty.com/street-address",
             {
-                timeout: 8000,
-                params: {
-                    "auth-id": process.env.SMARTY_AUTH_ID,
-                    "auth-token": process.env.SMARTY_AUTH_TOKEN,
-                    street: address.address,
-                    street2: address.address_2,
-                    city: address.city,
-                    state: address.state,
-                    zipcode: address.zip_code,
-                },
+                timeout: env.timeoutMs,
+                validateStatus: () => true,
+                params,
             }
         );
 
         const data = response.data;
         if (Array.isArray(data) && data.length > 0) {
-            return { isValid: true, smartyResponse: data[0] };
+            const result = buildEtsySmartyValidationResult({
+                status: "valid",
+                isValid: true,
+                httpStatus: 200,
+                request,
+                smartyResponse: {
+                    firstCandidate: data[0],
+                    candidatesCount: data.length,
+                    rawCandidates: data,
+                },
+            });
+            logEtsySmartyAddressValidation("Smarty address validation completed", {
+                ...logContext,
+                httpStatus: result.httpStatus,
+                status: result.status,
+                candidatesCount: data.length,
+            });
+            return result;
         }
 
-        return { isValid: false, smartyResponse: null };
+        if (response.status === 200) {
+            const result = buildEtsySmartyValidationResult({
+                status: "invalid",
+                isValid: false,
+                httpStatus: 200,
+                errorCode: "SMARTY_NO_CANDIDATES",
+                errorMessage: "Smarty returned no candidates",
+                request,
+                smartyResponse: {
+                    rawCandidates: Array.isArray(data) ? data : [],
+                    candidatesCount: 0,
+                    request,
+                },
+            });
+            logEtsySmartyAddressValidation("Smarty returned no candidates", {
+                ...logContext,
+                httpStatus: result.httpStatus,
+                status: result.status,
+                errorCode: result.errorCode,
+            });
+            return result;
+        }
+
+        const statusMap = {
+            401: {
+                status: "auth_error",
+                errorCode: "SMARTY_AUTH_ERROR",
+                retryable: false,
+                accountIssue: true,
+            },
+            402: {
+                status: "subscription_error",
+                errorCode: "SMARTY_SUBSCRIPTION_REQUIRED",
+                retryable: false,
+                accountIssue: true,
+            },
+            429: {
+                status: "rate_limit",
+                errorCode: "SMARTY_RATE_LIMIT",
+                retryable: true,
+                accountIssue: false,
+            },
+        };
+        const mapped = statusMap[response.status] || (
+            response.status >= 500
+                ? {
+                    status: "service_error",
+                    errorCode: "SMARTY_SERVICE_ERROR",
+                    retryable: true,
+                    accountIssue: false,
+                }
+                : {
+                    status: "unexpected_status",
+                    errorCode: "SMARTY_UNEXPECTED_STATUS",
+                    retryable: true,
+                    accountIssue: false,
+                }
+        );
+        const result = buildEtsySmartyValidationResult({
+            status: mapped.status,
+            isValid: null,
+            httpStatus: response.status,
+            errorCode: mapped.errorCode,
+            errorMessage: "Smarty returned an error status",
+            retryable: mapped.retryable,
+            accountIssue: mapped.accountIssue,
+            request,
+            smartyResponse: data || null,
+        });
+        logEtsySmartyAddressValidation("Smarty address validation returned non-200", {
+            ...logContext,
+            httpStatus: result.httpStatus,
+            status: result.status,
+            errorCode: result.errorCode,
+        });
+        return result;
     } catch (err) {
-        return { isValid: false, smartyResponse: { error: err.message } };
+        const result = buildEtsySmartyValidationResult({
+            status: "service_error",
+            isValid: null,
+            errorCode: "SMARTY_NETWORK_ERROR",
+            errorMessage: err.message,
+            retryable: true,
+            accountIssue: false,
+            request,
+            smartyResponse: {
+                message: err.message,
+                code: err.code || null,
+            },
+        });
+        logEtsySmartyAddressValidation("Smarty address validation request failed", {
+            ...logContext,
+            httpStatus: null,
+            status: result.status,
+            errorCode: result.errorCode,
+        });
+        return result;
     }
 };
 
 const validateAddressIfNeeded = async (orderDoc, { force = false } = {}) => {
     if (!orderDoc) return;
 
-    if (
-        orderDoc.shipping?.country !== "United States" &&
-        orderDoc.shipping?.country !== "US"
-    ) return;
+    if (!isUsShippingCountry(orderDoc.shipping?.country)) return;
 
-    const hasAddressValidation =
-        orderDoc.address_validation?.isValid !== null &&
-        orderDoc.address_validation?.isValid !== undefined;
-    const hasSmartyResponse =
-        orderDoc.address_validation?.smartyResponse !== null &&
-        orderDoc.address_validation?.smartyResponse !== undefined;
+    const current = orderDoc.address_validation;
+    const shouldValidate =
+        force ||
+        !current ||
+        current.status === "pending" ||
+        (
+            (current.isValid === null || current.isValid === undefined) &&
+            !current.status
+        );
 
-    if (force || (!hasAddressValidation && !hasSmartyResponse)) {
+    if (shouldValidate) {
         const result = await validateAddressWithSmarty({
             address: orderDoc.shipping?.address1,
             address_2: orderDoc.shipping?.address2,
             city: orderDoc.shipping?.city,
             state: orderDoc.shipping?.state,
             zip_code: orderDoc.shipping?.zipcode,
+        }, {
+            orderId: orderDoc.orderId,
+            shopId: orderDoc.shopId,
         });
+
+        if (shouldPreserveExistingAddressValidation(current, result)) {
+            logEtsySmartyAddressValidation("Preserved existing valid address validation after Smarty non-address failure", {
+                orderId: orderDoc.orderId,
+                shopId: orderDoc.shopId ? String(orderDoc.shopId) : null,
+                nextStatus: result.status,
+                nextErrorCode: result.errorCode,
+            });
+            return;
+        }
 
         orderDoc.address_validation = result;
         await orderDoc.save();
+    }
+};
+
+const classifySmartyTestResponse = (status, data) => {
+    if (status === 200) {
+        return Array.isArray(data) && data.length > 0
+            ? { classification: "valid", isValid: true }
+            : { classification: "invalid_no_candidates", isValid: false };
+    }
+    if (status === 401) return { classification: "auth_error", isValid: null };
+    if (status === 402) return { classification: "subscription_error", isValid: null };
+    if (status === 429) return { classification: "rate_limit", isValid: null };
+    if (status >= 500) return { classification: "service_error", isValid: null };
+    return { classification: "unexpected_status", isValid: null };
+};
+
+const buildEtsySmartyTestEnvLoaded = ({ authId, authToken, license }) => ({
+    hasAuthId: !!authId,
+    hasAuthToken: !!authToken,
+    hasLicense: !!license,
+    authIdLast4: last4(authId),
+    authTokenLast4: last4(authToken),
+});
+
+const testEtsySmartyAddressValidation = async (req, res) => {
+    const env = getEtsySmartyEnv();
+    const envLoaded = buildEtsySmartyTestEnvLoaded(env);
+    const body = req.body || {};
+    const requestContext = {
+        orderId: body.orderId || null,
+        street: String(body.street || "").trim(),
+        city: String(body.city || "").trim(),
+        state: String(body.state || "").trim(),
+        zipcode: String(body.zipcode || "").trim(),
+        authIdLast4: envLoaded.authIdLast4,
+        authTokenLast4: envLoaded.authTokenLast4,
+    };
+
+    if (!env.hasAuthId || !env.hasAuthToken) {
+        console.warn("[ETSY_SMARTY_TEST]", {
+            message: "Missing Etsy Smarty credentials",
+            ...requestContext,
+        });
+        return res.json({
+            ok: false,
+            provider: "smarty",
+            scope: "etsy_us_street",
+            envSource: "ETSY_US_STREET_SMARTY_*",
+            httpStatus: null,
+            envLoaded,
+            classification: "missing_credentials",
+            isValid: null,
+            candidatesCount: 0,
+            firstCandidate: null,
+            smartyError: {
+                message: "Missing ETSY_US_STREET_SMARTY_AUTH_ID or ETSY_US_STREET_SMARTY_AUTH_TOKEN",
+            },
+        });
+    }
+
+    const params = {
+        "auth-id": env.authId,
+        "auth-token": env.authToken,
+        street: requestContext.street,
+        city: requestContext.city,
+        state: requestContext.state,
+        zipcode: requestContext.zipcode,
+        candidates: 10,
+    };
+    if (String(body.street2 || "").trim()) params.street2 = String(body.street2).trim();
+    if (env.license) params.license = env.license;
+
+    console.log("[ETSY_SMARTY_TEST]", {
+        message: "Testing Etsy Smarty address validation",
+        ...requestContext,
+    });
+
+    try {
+        const response = await axios.get(
+            "https://us-street.api.smarty.com/street-address",
+            {
+                timeout: env.timeoutMs,
+                validateStatus: () => true,
+                params,
+            }
+        );
+        const data = response.data;
+        const candidatesCount = Array.isArray(data) ? data.length : 0;
+        const { classification, isValid } = classifySmartyTestResponse(response.status, data);
+        const smartyError = classification === "valid" || classification === "invalid_no_candidates"
+            ? null
+            : data || { message: "Unexpected Smarty response status" };
+
+        console.log("[ETSY_SMARTY_TEST]", {
+            message: "Smarty test completed",
+            ...requestContext,
+            httpStatus: response.status,
+            classification,
+            candidatesCount,
+        });
+
+        return res.json({
+            ok: classification === "valid" || classification === "invalid_no_candidates",
+            provider: "smarty",
+            scope: "etsy_us_street",
+            envSource: "ETSY_US_STREET_SMARTY_*",
+            httpStatus: response.status,
+            envLoaded,
+            classification,
+            isValid,
+            candidatesCount,
+            firstCandidate: candidatesCount > 0 ? data[0] : null,
+            smartyError,
+        });
+    } catch (err) {
+        console.warn("[ETSY_SMARTY_TEST]", {
+            message: "Smarty test request failed",
+            ...requestContext,
+            error: err.message,
+        });
+        return res.json({
+            ok: false,
+            provider: "smarty",
+            scope: "etsy_us_street",
+            envSource: "ETSY_US_STREET_SMARTY_*",
+            httpStatus: null,
+            envLoaded,
+            classification: "service_error",
+            isValid: null,
+            candidatesCount: 0,
+            firstCandidate: null,
+            smartyError: {
+                message: err.message,
+                code: err.code || null,
+            },
+        });
     }
 };
 
@@ -269,9 +686,11 @@ const importOrders = async (req, res) => {
 
             /* ===== ORDER FILE ===== */
             if (type === "orders") {
+                const affectedOrders = new Set();
                 const bulkOps = rows
                     .map(row => {
                         if (!row["Order ID"]) return null;
+                        affectedOrders.add(row["Order ID"]);
 
                         const orderValue = toNumber(row["Order Value"]) || 0;
                         const shipping = toNumber(row["Shipping"]) || 0;
@@ -343,6 +762,11 @@ const importOrders = async (req, res) => {
 
                 if (bulkOps.length) {
                     await EtsyOrder.bulkWrite(bulkOps, { ordered: false });
+                }
+
+                for (const oid of affectedOrders) {
+                    const order = await EtsyOrder.findOne({ orderId: oid, shopId });
+                    await validateAddressIfNeeded(order, { force: true });
                 }
             }
 
@@ -657,6 +1081,8 @@ const getListOrders = async (req, res) => {
                 base_cost: order.base_cost || 0,
                 sumbittedoetsy: order.sumbittedoetsy ?? false,
                 address_validation: order.address_validation?.isValid ?? null,
+                address_validation_status: order.address_validation?.status || null,
+                address_validation_detail: order.address_validation || null,
                 seller: sellerPopulated ? {
                     _id: sellerPopulated._id,
                     full_name: sellerPopulated.full_name,
@@ -1309,7 +1735,19 @@ const getEtsyOrderStatistics = async (req, res) => {
                     cancelled: [{ $match: { status: "Cancelled" } }, { $count: "c" }],
                     refund: [{ $match: { status: "Refund" } }, { $count: "c" }],
                     invalidAddress: [
-                        { $match: { "address_validation.isValid": false } },
+                        {
+                            $match: {
+                                $and: [
+                                    { "address_validation.isValid": false },
+                                    {
+                                        $or: [
+                                            { "address_validation.status": "invalid" },
+                                            { "address_validation.status": { $exists: false } },
+                                        ],
+                                    },
+                                ],
+                            },
+                        },
                         { $count: "c" },
                     ],
                 },
@@ -1636,7 +2074,20 @@ const backfillExistingEtsyOrder = async (existing, payload) => {
     }
 
     if (shippingBackfilled) {
-        existing.address_validation = { isValid: null, smartyResponse: null };
+        existing.address_validation = {
+            provider: "smarty",
+            scope: "etsy_us_street",
+            envSource: "ETSY_US_STREET_SMARTY_*",
+            status: "pending",
+            isValid: null,
+            checkedAt: null,
+            httpStatus: null,
+            errorCode: null,
+            errorMessage: null,
+            retryable: false,
+            accountIssue: false,
+            smartyResponse: null,
+        };
     }
 
     const backfilled = updatedItems > 0 || addedItems > 0 || sellerBackfilled || shippingBackfilled;
@@ -2150,7 +2601,9 @@ const mapEtsyScaleOrder = (order) => ({
         };
     }),
     base_cost: order.base_cost || 0,
-    address_validation: order.address_validation?.isValid,
+    address_validation: order.address_validation?.isValid ?? null,
+    address_validation_status: order.address_validation?.status || null,
+    address_validation_detail: order.address_validation || null,
     scale_overall_status: order.scale_overall_status || "Need Scale",
     scaledBy: order.scaledBy
         ? { _id: order.scaledBy._id, full_name: order.scaledBy.full_name, email: order.scaledBy.email }
@@ -2371,7 +2824,7 @@ const confirmEtsyScaleForItem = async (req, res) => {
             item.scale_status = "Complete";
             if (note !== undefined) item.qc_note = String(note || "").trim();
             order.scale_overall_status = computeEtsyOverallScaleStatus(order.items);
-            if (order.scale_overall_status === "Ready" && order.address_validation?.isValid === false) {
+            if (order.scale_overall_status === "Ready" && isConfirmedInvalidAddress(order.address_validation)) {
                 order.scale_overall_status = "Address Invalid";
             }
         }
@@ -2554,4 +3007,5 @@ module.exports = {
     updateEtsyCSNoteForItem,
     assignEtsyOrderToCS,
     unassignEtsyOrderFromCS,
+    testEtsySmartyAddressValidation,
 };
