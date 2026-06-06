@@ -1898,10 +1898,15 @@ function normalizeCustomizations(input = {}) {
     };
 }
 
-function normalizeCustomFileStatus(file) {
+function normalizeCustomFileStatus(file, { useExternalCustomFileLink = false } = {}) {
     if (file?.storageUrl) return "downloaded";
     const status = sanitizeCustomString(file?.status);
-    if (["pending_download", "downloaded", "failed", "skipped"].includes(status)) return status;
+    if (["pending_download", "downloaded", "failed", "skipped", "external_link"].includes(status)) return status;
+    const source = sanitizeCustomString(file?.source);
+    const downloadUrl = sanitizeCustomString(file?.downloadUrl || file?.url, 4000);
+    if (useExternalCustomFileLink && source === "etsy_order_detail_dom" && downloadUrl.includes("/ipf/")) {
+        return "external_link";
+    }
     if (file?.downloadUrl || file?.previewUrl) return "pending_download";
     return "skipped";
 }
@@ -1927,7 +1932,9 @@ function normalizeCustomFiles(input = [], fallback = {}) {
                 transactionId,
                 listingId,
                 matchConfidence: sanitizeCustomString(file.matchConfidence),
-                status: normalizeCustomFileStatus(file),
+                status: normalizeCustomFileStatus(file, {
+                    useExternalCustomFileLink: !!(fallback.useExternalCustomFileLink || file.useExternalCustomFileLink),
+                }),
                 errorMessage: sanitizeCustomString(file.errorMessage),
                 downloadedAt: file.downloadedAt ? toDate(file.downloadedAt) : null,
                 createdAt: file.createdAt ? toDate(file.createdAt) || now : now,
@@ -1954,8 +1961,9 @@ function getCustomFileDedupKey(file = {}) {
 
 function mergeCustomFile(existing, incoming) {
     const existingDownloaded = !!existing.storageUrl || existing.status === "downloaded";
+    const existingExternalLink = existing.status === "external_link" && !!existing.downloadUrl && !existing.storageUrl;
     const merged = { ...existing };
-    const preserveKeys = existingDownloaded
+    const preserveKeys = existingDownloaded || existingExternalLink
         ? new Set(["storageUrl", "status", "downloadedAt", "errorMessage"])
         : new Set(["downloadedAt"]);
 
@@ -2057,35 +2065,40 @@ function urlHasTokenLikeParts(url) {
     }
 }
 
-function maskCustomFilesForResponse(files = [], { includeDownloadUrl = false, includePreviewUrl = false } = {}) {
-    return (Array.isArray(files) ? files : []).map((file) => ({
-        source: file.source || "",
-        fileName: file.fileName || "",
-        mimeType: file.mimeType || "",
-        size: file.size ?? null,
-        downloadUrl: includeDownloadUrl ? file.downloadUrl || "" : undefined,
-        downloadUrlMasked: file.downloadUrl ? maskUrlForLog(file.downloadUrl) : "",
-        previewUrl: includePreviewUrl || !urlHasTokenLikeParts(file.previewUrl) ? file.previewUrl || "" : undefined,
-        previewUrlMasked: file.previewUrl ? maskUrlForLog(file.previewUrl) : "",
-        storageUrl: file.storageUrl || "",
-        etsyFileId: file.etsyFileId || "",
-        transactionId: file.transactionId || "",
-        listingId: file.listingId || "",
-        matchConfidence: file.matchConfidence || "",
-        status: file.status || "",
-        errorMessage: file.errorMessage || "",
-        downloadedAt: file.downloadedAt || null,
-        createdAt: file.createdAt || null,
-        updatedAt: file.updatedAt || null,
-    }));
+function maskCustomFilesForResponse(files = [], { includeDownloadUrl = false, includePreviewUrl = false, includeExternalUrl = false } = {}) {
+    return (Array.isArray(files) ? files : []).map((file) => {
+        const isExternalLink = file.status === "external_link" && !file.storageUrl && !!file.downloadUrl;
+        return {
+            source: file.source || "",
+            fileName: file.fileName || "",
+            mimeType: file.mimeType || "",
+            size: file.size ?? null,
+            downloadUrl: includeDownloadUrl ? file.downloadUrl || "" : undefined,
+            downloadUrlMasked: file.downloadUrl ? maskUrlForLog(file.downloadUrl) : "",
+            externalUrl: includeExternalUrl && isExternalLink ? file.downloadUrl || "" : undefined,
+            externalUrlMasked: isExternalLink ? maskUrlForLog(file.downloadUrl) : "",
+            previewUrl: includePreviewUrl || !urlHasTokenLikeParts(file.previewUrl) ? file.previewUrl || "" : undefined,
+            previewUrlMasked: file.previewUrl ? maskUrlForLog(file.previewUrl) : "",
+            storageUrl: file.storageUrl || "",
+            etsyFileId: file.etsyFileId || "",
+            transactionId: file.transactionId || "",
+            listingId: file.listingId || "",
+            matchConfidence: file.matchConfidence || "",
+            status: file.status || "",
+            errorMessage: file.errorMessage || "",
+            downloadedAt: file.downloadedAt || null,
+            createdAt: file.createdAt || null,
+            updatedAt: file.updatedAt || null,
+        };
+    });
 }
 
-function buildCustomItemResponseFields(item = {}) {
+function buildCustomItemResponseFields(item = {}, customFileOptions = {}) {
     const customizations = item.customizations || { textFields: [], buyerNote: "", raw: null };
     const customFiles = Array.isArray(item.customFiles) ? item.customFiles : [];
     return {
         customizations,
-        customFiles: maskCustomFilesForResponse(customFiles),
+        customFiles: maskCustomFilesForResponse(customFiles, customFileOptions),
         customTextCount: (customizations.textFields || []).length + (customizations.buyerNote ? 1 : 0),
         customFileCount: customFiles.length,
         pendingCustomFileCount: customFiles.filter((file) => file?.status === "pending_download").length,
@@ -2114,7 +2127,11 @@ const normalizeItem = (raw, idx) => {
     if (!variations || typeof variations !== "object") variations = {};
     const listingId = firstNonBlankString(raw?.listingId, raw?.listing_id, raw?.listingID, raw?.listing);
     const customizations = normalizeCustomizations(raw?.customizations);
-    const customFiles = normalizeCustomFiles(raw?.customFiles, { transactionId, listingId });
+    const customFiles = normalizeCustomFiles(raw?.customFiles, {
+        transactionId,
+        listingId,
+        useExternalCustomFileLink: raw?.useExternalCustomFileLink === true,
+    });
 
     return {
         transactionId,
@@ -2159,7 +2176,13 @@ const buildEtsyOrderPayload = (body) => {
         throw err;
     }
 
-    const items = Array.isArray(body?.items) ? body.items.map(normalizeItem) : [];
+    const useExternalCustomFileLink = body?.useExternalCustomFileLink === true;
+    const items = Array.isArray(body?.items)
+        ? body.items.map((item, idx) => normalizeItem({
+            ...item,
+            useExternalCustomFileLink: item?.useExternalCustomFileLink === true || useExternalCustomFileLink,
+        }, idx))
+        : [];
     const customSummary = summarizeCustomData(items);
 
     const txSet = new Set();
@@ -2268,10 +2291,14 @@ const backfillExistingEtsyOrder = async (existing, payload) => {
     const existingItemsCount = existingItems.length;
     const itemByTx = new Map();
     const itemByListingSku = new Map();
+    const itemByListing = new Map();
+    const itemBySku = new Map();
 
     for (const item of existingItems) {
         if (item?.transactionId) itemByTx.set(String(item.transactionId), item);
         if (item?.listingId && item?.sku) itemByListingSku.set(`${item.listingId}::${item.sku}`, item);
+        if (item?.listingId) itemByListing.set(String(item.listingId), item);
+        if (item?.sku) itemBySku.set(String(item.sku), item);
     }
 
     let matchedItems = 0;
@@ -2293,7 +2320,11 @@ const backfillExistingEtsyOrder = async (existing, payload) => {
     for (const incoming of incomingItems) {
         const tx = String(incoming.transactionId || "");
         const listingSkuKey = incoming.listingId && incoming.sku ? `${incoming.listingId}::${incoming.sku}` : "";
-        const current = itemByTx.get(tx) || (listingSkuKey ? itemByListingSku.get(listingSkuKey) : null);
+        const current =
+            itemByTx.get(tx) ||
+            (listingSkuKey ? itemByListingSku.get(listingSkuKey) : null) ||
+            (incoming.listingId ? itemByListing.get(String(incoming.listingId)) : null) ||
+            (incoming.sku ? itemBySku.get(String(incoming.sku)) : null);
 
         if (!current) {
             existing.items.push(incoming);
@@ -2946,7 +2977,7 @@ const mapEtsyScaleOrder = (order) => ({
             scale_status: item.scale_status || "Need Scale",
             qc_note: item.qc_note || "",
             cs_note: item.cs_note || "",
-            ...buildCustomItemResponseFields(item),
+            ...buildCustomItemResponseFields(item, { includeExternalUrl: true }),
         };
     }),
     base_cost: order.base_cost || 0,

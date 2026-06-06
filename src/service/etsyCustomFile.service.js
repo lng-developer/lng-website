@@ -17,6 +17,29 @@ const ALLOWED_MIME_TYPES = new Set([
     "application/octet-stream",
 ]);
 const DEFAULT_ALLOWED_HOSTS = ["etsy.com", "www.etsy.com", "i.etsystatic.com", "*.etsystatic.com"];
+const SAFE_CUSTOM_FILE_SOURCES = new Set([
+    "etsy_order_detail_dom",
+    "etsy_order_detail_api",
+    "etsy_customer_upload",
+    "etsy_api",
+]);
+const BLOCKED_ETSY_CUSTOM_FILE_PATTERNS = [
+    /\/legal\//i,
+    /\/cookies/i,
+    /\/privacy/i,
+    /help\.etsy\.com/i,
+    /\/ac\/evergreenVendor\//i,
+    /\.js($|\?)/i,
+    /\.css($|\?)/i,
+    /tracking/i,
+    /analytics/i,
+];
+const VALID_ETSY_CUSTOM_FILE_PATTERNS = [
+    /ipf_fullxfull/i,
+    /ipf_570xN/i,
+    /ipf_300x300/i,
+    /\.(jpe?g|png|webp|gif|heic|pdf)($|\?)/i,
+];
 
 function maskUrlForLog(url) {
     const text = String(url || "").trim();
@@ -110,6 +133,41 @@ function validateCustomFileDownloadUrl(url) {
     return { ok: true, parsed };
 }
 
+function isValidEtsyCustomDownloadFile(file = {}) {
+    const source = String(file.source || "").trim();
+    const downloadUrl = String(file.downloadUrl || "").trim();
+
+    if (!SAFE_CUSTOM_FILE_SOURCES.has(source)) {
+        return { ok: false, reason: "Blocked invalid Etsy custom file URL" };
+    }
+
+    const validation = validateCustomFileDownloadUrl(downloadUrl);
+    if (!validation.ok) {
+        return { ok: false, reason: validation.reason || "Blocked invalid Etsy custom file URL" };
+    }
+
+    const parsed = validation.parsed;
+    const host = parsed.hostname.toLowerCase();
+    const fullUrl = parsed.toString();
+    const fileName = String(file.fileName || "");
+    const searchable = `${fullUrl} ${fileName}`;
+
+    if (host !== "i.etsystatic.com") {
+        return { ok: false, reason: "Blocked invalid Etsy custom file URL" };
+    }
+    if (!parsed.pathname.includes("/ipf/")) {
+        return { ok: false, reason: "Blocked invalid Etsy custom file URL" };
+    }
+    if (BLOCKED_ETSY_CUSTOM_FILE_PATTERNS.some((pattern) => pattern.test(searchable))) {
+        return { ok: false, reason: "Blocked invalid Etsy custom file URL" };
+    }
+    if (!VALID_ETSY_CUSTOM_FILE_PATTERNS.some((pattern) => pattern.test(searchable))) {
+        return { ok: false, reason: "Blocked invalid Etsy custom file URL" };
+    }
+
+    return { ok: true, parsed };
+}
+
 function shortHash(value) {
     const seed = String(value || `${Date.now()}-${crypto.randomUUID()}`);
     return crypto.createHash("sha256").update(seed).digest("hex").slice(0, 12);
@@ -136,6 +194,93 @@ function buildQuery({ orderId, shopId } = {}) {
     if (orderId) query.orderId = String(orderId);
     if (shopId) query.shopId = shopId;
     return query;
+}
+
+function buildExternalLinkQuery({ orderId, shopId } = {}) {
+    const query = {
+        "items.customFiles.source": "etsy_order_detail_dom",
+        "items.customFiles.downloadUrl": /\/ipf\//i,
+        "items.customFiles.status": { $in: ["pending_download", "failed"] },
+        $or: [
+            { "items.customFiles.storageUrl": { $exists: false } },
+            { "items.customFiles.storageUrl": null },
+            { "items.customFiles.storageUrl": "" },
+        ],
+    };
+    if (orderId) query.orderId = String(orderId);
+    if (shopId) query.shopId = shopId;
+    return query;
+}
+
+function isExternalLinkCandidate(file = {}) {
+    const source = String(file.source || "").trim();
+    const downloadUrl = String(file.downloadUrl || "").trim();
+    const storageUrl = String(file.storageUrl || "").trim();
+    const status = String(file.status || "").trim();
+    return (
+        source === "etsy_order_detail_dom" &&
+        downloadUrl.includes("/ipf/") &&
+        !storageUrl &&
+        ["pending_download", "failed"].includes(status)
+    );
+}
+
+async function markEtsyCustomFilesAsExternalLinks({ orderId, shopId, limit = 100, dryRun = false } = {}) {
+    const max = Math.max(1, Number(limit) || 100);
+    const summary = {
+        scannedOrders: 0,
+        scannedFiles: 0,
+        matchedFiles: 0,
+        convertedFiles: 0,
+        dryRun: !!dryRun,
+        results: [],
+    };
+
+    const orders = await EtsyOrder.find(buildExternalLinkQuery({ orderId, shopId }))
+        .sort({ updatedAt: -1, _id: -1 })
+        .limit(max)
+        .exec();
+
+    for (const order of orders) {
+        summary.scannedOrders += 1;
+        let orderChanged = false;
+
+        for (const item of order.items || []) {
+            for (const file of item.customFiles || []) {
+                if (summary.matchedFiles >= max) break;
+                summary.scannedFiles += 1;
+                if (!isExternalLinkCandidate(file)) continue;
+
+                summary.matchedFiles += 1;
+                summary.results.push({
+                    orderId: order.orderId,
+                    transactionId: item.transactionId,
+                    fileName: file.fileName,
+                    fromStatus: file.status,
+                    toStatus: "external_link",
+                    downloadUrlMasked: maskUrlForLog(file.downloadUrl),
+                    previewUrlMasked: maskUrlForLog(file.previewUrl),
+                });
+
+                if (!dryRun) {
+                    file.status = "external_link";
+                    file.errorMessage = "Using Etsy external image URL; not downloaded to storage";
+                    file.updatedAt = new Date();
+                    orderChanged = true;
+                    summary.convertedFiles += 1;
+                }
+            }
+            if (summary.matchedFiles >= max) break;
+        }
+
+        if (orderChanged) {
+            order.markModified("items");
+            await order.save();
+        }
+        if (summary.matchedFiles >= max) break;
+    }
+
+    return summary;
 }
 
 async function downloadPendingEtsyCustomFiles({ orderId, shopId, limit = 20, dryRun = false } = {}) {
@@ -188,21 +333,21 @@ async function downloadPendingEtsyCustomFiles({ orderId, shopId, limit = 20, dry
                     continue;
                 }
 
-                const urlValidation = validateCustomFileDownloadUrl(downloadUrl);
-                if (!urlValidation.ok) {
+                const fileValidation = isValidEtsyCustomDownloadFile(file);
+                if (!fileValidation.ok) {
                     summary.blockedUnsafeUrl += 1;
-                    summary.failed += 1;
+                    summary.skipped += 1;
                     summary.results.push({
                         orderId: order.orderId,
                         transactionId: item.transactionId,
                         fileName: file.fileName,
-                        status: "failed",
-                        errorMessage: "Blocked unsafe downloadUrl",
+                        status: "skipped",
+                        errorMessage: "Blocked invalid Etsy custom file URL",
                         downloadUrlMasked: maskUrlForLog(downloadUrl),
                     });
                     if (!dryRun) {
-                        file.status = "failed";
-                        file.errorMessage = "Blocked unsafe downloadUrl";
+                        file.status = "skipped";
+                        file.errorMessage = "Blocked invalid Etsy custom file URL";
                         file.updatedAt = new Date();
                         orderChanged = true;
                     }
@@ -327,5 +472,7 @@ async function downloadPendingEtsyCustomFiles({ orderId, shopId, limit = 20, dry
 
 module.exports = {
     downloadPendingEtsyCustomFiles,
+    markEtsyCustomFilesAsExternalLinks,
     validateCustomFileDownloadUrl,
+    isValidEtsyCustomDownloadFile,
 };

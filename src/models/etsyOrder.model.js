@@ -38,7 +38,7 @@ const EtsyCustomFileSchema = new Schema(
 
         status: {
             type: String,
-            enum: ["pending_download", "downloaded", "failed", "skipped"],
+            enum: ["pending_download", "downloaded", "failed", "skipped", "external_link"],
             default: "pending_download",
         },
 
