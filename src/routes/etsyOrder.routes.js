@@ -7,6 +7,7 @@ const fs = require('fs');
 const { etsyOrderController } = require("../controllers");
 const orderCustomProductController = require("../controllers/orderCustomProduct.controller");
 const { authenticateToken, authorizeRoles } = require("../middlewares/auth.middleware");
+const { downloadPendingEtsyCustomFiles } = require("../service/etsyCustomFile.service");
 
 const uploadDir = path.join(process.cwd(), 'tmp_uploads');
 if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir, { recursive: true });
@@ -45,6 +46,19 @@ router.get(
 );
 router.patch('/sumbittedoetsy', etsyOrderController.updateSumbittedoetsyStatus);
 router.put('/manual-mapping', authenticateToken, orderCustomProductController.applyManualVendorMapping);
+router.post(
+    '/custom-files/download-pending',
+    authenticateToken,
+    authorizeRoles("Admin", "Design Leader"),
+    async (req, res) => {
+        try {
+            const result = await downloadPendingEtsyCustomFiles(req.body || {});
+            return res.json({ ok: true, ...result });
+        } catch (err) {
+            return res.status(500).json({ ok: false, message: err.message });
+        }
+    }
+);
 router.post(
     '/:orderId/items/:transactionId/fulfillment-file',
     authenticateToken,

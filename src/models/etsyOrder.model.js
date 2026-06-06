@@ -1,6 +1,55 @@
 const mongoose = require("mongoose");
 const { Schema } = mongoose;
 
+const EtsyCustomTextFieldSchema = new Schema(
+    {
+        name: { type: String, default: "" },
+        value: { type: String, default: "" },
+        source: { type: String, default: "" },
+    },
+    { _id: false }
+);
+
+const EtsyItemCustomizationsSchema = new Schema(
+    {
+        textFields: { type: [EtsyCustomTextFieldSchema], default: [] },
+        buyerNote: { type: String, default: "" },
+        raw: { type: Schema.Types.Mixed, default: null },
+    },
+    { _id: false }
+);
+
+const EtsyCustomFileSchema = new Schema(
+    {
+        source: { type: String, default: "" },
+        fileName: { type: String, default: "" },
+        mimeType: { type: String, default: "" },
+        size: { type: Number, default: null },
+
+        downloadUrl: { type: String, default: "" },
+        previewUrl: { type: String, default: "" },
+        storageUrl: { type: String, default: "" },
+
+        etsyFileId: { type: String, default: "" },
+        transactionId: { type: String, default: "" },
+        listingId: { type: String, default: "" },
+
+        matchConfidence: { type: String, default: "" },
+
+        status: {
+            type: String,
+            enum: ["pending_download", "downloaded", "failed", "skipped"],
+            default: "pending_download",
+        },
+
+        errorMessage: { type: String, default: "" },
+        downloadedAt: { type: Date, default: null },
+        createdAt: { type: Date, default: Date.now },
+        updatedAt: { type: Date, default: Date.now },
+    },
+    { _id: false }
+);
+
 const EtsyOrderItemEmbeddedSchema = new Schema(
     {
         transactionId: { type: String, required: true }, // unique in order (enforce by import logic)
@@ -34,6 +83,16 @@ const EtsyOrderItemEmbeddedSchema = new Schema(
             type: Map,
             of: String,
             default: {},
+        },
+
+        customizations: {
+            type: EtsyItemCustomizationsSchema,
+            default: () => ({ textFields: [], buyerNote: "", raw: null }),
+        },
+
+        customFiles: {
+            type: [EtsyCustomFileSchema],
+            default: [],
         },
 
         scale_status: {

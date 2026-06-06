@@ -27,6 +27,7 @@ const ALLOWED_FOLDERS = [
   "temp",
   "exports",
   "fulfillment_files",
+  "custom_files",
   "snapshot_images",
 ];
 
