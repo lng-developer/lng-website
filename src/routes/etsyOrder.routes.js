@@ -7,7 +7,10 @@ const fs = require('fs');
 const { etsyOrderController } = require("../controllers");
 const orderCustomProductController = require("../controllers/orderCustomProduct.controller");
 const { authenticateToken, authorizeRoles } = require("../middlewares/auth.middleware");
-const { downloadPendingEtsyCustomFiles } = require("../service/etsyCustomFile.service");
+const {
+    downloadPendingEtsyCustomFiles,
+    markEtsyCustomFilesAsExternalLinks,
+} = require("../service/etsyCustomFile.service");
 
 const uploadDir = path.join(process.cwd(), 'tmp_uploads');
 if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir, { recursive: true });
@@ -53,6 +56,19 @@ router.post(
     async (req, res) => {
         try {
             const result = await downloadPendingEtsyCustomFiles(req.body || {});
+            return res.json({ ok: true, ...result });
+        } catch (err) {
+            return res.status(500).json({ ok: false, message: err.message });
+        }
+    }
+);
+router.post(
+    '/custom-files/mark-external-links',
+    authenticateToken,
+    authorizeRoles("Admin", "Design Leader"),
+    async (req, res) => {
+        try {
+            const result = await markEtsyCustomFilesAsExternalLinks(req.body || {});
             return res.json({ ok: true, ...result });
         } catch (err) {
             return res.status(500).json({ ok: false, message: err.message });
