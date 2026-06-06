@@ -816,11 +816,26 @@ const importOrders = async (req, res) => {
                         variationsRaw: row["Variations"],
                         variations: parseVariations(row["Variations"]),
                         baseImage: baseImageUrl ? { imageUrl: baseImageUrl } : undefined,
+                        customizations: { textFields: [], buyerNote: "", raw: null },
+                        customFiles: [],
                     };
 
                     const updateExisting = await EtsyOrder.updateOne(
                         { orderId, shopId, "items.transactionId": itemDoc.transactionId },
-                        { $set: { "items.$": itemDoc } }
+                        {
+                            $set: {
+                                "items.$.transactionId": itemDoc.transactionId,
+                                "items.$.listingId": itemDoc.listingId,
+                                "items.$.sku": itemDoc.sku,
+                                "items.$.itemName": itemDoc.itemName,
+                                "items.$.quantity": itemDoc.quantity,
+                                "items.$.unitPrice": itemDoc.unitPrice,
+                                "items.$.itemTotal": itemDoc.itemTotal,
+                                "items.$.variationsRaw": itemDoc.variationsRaw,
+                                "items.$.variations": itemDoc.variations,
+                                "items.$.baseImage": itemDoc.baseImage,
+                            },
+                        }
                     );
 
                     if (updateExisting.matchedCount === 0) {
@@ -828,6 +843,11 @@ const importOrders = async (req, res) => {
                             { orderId, shopId },
                             { $push: { items: itemDoc } }
                         );
+                    } else {
+                        console.log("[ETSY_CUSTOM_DATA][CSV_IMPORT_PRESERVE_CUSTOM]", {
+                            orderId,
+                            transactionId: itemDoc.transactionId,
+                        });
                     }
 
                     // 🔥 GIỮ NGUYÊN SELLER FLOW
@@ -1076,6 +1096,7 @@ const getListOrders = async (req, res) => {
                         cost_center,
                         tracking_info: item.tracking_info || {},
                         scale_status: item.scale_status || null,
+                        ...buildCustomItemResponseFields(item),
                     };
                 }),
                 base_cost: order.base_cost || 0,
@@ -1810,6 +1831,268 @@ const isEmptyObject = (value) => (
     Object.keys(value).length === 0
 );
 
+const MAX_CUSTOM_TEXT_FIELDS = 50;
+const MAX_CUSTOM_FILES = 50;
+const MAX_CUSTOM_STRING = 2000;
+const CUSTOM_FILE_CONTENT_KEYS = ["base64", "buffer", "data", "fileContent", "content"];
+
+function sanitizeCustomString(value, max = MAX_CUSTOM_STRING) {
+    if (value === null || value === undefined) return "";
+    return String(value).trim().slice(0, max);
+}
+
+function maskUrlForLog(url) {
+    const text = sanitizeCustomString(url, 4000);
+    if (!text) return "";
+    try {
+        const parsed = new URL(text);
+        parsed.search = parsed.search ? "?..." : "";
+        parsed.hash = parsed.hash ? "#..." : "";
+        return parsed.toString();
+    } catch (_err) {
+        const idx = text.indexOf("?");
+        return idx === -1 ? text : `${text.slice(0, idx)}?...`;
+    }
+}
+
+function hasUnsafeInlineFileContent(value) {
+    if (!value || typeof value !== "object") return false;
+    return CUSTOM_FILE_CONTENT_KEYS.some((key) => {
+        const raw = value[key];
+        if (typeof raw !== "string") return raw !== undefined && raw !== null;
+        return raw.length > MAX_CUSTOM_STRING || raw.startsWith("data:");
+    });
+}
+
+function sanitizeCustomRaw(value) {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+    const out = {};
+    for (const [key, raw] of Object.entries(value)) {
+        if (CUSTOM_FILE_CONTENT_KEYS.includes(key)) continue;
+        if (raw && typeof raw === "object") continue;
+        out[key] = typeof raw === "string" ? sanitizeCustomString(raw) : raw;
+    }
+    return Object.keys(out).length ? out : null;
+}
+
+function normalizeCustomizations(input = {}) {
+    if (!input || typeof input !== "object" || Array.isArray(input)) {
+        return { textFields: [], buyerNote: "", raw: null };
+    }
+
+    const textFields = Array.isArray(input.textFields)
+        ? input.textFields
+            .slice(0, MAX_CUSTOM_TEXT_FIELDS)
+            .map((field) => ({
+                name: sanitizeCustomString(field?.name),
+                value: sanitizeCustomString(field?.value),
+                source: sanitizeCustomString(field?.source),
+            }))
+            .filter((field) => field.name || field.value)
+        : [];
+
+    return {
+        textFields,
+        buyerNote: sanitizeCustomString(input.buyerNote),
+        raw: sanitizeCustomRaw(input.raw),
+    };
+}
+
+function normalizeCustomFileStatus(file) {
+    if (file?.storageUrl) return "downloaded";
+    const status = sanitizeCustomString(file?.status);
+    if (["pending_download", "downloaded", "failed", "skipped"].includes(status)) return status;
+    if (file?.downloadUrl || file?.previewUrl) return "pending_download";
+    return "skipped";
+}
+
+function normalizeCustomFiles(input = [], fallback = {}) {
+    if (!Array.isArray(input)) return [];
+    return input
+        .slice(0, MAX_CUSTOM_FILES)
+        .filter((file) => file && typeof file === "object" && !hasUnsafeInlineFileContent(file))
+        .map((file) => {
+            const transactionId = sanitizeCustomString(file.transactionId || fallback.transactionId);
+            const listingId = sanitizeCustomString(file.listingId || fallback.listingId);
+            const now = new Date();
+            return {
+                source: sanitizeCustomString(file.source),
+                fileName: sanitizeCustomString(file.fileName || file.name || file.filename),
+                mimeType: sanitizeCustomString(file.mimeType || file.type),
+                size: toNumber(file.size),
+                downloadUrl: sanitizeCustomString(file.downloadUrl || file.url, 4000),
+                previewUrl: sanitizeCustomString(file.previewUrl || file.thumbnailUrl, 4000),
+                storageUrl: sanitizeCustomString(file.storageUrl, 4000),
+                etsyFileId: sanitizeCustomString(file.etsyFileId || file.fileId || file.id),
+                transactionId,
+                listingId,
+                matchConfidence: sanitizeCustomString(file.matchConfidence),
+                status: normalizeCustomFileStatus(file),
+                errorMessage: sanitizeCustomString(file.errorMessage),
+                downloadedAt: file.downloadedAt ? toDate(file.downloadedAt) : null,
+                createdAt: file.createdAt ? toDate(file.createdAt) || now : now,
+                updatedAt: now,
+            };
+        })
+        .filter((file) => (
+            file.fileName ||
+            file.downloadUrl ||
+            file.previewUrl ||
+            file.storageUrl ||
+            file.etsyFileId
+        ));
+}
+
+function getCustomFileDedupKey(file = {}) {
+    if (file.etsyFileId) return `etsyFileId:${file.etsyFileId}`;
+    if (file.downloadUrl) return `downloadUrl:${file.downloadUrl}`;
+    if (file.previewUrl) return `previewUrl:${file.previewUrl}`;
+    if (file.transactionId && file.fileName) return `txFile:${file.transactionId}:${file.fileName}`;
+    if (file.listingId && file.fileName) return `listingFile:${file.listingId}:${file.fileName}`;
+    return "";
+}
+
+function mergeCustomFile(existing, incoming) {
+    const existingDownloaded = !!existing.storageUrl || existing.status === "downloaded";
+    const merged = { ...existing };
+    const preserveKeys = existingDownloaded
+        ? new Set(["storageUrl", "status", "downloadedAt", "errorMessage"])
+        : new Set(["downloadedAt"]);
+
+    for (const [key, value] of Object.entries(incoming || {})) {
+        if (preserveKeys.has(key)) continue;
+        if ((merged[key] === null || merged[key] === undefined || merged[key] === "") && value !== null && value !== undefined && value !== "") {
+            merged[key] = value;
+        }
+    }
+
+    merged.updatedAt = new Date();
+    return merged;
+}
+
+function mergeCustomFiles(existingFiles = [], incomingFiles = []) {
+    const merged = Array.isArray(existingFiles) ? existingFiles.map((file) => ({ ...(file?.toObject?.() || file) })) : [];
+    let added = 0;
+    let mergedCount = 0;
+    const indexByKey = new Map();
+
+    merged.forEach((file, index) => {
+        const key = getCustomFileDedupKey(file);
+        if (key) indexByKey.set(key, index);
+    });
+
+    for (const incoming of Array.isArray(incomingFiles) ? incomingFiles : []) {
+        const key = getCustomFileDedupKey(incoming);
+        const existingIndex = key ? indexByKey.get(key) : -1;
+        if (existingIndex !== undefined && existingIndex >= 0) {
+            merged[existingIndex] = mergeCustomFile(merged[existingIndex], incoming);
+            mergedCount += 1;
+            continue;
+        }
+        merged.push(incoming);
+        added += 1;
+        if (key) indexByKey.set(key, merged.length - 1);
+    }
+
+    return {
+        files: merged.slice(0, MAX_CUSTOM_FILES),
+        added,
+        merged: mergedCount,
+        changed: added > 0 || mergedCount > 0,
+    };
+}
+
+function mergeCustomizations(existing = {}, incoming = {}) {
+    const current = normalizeCustomizations(existing);
+    const next = normalizeCustomizations(incoming);
+    const seen = new Set(current.textFields.map((field) => `${field.name}::${field.value}::${field.source}`));
+    let addedTextFields = 0;
+
+    for (const field of next.textFields) {
+        const key = `${field.name}::${field.value}::${field.source}`;
+        if (seen.has(key)) continue;
+        current.textFields.push(field);
+        seen.add(key);
+        addedTextFields += 1;
+    }
+
+    if (current.textFields.length > MAX_CUSTOM_TEXT_FIELDS) current.textFields = current.textFields.slice(0, MAX_CUSTOM_TEXT_FIELDS);
+    const buyerNoteChanged = !!next.buyerNote && next.buyerNote !== current.buyerNote;
+    const rawChanged = !!next.raw;
+    if (buyerNoteChanged) current.buyerNote = next.buyerNote;
+    if (rawChanged) current.raw = next.raw;
+
+    return {
+        customizations: current,
+        addedTextFields,
+        changed: addedTextFields > 0 || buyerNoteChanged || rawChanged,
+    };
+}
+
+function summarizeCustomData(items = []) {
+    const summary = {
+        totalItems: Array.isArray(items) ? items.length : 0,
+        itemsWithCustomText: 0,
+        itemsWithCustomFiles: 0,
+        totalCustomFiles: 0,
+    };
+    for (const item of items || []) {
+        const textCount = item?.customizations?.textFields?.length || 0;
+        const fileCount = item?.customFiles?.length || 0;
+        if (textCount > 0 || item?.customizations?.buyerNote) summary.itemsWithCustomText += 1;
+        if (fileCount > 0) summary.itemsWithCustomFiles += 1;
+        summary.totalCustomFiles += fileCount;
+    }
+    return summary;
+}
+
+function urlHasTokenLikeParts(url) {
+    const text = String(url || "");
+    if (!text) return false;
+    try {
+        const parsed = new URL(text);
+        return !!parsed.search || !!parsed.hash;
+    } catch (_err) {
+        return text.includes("?");
+    }
+}
+
+function maskCustomFilesForResponse(files = [], { includeDownloadUrl = false, includePreviewUrl = false } = {}) {
+    return (Array.isArray(files) ? files : []).map((file) => ({
+        source: file.source || "",
+        fileName: file.fileName || "",
+        mimeType: file.mimeType || "",
+        size: file.size ?? null,
+        downloadUrl: includeDownloadUrl ? file.downloadUrl || "" : undefined,
+        downloadUrlMasked: file.downloadUrl ? maskUrlForLog(file.downloadUrl) : "",
+        previewUrl: includePreviewUrl || !urlHasTokenLikeParts(file.previewUrl) ? file.previewUrl || "" : undefined,
+        previewUrlMasked: file.previewUrl ? maskUrlForLog(file.previewUrl) : "",
+        storageUrl: file.storageUrl || "",
+        etsyFileId: file.etsyFileId || "",
+        transactionId: file.transactionId || "",
+        listingId: file.listingId || "",
+        matchConfidence: file.matchConfidence || "",
+        status: file.status || "",
+        errorMessage: file.errorMessage || "",
+        downloadedAt: file.downloadedAt || null,
+        createdAt: file.createdAt || null,
+        updatedAt: file.updatedAt || null,
+    }));
+}
+
+function buildCustomItemResponseFields(item = {}) {
+    const customizations = item.customizations || { textFields: [], buyerNote: "", raw: null };
+    const customFiles = Array.isArray(item.customFiles) ? item.customFiles : [];
+    return {
+        customizations,
+        customFiles: maskCustomFilesForResponse(customFiles),
+        customTextCount: (customizations.textFields || []).length + (customizations.buyerNote ? 1 : 0),
+        customFileCount: customFiles.length,
+        pendingCustomFileCount: customFiles.filter((file) => file?.status === "pending_download").length,
+        downloadedCustomFileCount: customFiles.filter((file) => file?.status === "downloaded").length,
+    };
+}
+
 const deriveSellerCodeFromItems = (items = []) => {
     for (const item of items) {
         const sellerCode = getSellerCodeFromSku(item?.sku);
@@ -1829,10 +2112,13 @@ const normalizeItem = (raw, idx) => {
     let variations = raw?.variations;
     if (typeof variations === "string") variations = parseVariations(variations);
     if (!variations || typeof variations !== "object") variations = {};
+    const listingId = firstNonBlankString(raw?.listingId, raw?.listing_id, raw?.listingID, raw?.listing);
+    const customizations = normalizeCustomizations(raw?.customizations);
+    const customFiles = normalizeCustomFiles(raw?.customFiles, { transactionId, listingId });
 
     return {
         transactionId,
-        listingId: firstNonBlankString(raw?.listingId, raw?.listing_id, raw?.listingID, raw?.listing),
+        listingId,
         sku: firstNonBlankString(
             raw?.sku,
             raw?.SKU,
@@ -1853,6 +2139,8 @@ const normalizeItem = (raw, idx) => {
             width: toInt(raw.baseImage.width),
             height: toInt(raw.baseImage.height),
         } : undefined,
+        customizations,
+        customFiles,
     };
 };
 
@@ -1872,6 +2160,7 @@ const buildEtsyOrderPayload = (body) => {
     }
 
     const items = Array.isArray(body?.items) ? body.items.map(normalizeItem) : [];
+    const customSummary = summarizeCustomData(items);
 
     const txSet = new Set();
     for (const it of items) {
@@ -1892,6 +2181,12 @@ const buildEtsyOrderPayload = (body) => {
     const shippingType = body?.shipping_type && SHIPPING_TYPE_ENUM.includes(body.shipping_type)
         ? body.shipping_type
         : "Standard";
+
+    console.log("[ETSY_CUSTOM_DATA][IMPORT_PAYLOAD_SUMMARY]", {
+        orderId,
+        shopId: String(shopIdRaw),
+        ...customSummary,
+    });
 
     return {
         orderId,
@@ -1972,9 +2267,11 @@ const backfillExistingEtsyOrder = async (existing, payload) => {
     const existingItems = Array.isArray(existing.items) ? existing.items : [];
     const existingItemsCount = existingItems.length;
     const itemByTx = new Map();
+    const itemByListingSku = new Map();
 
     for (const item of existingItems) {
         if (item?.transactionId) itemByTx.set(String(item.transactionId), item);
+        if (item?.listingId && item?.sku) itemByListingSku.set(`${item.listingId}::${item.sku}`, item);
     }
 
     let matchedItems = 0;
@@ -1982,6 +2279,9 @@ const backfillExistingEtsyOrder = async (existing, payload) => {
     let addedItems = 0;
     let skuBackfilled = 0;
     let listingIdBackfilled = 0;
+    let customTextBackfilled = 0;
+    let customFilesBackfilled = 0;
+    let customFilesMerged = 0;
     const samples = [];
 
     const backfillField = (target, source, field) => {
@@ -1992,11 +2292,14 @@ const backfillExistingEtsyOrder = async (existing, payload) => {
 
     for (const incoming of incomingItems) {
         const tx = String(incoming.transactionId || "");
-        const current = itemByTx.get(tx);
+        const listingSkuKey = incoming.listingId && incoming.sku ? `${incoming.listingId}::${incoming.sku}` : "";
+        const current = itemByTx.get(tx) || (listingSkuKey ? itemByListingSku.get(listingSkuKey) : null);
 
         if (!current) {
             existing.items.push(incoming);
             addedItems += 1;
+            customTextBackfilled += incoming.customizations?.textFields?.length || 0;
+            customFilesBackfilled += incoming.customFiles?.length || 0;
             samples.push({
                 transactionId: tx,
                 action: "added",
@@ -2039,6 +2342,21 @@ const backfillExistingEtsyOrder = async (existing, payload) => {
 
         if ((current.cost_breakdown === null || current.cost_breakdown === undefined) && incoming.cost_breakdown !== null && incoming.cost_breakdown !== undefined) {
             current.cost_breakdown = incoming.cost_breakdown;
+            itemChanged = true;
+        }
+
+        const mergedCustomizations = mergeCustomizations(current.customizations, incoming.customizations);
+        if (mergedCustomizations.changed) {
+            current.customizations = mergedCustomizations.customizations;
+            customTextBackfilled += mergedCustomizations.addedTextFields;
+            itemChanged = true;
+        }
+
+        const mergedCustomFiles = mergeCustomFiles(current.customFiles, incoming.customFiles);
+        if (mergedCustomFiles.changed) {
+            current.customFiles = mergedCustomFiles.files;
+            customFilesBackfilled += mergedCustomFiles.added;
+            customFilesMerged += mergedCustomFiles.merged;
             itemChanged = true;
         }
 
@@ -2112,6 +2430,9 @@ const backfillExistingEtsyOrder = async (existing, payload) => {
         skuBackfilled,
         listingIdBackfilled,
         shippingBackfilled,
+        customTextBackfilled,
+        customFilesBackfilled,
+        customFilesMerged,
         sample: samples.slice(0, 20),
     });
 
@@ -2122,6 +2443,10 @@ const backfillExistingEtsyOrder = async (existing, payload) => {
         skuBackfilled,
         listingIdBackfilled,
         shippingBackfilled,
+        customTextBackfilled,
+        customFilesBackfilled,
+        customFilesMerged,
+        customSummary: summarizeCustomData(existing.items || []),
     };
 };
 
@@ -2136,6 +2461,14 @@ const createOrder = async (req, res) => {
                 await fillSellerIfMissing(payload.orderId, payload.shopId, payload.seller.sellerCode);
             }
             await validateAddressIfNeeded(existing, { force: true });
+            console.log("[ETSY_CUSTOM_DATA][BACKFILL_SUMMARY]", {
+                orderId: payload.orderId,
+                shopId: String(payload.shopId),
+                customTextBackfilled: result.customTextBackfilled,
+                customFilesBackfilled: result.customFilesBackfilled,
+                customFilesMerged: result.customFilesMerged,
+                customSummary: result.customSummary,
+            });
             return res.status(200).json({
                 ok: true,
                 duplicated: true,
@@ -2146,6 +2479,10 @@ const createOrder = async (req, res) => {
                 skuBackfilled: result.skuBackfilled,
                 listingIdBackfilled: result.listingIdBackfilled,
                 shippingBackfilled: result.shippingBackfilled,
+                customTextBackfilled: result.customTextBackfilled,
+                customFilesBackfilled: result.customFilesBackfilled,
+                customFilesMerged: result.customFilesMerged,
+                customSummary: result.customSummary,
             });
         }
 
@@ -2154,7 +2491,18 @@ const createOrder = async (req, res) => {
         if (payload.seller?.sellerCode) {
             await fillSellerIfMissing(payload.orderId, payload.shopId, payload.seller.sellerCode);
         }
-        return res.status(201).json(doc);
+        console.log("[ETSY_CUSTOM_DATA][CREATE_ORDER_SUMMARY]", {
+            orderId: payload.orderId,
+            shopId: String(payload.shopId),
+            ...summarizeCustomData(payload.items || []),
+        });
+        return res.status(201).json({
+            ok: true,
+            created: true,
+            orderId: doc.orderId,
+            shopId: String(doc.shopId),
+            customSummary: summarizeCustomData(doc.items || []),
+        });
     } catch (err) {
         if (err?.status === 400) return res.status(400).json({ message: err.message });
         if (err?.code === 11000) return res.status(409).json({ message: "Duplicate orderId", keyValue: err.keyValue });
@@ -2598,6 +2946,7 @@ const mapEtsyScaleOrder = (order) => ({
             scale_status: item.scale_status || "Need Scale",
             qc_note: item.qc_note || "",
             cs_note: item.cs_note || "",
+            ...buildCustomItemResponseFields(item),
         };
     }),
     base_cost: order.base_cost || 0,
