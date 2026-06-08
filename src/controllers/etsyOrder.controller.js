@@ -251,6 +251,14 @@ const buildEtsySmartyValidationResult = ({
     smartyResponse,
 });
 
+const getSmartyDpvMatchCode = (candidate = {}) => (
+    String(candidate?.analysis?.dpv_match_code || "").trim().toUpperCase()
+);
+
+const isSmartyCandidateDeliverable = (candidate = {}) => (
+    getSmartyDpvMatchCode(candidate) === "Y"
+);
+
 const isUsShippingCountry = (country) => {
     const normalized = String(country || "").trim().toLowerCase().replace(/\./g, "");
     return ["us", "usa", "united states", "united states of america"].includes(normalized);
@@ -359,13 +367,40 @@ const validateAddressWithSmarty = async (address, context = {}) => {
 
         const data = response.data;
         if (Array.isArray(data) && data.length > 0) {
+            const firstCandidate = data[0];
+            const dpvMatchCode = getSmartyDpvMatchCode(firstCandidate);
+            if (!isSmartyCandidateDeliverable(firstCandidate)) {
+                const result = buildEtsySmartyValidationResult({
+                    status: "invalid",
+                    isValid: false,
+                    httpStatus: 200,
+                    errorCode: "SMARTY_DPV_NOT_CONFIRMED",
+                    errorMessage: `Smarty candidate DPV is not confirmed${dpvMatchCode ? ` (${dpvMatchCode})` : ""}`,
+                    request,
+                    smartyResponse: {
+                        firstCandidate,
+                        candidatesCount: data.length,
+                        rawCandidates: data,
+                    },
+                });
+                logEtsySmartyAddressValidation("Smarty returned candidates but DPV is not confirmed", {
+                    ...logContext,
+                    httpStatus: result.httpStatus,
+                    status: result.status,
+                    errorCode: result.errorCode,
+                    dpvMatchCode: dpvMatchCode || null,
+                    candidatesCount: data.length,
+                });
+                return result;
+            }
+
             const result = buildEtsySmartyValidationResult({
                 status: "valid",
                 isValid: true,
                 httpStatus: 200,
                 request,
                 smartyResponse: {
-                    firstCandidate: data[0],
+                    firstCandidate,
                     candidatesCount: data.length,
                     rawCandidates: data,
                 },
@@ -1831,6 +1866,79 @@ const isEmptyObject = (value) => (
     Object.keys(value).length === 0
 );
 
+const normalizeEtsyShippingPayload = (body = {}) => {
+    const shipping = body.shipping && typeof body.shipping === "object" ? body.shipping : {};
+    const customer = body.customer_infor && typeof body.customer_infor === "object" ? body.customer_infor : {};
+
+    return {
+        name: firstNonBlankString(
+            shipping.name,
+            shipping.fullName,
+            shipping.full_name,
+            customer.name,
+            body.shipName,
+            body.shippingName
+        ),
+        address1: firstNonBlankString(
+            shipping.address1,
+            shipping.address_1,
+            shipping.address,
+            shipping.street,
+            shipping.street1,
+            customer.address,
+            customer.address1,
+            customer.address_1,
+            body.address1,
+            body.address
+        ),
+        address2: firstNonBlankString(
+            shipping.address2,
+            shipping.address_2,
+            shipping.street2,
+            customer.address_2,
+            customer.address2,
+            body.address2,
+            body.address_2
+        ),
+        city: firstNonBlankString(
+            shipping.city,
+            customer.city,
+            body.city
+        ),
+        state: firstNonBlankString(
+            shipping.state,
+            shipping.province,
+            customer.state,
+            customer.province,
+            body.state
+        ),
+        zipcode: firstNonBlankString(
+            shipping.zipcode,
+            shipping.zip_code,
+            shipping.zip,
+            shipping.postalCode,
+            shipping.postal_code,
+            customer.zip_code,
+            customer.zipcode,
+            customer.zip,
+            customer.postalCode,
+            customer.postal_code,
+            body.zipcode,
+            body.zip_code,
+            body.zip
+        ),
+        country: firstNonBlankString(
+            shipping.country,
+            shipping.countryCode,
+            shipping.country_code,
+            customer.country,
+            customer.countryCode,
+            customer.country_code,
+            body.country
+        ),
+    };
+};
+
 const MAX_CUSTOM_TEXT_FIELDS = 50;
 const MAX_CUSTOM_FILES = 50;
 const MAX_CUSTOM_STRING = 2000;
@@ -2245,15 +2353,7 @@ const buildEtsyOrderPayload = (body) => {
             details: body?.coupon?.details ? String(body.coupon.details) : undefined,
         },
 
-        shipping: {
-            name: body?.shipping?.name ? String(body.shipping.name) : undefined,
-            address1: body?.shipping?.address1 ? String(body.shipping.address1) : undefined,
-            address2: body?.shipping?.address2 ? String(body.shipping.address2) : undefined,
-            city: body?.shipping?.city ? String(body.shipping.city) : undefined,
-            state: body?.shipping?.state ? String(body.shipping.state) : undefined,
-            zipcode: body?.shipping?.zipcode ? String(body.shipping.zipcode) : undefined,
-            country: body?.shipping?.country ? String(body.shipping.country) : undefined,
-        },
+        shipping: normalizeEtsyShippingPayload(body),
 
         shipping_type: shippingType,
 
