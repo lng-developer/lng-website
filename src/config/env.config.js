@@ -1,0 +1,36 @@
+const fs = require("fs");
+const path = require("path");
+const dotenv = require("dotenv");
+
+let loaded = false;
+
+function getEnvFile() {
+  const explicit = process.env.ENV_FILE || process.env.DOTENV_CONFIG_PATH;
+  if (explicit) return explicit;
+
+  const envName = String(process.env.NODE_ENV || "").trim().toLowerCase();
+  if (envName === "test") return ".env.test";
+  if (envName === "production") return ".env.production";
+  return ".env";
+}
+
+function loadEnv() {
+  if (loaded) return process.env;
+
+  const envFile = getEnvFile();
+  const envPath = path.resolve(process.cwd(), envFile);
+  const fallbackPath = path.resolve(process.cwd(), ".env");
+
+  if (fs.existsSync(envPath)) {
+    dotenv.config({ path: envPath });
+  } else if (envPath !== fallbackPath && fs.existsSync(fallbackPath)) {
+    dotenv.config({ path: fallbackPath });
+  } else {
+    dotenv.config();
+  }
+
+  loaded = true;
+  return process.env;
+}
+
+module.exports = loadEnv;

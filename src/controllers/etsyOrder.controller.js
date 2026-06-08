@@ -3148,6 +3148,7 @@ function normalizeEtsyProviderKey(vendorDoc) {
     if (ft.includes("pgprint") || nm.includes("pgprint")) return "pgprint";
     if (ft.includes("luxurypro") || nm.includes("luxurypro")) return "luxurypro";
     if (ft.includes("luxury pro") || nm.includes("luxury pro")) return "luxurypro";
+    if (ft.includes("onos") || nm.includes("onos")) return "onos";
     if (ft.includes("lng") || nm.includes("lng")) return "lng";
     return null;
 }

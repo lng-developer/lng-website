@@ -20,6 +20,9 @@ tmp_uploads/
 *.csv
 *.txt
 
+.env.test
+.env.production
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json

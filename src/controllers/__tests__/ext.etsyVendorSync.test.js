@@ -55,14 +55,21 @@ describe("ext Etsy vendor sync", () => {
         shopId: "6881aba9c1bbdfc541b5cd4d",
         items: [{ cost_breakdown: { vendorProductId: "vp-unknown" } }],
       },
+      {
+        orderId: "ETSY-3",
+        shopId: "6881aba9c1bbdfc541b5cd4d",
+        items: [{ cost_breakdown: { vendorProductId: "vp-onos" } }],
+      },
     ]);
     mockSelectLean(db.vendorProduct.find, [
       { _id: "vp-beeful", vendor_id: "vendor-beeful" },
       { _id: "vp-unknown", vendor_id: "vendor-unknown" },
+      { _id: "vp-onos", vendor_id: "vendor-onos" },
     ]);
     mockSelectLean(db.vendor.find, [
       { _id: "vendor-beeful", name: "Grabink Beeful", fulfillment_type: "Beeful" },
       { _id: "vendor-unknown", name: "Other Vendor", fulfillment_type: "Other" },
+      { _id: "vendor-onos", name: "OnosPOD", fulfillment_type: "onos" },
     ]);
 
     const result = await controller.runEtsyVendorBatch({
@@ -78,13 +85,18 @@ describe("ext Etsy vendor sync", () => {
     expect(result).toEqual({
       ok: true,
       mode: "dry-run",
-      scanned: 1,
-      orderIds: ["ETSY-1"],
+      scanned: 2,
+      orderIds: ["ETSY-1", "ETSY-3"],
       vendorsPerOrder: [
         {
           orderId: "ETSY-1",
           shopId: "6881aba9c1bbdfc541b5cd4d",
           vendorKeys: ["beeful"],
+        },
+        {
+          orderId: "ETSY-3",
+          shopId: "6881aba9c1bbdfc541b5cd4d",
+          vendorKeys: ["onos"],
         },
       ],
     });

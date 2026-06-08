@@ -43,7 +43,7 @@ const {
 
 const mongoose = require("mongoose");
 
-require("dotenv").config();
+require("../config/env.config")();
 
 const ALLOWED = ["New", "Fulfilled", "Shipping", "Shipped", "Canceled", "Cancelled"];
 const isCanceledStatus = (s) => s === "Canceled" || s === "Cancelled";
