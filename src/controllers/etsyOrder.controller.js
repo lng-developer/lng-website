@@ -722,10 +722,19 @@ const importOrders = async (req, res) => {
             /* ===== ORDER FILE ===== */
             if (type === "orders") {
                 const affectedOrders = new Set();
+                const orderShippingByOrderId = new Map();
                 const bulkOps = rows
                     .map(row => {
                         if (!row["Order ID"]) return null;
                         affectedOrders.add(row["Order ID"]);
+                        orderShippingByOrderId.set(row["Order ID"], {
+                            address1: row["Street 1"],
+                            address2: row["Street 2"],
+                            city: row["Ship City"],
+                            state: row["Ship State"],
+                            zipcode: row["Ship Zipcode"],
+                            country: row["Ship Country"],
+                        });
 
                         const orderValue = toNumber(row["Order Value"]) || 0;
                         const shipping = toNumber(row["Shipping"]) || 0;
@@ -795,13 +804,28 @@ const importOrders = async (req, res) => {
                     })
                     .filter(Boolean);
 
+                const shippingChangedOrderIds = new Set();
+                if (affectedOrders.size > 0) {
+                    const existingOrders = await EtsyOrder.find({ orderId: { $in: [...affectedOrders] }, shopId })
+                        .select({ orderId: 1, shipping: 1 })
+                        .lean();
+                    const existingByOrderId = new Map(existingOrders.map((order) => [String(order.orderId), order]));
+                    for (const oid of affectedOrders) {
+                        const existing = existingByOrderId.get(String(oid));
+                        const incomingShipping = orderShippingByOrderId.get(String(oid)) || {};
+                        if (!existing || hasEtsyShippingAddressChanged(existing.shipping || {}, incomingShipping)) {
+                            shippingChangedOrderIds.add(String(oid));
+                        }
+                    }
+                }
+
                 if (bulkOps.length) {
                     await EtsyOrder.bulkWrite(bulkOps, { ordered: false });
                 }
 
                 for (const oid of affectedOrders) {
                     const order = await EtsyOrder.findOne({ orderId: oid, shopId });
-                    await validateAddressIfNeeded(order, { force: true });
+                    await validateAddressIfNeeded(order, { force: shippingChangedOrderIds.has(String(oid)) });
                 }
             }
 
@@ -902,7 +926,7 @@ const importOrders = async (req, res) => {
                     );
 
                     const order = await EtsyOrder.findOne({ orderId: oid, shopId });
-                    await validateAddressIfNeeded(order, { force: true });
+                    await validateAddressIfNeeded(order);
 
                     try {
                         // Tự động tính toán cost breakdown sau khi import
@@ -1859,6 +1883,15 @@ const isMissingValue = (value) => {
     return false;
 };
 
+const normalizeComparableAddressValue = (value) => String(value ?? "").trim();
+const ETSY_ADDRESS_VALIDATION_SHIPPING_FIELDS = ["address1", "address2", "city", "state", "zipcode", "country"];
+
+const hasEtsyShippingAddressChanged = (current = {}, next = {}) => (
+    ETSY_ADDRESS_VALIDATION_SHIPPING_FIELDS.some((field) => (
+        normalizeComparableAddressValue(current?.[field]) !== normalizeComparableAddressValue(next?.[field])
+    ))
+);
+
 const isEmptyObject = (value) => (
     value &&
     typeof value === "object" &&
@@ -2512,6 +2545,7 @@ const backfillExistingEtsyOrder = async (existing, payload) => {
     }
 
     let shippingBackfilled = false;
+    let shippingAddressBackfilled = false;
     const shippingFields = ["name", "address1", "address2", "city", "state", "zipcode", "country"];
     for (const field of shippingFields) {
         if (!payload.shipping || isMissingValue(payload.shipping[field])) continue;
@@ -2519,6 +2553,9 @@ const backfillExistingEtsyOrder = async (existing, payload) => {
         if (isMissingValue(existing.shipping[field]) || existing.shipping[field] !== payload.shipping[field]) {
             existing.shipping[field] = payload.shipping[field];
             shippingBackfilled = true;
+            if (ETSY_ADDRESS_VALIDATION_SHIPPING_FIELDS.includes(field)) {
+                shippingAddressBackfilled = true;
+            }
         }
     }
 
@@ -2561,6 +2598,7 @@ const backfillExistingEtsyOrder = async (existing, payload) => {
         skuBackfilled,
         listingIdBackfilled,
         shippingBackfilled,
+        shippingAddressBackfilled,
         customTextBackfilled,
         customFilesBackfilled,
         customFilesMerged,
@@ -2591,7 +2629,7 @@ const createOrder = async (req, res) => {
             if (payload.seller?.sellerCode) {
                 await fillSellerIfMissing(payload.orderId, payload.shopId, payload.seller.sellerCode);
             }
-            await validateAddressIfNeeded(existing, { force: true });
+            await validateAddressIfNeeded(existing, { force: result.shippingAddressBackfilled });
             console.log("[ETSY_CUSTOM_DATA][BACKFILL_SUMMARY]", {
                 orderId: payload.orderId,
                 shopId: String(payload.shopId),
@@ -2610,6 +2648,7 @@ const createOrder = async (req, res) => {
                 skuBackfilled: result.skuBackfilled,
                 listingIdBackfilled: result.listingIdBackfilled,
                 shippingBackfilled: result.shippingBackfilled,
+                shippingAddressBackfilled: result.shippingAddressBackfilled,
                 customTextBackfilled: result.customTextBackfilled,
                 customFilesBackfilled: result.customFilesBackfilled,
                 customFilesMerged: result.customFilesMerged,
