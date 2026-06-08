@@ -11,6 +11,8 @@ const parseArgs = () => {
         dryRun: false,
         latest: false,
         limit: 0,
+        orderId: "",
+        shopId: "",
         delayMs: Number(process.env.ETSY_ADDRESS_BACKFILL_DELAY_MS || 100),
     };
 
@@ -18,6 +20,8 @@ const parseArgs = () => {
         if (arg === "--dry-run") out.dryRun = true;
         if (arg === "--latest") out.latest = true;
         if (arg.startsWith("--limit=")) out.limit = Number(arg.slice("--limit=".length)) || 0;
+        if (arg.startsWith("--orderId=")) out.orderId = String(arg.slice("--orderId=".length)).trim();
+        if (arg.startsWith("--shopId=")) out.shopId = String(arg.slice("--shopId=".length)).trim();
         if (arg.startsWith("--delay-ms=")) out.delayMs = Number(arg.slice("--delay-ms=".length)) || 0;
     }
 
@@ -88,6 +92,14 @@ const buildResult = ({
     smartyResponse,
 });
 
+const getSmartyDpvMatchCode = (candidate = {}) => (
+    String(candidate?.analysis?.dpv_match_code || "").trim().toUpperCase()
+);
+
+const isSmartyCandidateDeliverable = (candidate = {}) => (
+    getSmartyDpvMatchCode(candidate) === "Y"
+);
+
 const shouldPreserveExistingAddressValidation = (current, next) => {
     if (!current || !next) return false;
     if (current.status !== "valid" || current.isValid !== true) return false;
@@ -156,13 +168,31 @@ const validateOrderAddress = async (order, env) => {
         const data = response.data;
 
         if (response.status === 200 && Array.isArray(data) && data.length > 0) {
+            const firstCandidate = data[0];
+            const dpvMatchCode = getSmartyDpvMatchCode(firstCandidate);
+            if (!isSmartyCandidateDeliverable(firstCandidate)) {
+                return buildResult({
+                    status: "invalid",
+                    isValid: false,
+                    httpStatus: 200,
+                    errorCode: "SMARTY_DPV_NOT_CONFIRMED",
+                    errorMessage: `Smarty candidate DPV is not confirmed${dpvMatchCode ? ` (${dpvMatchCode})` : ""}`,
+                    request,
+                    smartyResponse: {
+                        firstCandidate,
+                        candidatesCount: data.length,
+                        rawCandidates: data,
+                    },
+                });
+            }
+
             return buildResult({
                 status: "valid",
                 isValid: true,
                 httpStatus: 200,
                 request,
                 smartyResponse: {
-                    firstCandidate: data[0],
+                    firstCandidate,
                     candidatesCount: data.length,
                     rawCandidates: data,
                 },
@@ -228,6 +258,8 @@ const main = async () => {
     const args = parseArgs();
     const env = getEtsySmartyEnv();
     const query = { "shipping.country": { $exists: true, $ne: null } };
+    if (args.orderId) query.orderId = args.orderId;
+    if (args.shopId) query.shopId = args.shopId;
     const stats = {
         scanned: 0,
         eligibleUs: 0,
@@ -242,6 +274,8 @@ const main = async () => {
         dryRun: args.dryRun,
         latest: args.latest,
         limit: args.limit || null,
+        orderId: args.orderId || null,
+        shopId: args.shopId || null,
         delayMs: args.delayMs,
         envSource: env.envSource,
         hasAuthId: env.hasAuthId,
