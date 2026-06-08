@@ -30,21 +30,37 @@ router.get('/statistic', etsyOrderController.getEtsyOrderStatistics);
 router.get(
     '/scale/list',
     authenticateToken,
+    authorizeRoles(
+        "Customer Service",
+        "Admin",
+        "Seller",
+        "Design Leader",
+        "Designer"
+    ),
     etsyOrderController.getEtsyScaleList
 );
 router.get(
     '/scale/statistics',
     authenticateToken,
+    authorizeRoles(
+        "Customer Service",
+        "Admin",
+        "Seller",
+        "Design Leader",
+        "Designer"
+    ),
     etsyOrderController.getEtsyScaleStatistics
 );
 router.get(
     '/qc/list',
     authenticateToken,
+    authorizeRoles('Customer Service', "Admin", "Seller"),
     etsyOrderController.getEtsyQCList
 );
 router.get(
     '/qc/statistics',
     authenticateToken,
+    authorizeRoles('Customer Service', "Admin", "Seller"),
     etsyOrderController.getEtsyQCStatistics
 );
 router.patch('/sumbittedoetsy', etsyOrderController.updateSumbittedoetsyStatus);
@@ -83,16 +99,25 @@ router.post(
 router.post(
     '/:orderId/items/:transactionId/scale/confirm',
     authenticateToken,
+    authorizeRoles("Customer Service", "Admin", "Seller"),
     etsyOrderController.confirmEtsyScaleForItem
+);
+router.post(
+    '/:orderId/scale/send',
+    authenticateToken,
+    authorizeRoles("Customer Service", "Admin", "Seller"),
+    etsyOrderController.retrySendEtsyFulfillment
 );
 router.put(
     '/:orderId/items/:transactionId/cs-note',
     authenticateToken,
+    authorizeRoles("Customer Service", "Admin", "Seller"),
     etsyOrderController.updateEtsyCSNoteForItem
 );
 router.put(
     '/:orderId/items/:transactionId/qc-note',
     authenticateToken,
+    authorizeRoles('Customer Service', "Admin", "Seller"),
     etsyOrderController.updateEtsyQCNoteForItem
 );
 router.put(

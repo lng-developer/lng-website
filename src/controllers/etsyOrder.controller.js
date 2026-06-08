@@ -12,6 +12,8 @@ const { parse } = require('csv-parse');
 const axios = require('axios');
 const multer = require("multer");
 const { uploadBufferToR2 } = require("../service/cloudflareR2/r2.service");
+const FulfillmentService = require("../service/fulfillment");
+const { logOrderHistory } = require("../service/orderHistoryLogger");
 
 const etsyScaleUpload = multer({ storage: multer.memoryStorage() });
 
@@ -1130,8 +1132,11 @@ const getListOrders = async (req, res) => {
                         listingId: item.listingId || null,
                         cost_center,
                         tracking_info: item.tracking_info || {},
+                        fulfillment_file: toPlainFulfillmentFile(item.fulfillment_file),
                         scale_status: item.scale_status || null,
                         ...buildCustomItemResponseFields(item),
+                        qc_note: item.qc_note || "",
+                        cs_note: item.cs_note || "",
                     };
                 }),
                 base_cost: order.base_cost || 0,
@@ -2852,6 +2857,29 @@ const isSellerOnlyUser = (role) =>
     hasRole(role, "Seller") &&
     !(hasRole(role, "Admin") || hasRole(role, "Customer Service") || hasRole(role, "Design Leader"));
 
+const getEtsyCustomerInfo = (order) => ({
+    email: order.customer_infor?.email || "",
+    name: order.customer_infor?.name || order.shipping?.name || order.buyer?.fullName || order.buyer?.display || "",
+    address: order.customer_infor?.address || order.shipping?.address1 || "",
+    address_2: order.customer_infor?.address_2 || order.shipping?.address2 || "",
+    province: order.customer_infor?.province || order.shipping?.state || "",
+    city: order.customer_infor?.city || order.shipping?.city || "",
+    state: order.customer_infor?.state || order.shipping?.state || "",
+    zip_code: order.customer_infor?.zip_code || order.shipping?.zipcode || "",
+    country: order.customer_infor?.country || order.shipping?.country || "US",
+    phone_number: order.customer_infor?.phone_number || "",
+});
+
+const prepareEtsyOrderForFulfillment = (order) => {
+    order.customer_infor = getEtsyCustomerInfo(order);
+    for (const item of order.items || []) {
+        if (!item.orderItemId) item.orderItemId = item.transactionId;
+        if (!item.title) item.title = item.itemName || item.sku || "";
+    }
+    order.markModified("items");
+    return order;
+};
+
 const buildEtsyOrderLookup = (req) => {
     const orderId = String(req.params.orderId || req.body?.orderId || "").trim();
     const shopId = String(req.query.shopId || req.body?.shopId || "").trim();
@@ -2870,7 +2898,184 @@ const ensureSellerCanAccessEtsyOrder = (req, order) => {
     return null;
 };
 
-const buildEtsyScalePipeline = (req, activeStatuses) => {
+function normalizeEtsyProviderKey(vendorDoc) {
+    const ft = String(vendorDoc?.fulfillment_type || "").toLowerCase();
+    const nm = String(vendorDoc?.name || "").toLowerCase();
+
+    if (ft.includes("merchfox") || nm.includes("merchfox")) return "merchfox";
+    if (ft.includes("grabink") || nm.includes("grabink")) return "grabink";
+    if (ft.includes("merchize") || nm.includes("merchize")) return "merchize";
+    if (ft.includes("printway") || nm.includes("printway")) return "printway";
+    if (ft.includes("mangotee") || nm.includes("mangotee")) return "mangotee";
+    if (ft.includes("ss88") || nm.includes("ss88")) return "ss88";
+    if (ft.includes("lenful") || nm.includes("lenful")) return "lenful";
+    if (ft.includes("pgprint") || nm.includes("pgprint")) return "pgprint";
+    if (ft.includes("luxurypro") || nm.includes("luxurypro")) return "luxurypro";
+    if (ft.includes("luxury pro") || nm.includes("luxury pro")) return "luxurypro";
+    if (ft.includes("lng") || nm.includes("lng")) return "lng";
+    return null;
+}
+
+async function resolveEtsyProviderFromOrder(orderDoc) {
+    const idObjs = [];
+    for (const item of orderDoc.items || []) {
+        const raw = item?.cost_breakdown?.vendorProductId;
+        if (!raw) continue;
+        const id = String(raw);
+        if (mongoose.Types.ObjectId.isValid(id)) {
+            idObjs.push(new mongoose.Types.ObjectId(id));
+        }
+    }
+
+    if (idObjs.length === 0) {
+        return { providerKey: null, reasons: ["No valid vendorProductId found on items"] };
+    }
+
+    const vendorProducts = await db.vendorProduct.find({ _id: { $in: idObjs } })
+        .select("vendor_id")
+        .populate({ path: "vendor_id", select: "name fulfillment_type status" })
+        .lean();
+
+    if (!vendorProducts?.length) {
+        return { providerKey: null, reasons: ["No VendorProduct matched in DB"] };
+    }
+
+    const providerSet = new Set();
+    for (const vendorProduct of vendorProducts) {
+        const key = normalizeEtsyProviderKey(vendorProduct?.vendor_id);
+        if (key) providerSet.add(key);
+    }
+
+    if (providerSet.size > 1) {
+        const providers = [...providerSet];
+        const err = new Error(`Multiple providers detected in order: ${providers.join(", ")}`);
+        err.status = 409;
+        err.code = "MULTIPLE_VENDORS_IN_ORDER";
+        err.providers = providers;
+        throw err;
+    }
+
+    if (providerSet.size === 0) {
+        return { providerKey: null, reasons: ["Vendor present but cannot map to a provider"] };
+    }
+
+    return { providerKey: [...providerSet][0], reasons: [] };
+}
+
+const isEtsyAddressInvalid = (order) =>
+    order?.address_validation && order.address_validation.isValid === false;
+
+const buildEtsyInvalidAddressMessage = (order) => {
+    const customer = getEtsyCustomerInfo(order);
+    const addr = [
+        customer.name,
+        customer.address,
+        customer.address_2,
+        `${customer.city || ""}${customer.state ? ", " + customer.state : ""} ${customer.zip_code || ""}`,
+        customer.country,
+    ].filter(Boolean).join(" | ");
+
+    return `Invalid Address: address validation failed. Please correct the address before sending. Address: ${addr}`;
+};
+
+async function sendEtsyOrderToVendor({ order, provider, req, previousOverallStatus }) {
+    const availableProviders = (FulfillmentService.PROVIDERS || []).map((entry) => entry.key);
+    const providersHint = availableProviders.length
+        ? availableProviders.join(" | ")
+        : "grabink | merchfox | merchize | printway | mangotee | lng | lenful | ss88 | pgprint";
+
+    let providerKey = String(provider || "").trim().toLowerCase();
+    if (!providerKey) {
+        try {
+            const resolved = await resolveEtsyProviderFromOrder(order);
+            providerKey = resolved.providerKey || "";
+        } catch (err) {
+            err.hint = `Please specify "provider" in query/body, e.g., ?provider=${providersHint}`;
+            throw err;
+        }
+    }
+
+    if (!providerKey) {
+        const err = new Error("Unable to determine provider automatically.");
+        err.status = 409;
+        err.hint = `Please specify "provider" in query/body, e.g., ?provider=${providersHint}`;
+        throw err;
+    }
+
+    if (availableProviders.length && !availableProviders.includes(providerKey)) {
+        const err = new Error(`Unknown provider: ${providerKey}`);
+        err.status = 400;
+        err.hint = `Valid providers: ${providersHint}`;
+        throw err;
+    }
+
+    prepareEtsyOrderForFulfillment(order);
+
+    try {
+        const result = await FulfillmentService.send(order, providerKey);
+        await logOrderHistory({
+            orderDoc: order,
+            action: "SEND_TO_VENDOR",
+            description: result.alreadySent
+                ? `Etsy order already sent to ${result.vendorKey}.`
+                : `Etsy order sent to ${result.vendorKey}.`,
+            changes: [{ field: "vendor", from: null, to: result.vendorKey }],
+            user: req.user,
+            context: {
+                source: "SYSTEM",
+                ip: req.ip,
+                userAgent: req.headers["user-agent"],
+            },
+        });
+        return result;
+    } catch (err) {
+        const prev = order.vendor_submissions?.[providerKey] || {};
+        const rec = {
+            ...(prev || {}),
+            sent: false,
+            attempt_count: (prev?.attempt_count || 0) + 1,
+            last_response: { error: err.message, at: new Date() },
+        };
+
+        order.vendor_submissions = order.vendor_submissions || {};
+        order.vendor_submissions[providerKey] = rec;
+        order.markModified("vendor_submissions");
+        if (providerKey === "grabink") order.grabink_submission = rec;
+        order.scale_overall_status = "Failed";
+        await order.save();
+
+        await logOrderHistory({
+            orderDoc: order,
+            action: "SEND_TO_VENDOR_FAILED",
+            description: `Sending Etsy order to ${providerKey} failed. Overall status set to Failed.`,
+            changes: [
+                { field: "scale_overall_status", from: previousOverallStatus, to: "Failed" },
+                {
+                    field: `vendor_submissions.${providerKey}.attempt_count`,
+                    from: prev?.attempt_count || 0,
+                    to: rec.attempt_count,
+                },
+                {
+                    field: `vendor_submissions.${providerKey}.last_response.error`,
+                    from: null,
+                    to: err.message,
+                },
+            ],
+            user: req.user,
+            context: {
+                source: "SYSTEM",
+                ip: req.ip,
+                userAgent: req.headers["user-agent"],
+            },
+        });
+
+        err.status = err.status || 502;
+        err.providerKey = providerKey;
+        throw err;
+    }
+}
+
+const buildEtsyScalePipeline = (req, activeStatuses, options = {}) => {
     const {
         from,
         to,
@@ -2886,13 +3091,14 @@ const buildEtsyScalePipeline = (req, activeStatuses) => {
     const { userId, role } = getRequester(req);
     const isSellerOnly = isSellerOnlyUser(role);
     const isCS = hasRole(role, "Customer Service");
+    const restrictCsToAssigned = options.restrictCsToAssigned === true;
 
     const matchStage = {};
     if (from && to) matchStage.createdAt = { $gte: new Date(from), $lte: new Date(to) };
     if (isSellerOnly && mongoose.Types.ObjectId.isValid(userId)) {
         matchStage["seller.sellerId"] = new mongoose.Types.ObjectId(userId);
     }
-    if (isCS && mongoose.Types.ObjectId.isValid(userId)) {
+    if (restrictCsToAssigned && isCS && mongoose.Types.ObjectId.isValid(userId)) {
         matchStage.csAssigneeId = new mongoose.Types.ObjectId(userId);
     }
 
@@ -3032,7 +3238,37 @@ const buildEtsyScalePipeline = (req, activeStatuses) => {
     return pipeline;
 };
 
-const mapEtsyScaleOrder = (order) => ({
+async function buildEtsyVendorProductDisplayMap(orders = []) {
+    const vendorProductIds = new Set();
+    for (const order of orders || []) {
+        for (const item of order.items || []) {
+            const vendorProductId = item?.cost_breakdown?.vendorProductId;
+            if (vendorProductId) vendorProductIds.add(String(vendorProductId));
+        }
+    }
+
+    const validIds = [...vendorProductIds]
+        .filter((id) => mongoose.Types.ObjectId.isValid(id))
+        .map((id) => new mongoose.Types.ObjectId(id));
+
+    if (validIds.length === 0) return new Map();
+
+    const vendorProducts = await db.vendorProduct.find({ _id: { $in: validIds } })
+        .select("product_name vendor_id")
+        .populate({ path: "vendor_id", select: "name" })
+        .lean();
+
+    return new Map((vendorProducts || []).map((vendorProduct) => {
+        const vendorName = vendorProduct?.vendor_id?.name || "";
+        const productName = vendorProduct?.product_name || "";
+        return [
+            String(vendorProduct._id),
+            `${vendorName} - ${productName}`.trim(),
+        ];
+    }));
+}
+
+const mapEtsyScaleOrder = (order, { vendorProductDisplayMap = new Map() } = {}) => ({
     orderId: order.orderId,
     shopId: order.shopId ? String(order.shopId) : null,
     shopName: order.shop?.name || null,
@@ -3040,38 +3276,37 @@ const mapEtsyScaleOrder = (order) => ({
     saleDate: order.saleDate,
     createdAt: order.createdAt,
     shipping_type: order.shipping_type || "Standard",
-    customer_infor: {
-        email: "",
-        name: order.shipping?.name || order.buyer?.fullName || order.buyer?.display || "",
-        address: order.shipping?.address1 || "",
-        address_2: order.shipping?.address2 || "",
-        city: order.shipping?.city || "",
-        state: order.shipping?.state || "",
-        zip_code: order.shipping?.zipcode || "",
-        country: order.shipping?.country || "",
-        phone_number: "",
-    },
+    customer_infor: getEtsyCustomerInfo(order),
     buyer: order.buyer || {},
     shipping: order.shipping || {},
     items: (order.items || []).map((item) => {
         const vendorProductId = item?.cost_breakdown?.vendorProductId || null;
+        const vendorProductDisplayName = vendorProductId
+            ? vendorProductDisplayMap.get(String(vendorProductId)) || null
+            : null;
         return {
-            orderItemId: item.transactionId || null,
+            orderItemId: item.orderItemId || item.transactionId || null,
             transactionId: item.transactionId || null,
             listingId: item.listingId || null,
             sku: item.sku || "",
-            title: item.itemName || "",
+            title: item.title || item.itemName || "",
             itemName: item.itemName || "",
             quantity: item.quantity || 1,
             variations: item.variations || {},
             variationsRaw: item.variationsRaw || "",
             baseImageUrl: item.baseImage?.imageUrl || null,
+            snapshotImage: item.snapshotImage || null,
+            customized_url: item.customized_url || "",
+            asin: item.asin || "",
             cost_center: {
                 vendorProductId,
+                vendorProductDisplayName,
+                vendor_display_name: vendorProductDisplayName,
                 sizeValue: item?.cost_breakdown?.sizeValue || null,
                 colorValue: item?.cost_breakdown?.colorValue || null,
                 vendorProductSKU: item?.cost_breakdown?.matchedSku || null,
             },
+            vendor_display_name: vendorProductDisplayName,
             tracking_info: item.tracking_info || {},
             fulfillment_file: toPlainFulfillmentFile(item.fulfillment_file),
             scale_status: item.scale_status || "Need Scale",
@@ -3101,7 +3336,7 @@ const mapEtsyScaleOrder = (order) => ({
 const getEtsyScaleList = async (req, res) => {
     try {
         const { page = 1, perPage = 10 } = req.query;
-        const pipeline = buildEtsyScalePipeline(req, ETSY_SCALE_ACTIVE);
+        const pipeline = buildEtsyScalePipeline(req, ETSY_SCALE_ACTIVE, { restrictCsToAssigned: true });
         const countResult = await EtsyOrder.aggregate([...pipeline, { $count: "total" }]);
         const totalCount = countResult?.[0]?.total || 0;
         const isAll = String(perPage).toLowerCase() === "all";
@@ -3113,8 +3348,9 @@ const getEtsyScaleList = async (req, res) => {
         if (!isAll) pipeline.push({ $skip: skip }, { $limit: limitNum });
 
         const orders = await EtsyOrder.aggregate(pipeline);
+        const vendorProductDisplayMap = await buildEtsyVendorProductDisplayMap(orders);
         return res.json({
-            data: orders.map(mapEtsyScaleOrder),
+            data: orders.map((order) => mapEtsyScaleOrder(order, { vendorProductDisplayMap })),
             totalCount,
             totalPages: isAll ? 1 : Math.ceil(totalCount / limitNum),
             currentPage: pageNum,
@@ -3140,8 +3376,9 @@ const getEtsyQCList = async (req, res) => {
         if (!isAll) pipeline.push({ $skip: skip }, { $limit: limitNum });
 
         const orders = await EtsyOrder.aggregate(pipeline);
+        const vendorProductDisplayMap = await buildEtsyVendorProductDisplayMap(orders);
         return res.json({
-            data: orders.map(mapEtsyScaleOrder),
+            data: orders.map((order) => mapEtsyScaleOrder(order, { vendorProductDisplayMap })),
             totalCount,
             totalPages: isAll ? 1 : Math.ceil(totalCount / limitNum),
             currentPage: pageNum,
@@ -3154,7 +3391,7 @@ const getEtsyQCList = async (req, res) => {
 
 const getEtsyScaleStatistics = async (req, res) => {
     try {
-        const pipeline = buildEtsyScalePipeline(req, ETSY_SCALE_ACTIVE);
+        const pipeline = buildEtsyScalePipeline(req, ETSY_SCALE_ACTIVE, { restrictCsToAssigned: true });
         const [raw] = await EtsyOrder.aggregate([
             ...pipeline,
             { $group: { _id: "$overall_status_bucket", orders: { $sum: 1 }, pending: { $sum: { $cond: ["$hasPendingItem", 1, 0] } } } },
@@ -3180,7 +3417,15 @@ const getEtsyScaleStatistics = async (req, res) => {
 
 const getEtsyQCStatistics = async (req, res) => {
     try {
-        const pipeline = buildEtsyScalePipeline(req, ETSY_QC_ACTIVE);
+        const statisticsReq = {
+            ...req,
+            query: {
+                ...req.query,
+            },
+        };
+        delete statisticsReq.query.scale_status;
+
+        const pipeline = buildEtsyScalePipeline(statisticsReq, ETSY_QC_ACTIVE);
         const [raw] = await EtsyOrder.aggregate([
             ...pipeline,
             { $group: { _id: "$overall_status_bucket", orders: { $sum: 1 } } },
@@ -3276,7 +3521,8 @@ const uploadEtsyFulfillmentFileForItem = [
 const confirmEtsyScaleForItem = async (req, res) => {
     try {
         const { transactionId } = req.params;
-        const { decision, note } = req.body || {};
+        const { decision, note, provider } = req.body || {};
+        const user = req.user;
         const d = String(decision || "").toLowerCase();
         if (!["approve", "reject"].includes(d)) {
             return res.status(400).json({ message: 'Invalid decision. Must be "approve" or "reject".' });
@@ -3290,11 +3536,46 @@ const confirmEtsyScaleForItem = async (req, res) => {
         const item = (order.items || []).find((entry) => String(entry.transactionId) === String(transactionId));
         if (!item) return res.status(404).json({ message: "Etsy order item not found" });
 
+        const before = {
+            item_scale_status: item.scale_status,
+            item_qc_note: item.qc_note || "",
+            item_ff: toPlainFulfillmentFile(item.fulfillment_file),
+            order_scale_overall_status: order.scale_overall_status,
+        };
+
         if (d === "reject") {
             item.scale_status = "QC Rejected";
             item.fulfillment_file = new Map();
             if (note !== undefined) item.qc_note = String(note || "").trim();
             order.scale_overall_status = "QC Rejected";
+            order.markModified("items");
+            await order.save();
+
+            await logOrderHistory({
+                orderDoc: order,
+                action: "SCALE_REJECT_ITEM",
+                description: `QC rejected Etsy item ${transactionId}${note ? `: ${String(note).slice(0, 120)}` : ""}`,
+                changes: [
+                    { field: "items.scale_status", from: before.item_scale_status, to: item.scale_status },
+                    { field: "items.qc_note", from: before.item_qc_note, to: item.qc_note || "" },
+                    { field: "items.fulfillment_file", from: before.item_ff, to: toPlainFulfillmentFile(item.fulfillment_file) },
+                    { field: "scale_overall_status", from: before.order_scale_overall_status, to: order.scale_overall_status },
+                ],
+                orderItemId: transactionId,
+                user,
+                context: {
+                    source: "PORTAL",
+                    ip: req.ip,
+                    userAgent: req.headers["user-agent"],
+                },
+            });
+
+            return res.json({
+                message: "Etsy scale rejected. Item set to QC Rejected.",
+                item_scale_status: item.scale_status,
+                qc_note: item.qc_note || "",
+                order_scale_overall_status: order.scale_overall_status,
+            });
         } else {
             if (!hasAnyFulfillmentFile(item.fulfillment_file)) {
                 return res.status(400).json({
@@ -3304,20 +3585,115 @@ const confirmEtsyScaleForItem = async (req, res) => {
             item.scale_status = "Complete";
             if (note !== undefined) item.qc_note = String(note || "").trim();
             order.scale_overall_status = computeEtsyOverallScaleStatus(order.items);
-            if (order.scale_overall_status === "Ready" && isConfirmedInvalidAddress(order.address_validation)) {
-                order.scale_overall_status = "Address Invalid";
-            }
         }
 
         order.markModified("items");
+
+        await logOrderHistory({
+            orderDoc: order,
+            action: "SCALE_APPROVE_ITEM",
+            description: `Approved Etsy item ${transactionId}${note ? `: ${String(note).slice(0, 120)}` : ""}`,
+            changes: [
+                { field: "items.scale_status", from: before.item_scale_status, to: item.scale_status },
+                { field: "items.qc_note", from: before.item_qc_note, to: item.qc_note || "" },
+                { field: "scale_overall_status", from: before.order_scale_overall_status, to: order.scale_overall_status },
+            ],
+            orderItemId: transactionId,
+            user,
+            context: {
+                source: "PORTAL",
+                ip: req.ip,
+                userAgent: req.headers["user-agent"],
+            },
+        });
+
+        if (order.scale_overall_status === "Ready") {
+            await logOrderHistory({
+                orderDoc: order,
+                action: "SCALE_ORDER_READY",
+                description: "All Etsy items approved. Order is Ready.",
+                changes: [
+                    {
+                        field: "scale_overall_status",
+                        from: before.order_scale_overall_status,
+                        to: "Ready",
+                    },
+                ],
+                user,
+                context: {
+                    source: "PORTAL",
+                    ip: req.ip,
+                    userAgent: req.headers["user-agent"],
+                },
+            });
+
+            if (isEtsyAddressInvalid(order)) {
+                order.scale_overall_status = "Address Invalid";
+                await order.save();
+
+                await logOrderHistory({
+                    orderDoc: order,
+                    action: "UPDATE_SCALE_STATUS",
+                    description: "Etsy address invalid detected. Overall status set to Address Invalid.",
+                    changes: [
+                        { field: "scale_overall_status", from: "Ready", to: "Address Invalid" },
+                    ],
+                    user,
+                    context: {
+                        source: "SYSTEM",
+                        ip: req.ip,
+                        userAgent: req.headers["user-agent"],
+                    },
+                });
+
+                return res.status(409).json({
+                    message: buildEtsyInvalidAddressMessage(order),
+                    address_validation: order.address_validation || null,
+                });
+            }
+
+            await order.save();
+
+            try {
+                const result = await sendEtsyOrderToVendor({
+                    order,
+                    provider,
+                    req,
+                    previousOverallStatus: "Ready",
+                });
+
+                return res.json({
+                    message: result.alreadySent
+                        ? `Etsy order already sent to ${result.vendorKey}.`
+                        : `Approved and Etsy order sent to ${result.vendorKey}.`,
+                    item_scale_status: item.scale_status,
+                    order_scale_overall_status: order.scale_overall_status,
+                    submission_vendor: result.vendorKey,
+                    submission_response: result.response,
+                });
+            } catch (err) {
+                if (err.code === "MULTIPLE_VENDORS_IN_ORDER") {
+                    return res.status(err.status || 409).json({
+                        message: "Unable to auto-select provider because multiple vendors were detected for this Etsy order.",
+                        error: err.message,
+                        providers: err.providers || [],
+                        hint: err.hint,
+                    });
+                }
+                return res.status(err.status || 502).json({
+                    message: err.providerKey
+                        ? `Approved but sending Etsy order to ${err.providerKey} failed. Overall status set to Failed.`
+                        : err.message,
+                    error: err.message,
+                    hint: err.hint,
+                });
+            }
+        }
+
         await order.save();
 
         return res.json({
-            message: d === "reject"
-                ? "Etsy scale rejected. Item set to QC Rejected."
-                : order.scale_overall_status === "Ready"
-                    ? "Etsy item approved. Order is Ready."
-                    : "Etsy item approved. Waiting for other items to be approved.",
+            message: "Etsy item approved. Waiting for other items to be approved.",
             item_scale_status: item.scale_status,
             qc_note: item.qc_note || "",
             order_scale_overall_status: order.scale_overall_status,
@@ -3358,6 +3734,101 @@ const updateEtsyItemNote = (field) => async (req, res) => {
 
 const updateEtsyQCNoteForItem = updateEtsyItemNote("qc_note");
 const updateEtsyCSNoteForItem = updateEtsyItemNote("cs_note");
+
+const retrySendEtsyFulfillment = async (req, res) => {
+    try {
+        const order = await EtsyOrder.findOne(buildEtsyOrderLookup(req));
+        if (!order) return res.status(404).json({ message: "Etsy order not found" });
+
+        const accessError = ensureSellerCanAccessEtsyOrder(req, order);
+        if (accessError) {
+            return res.status(accessError.startsWith("Invalid") ? 400 : 403).json({ message: accessError });
+        }
+
+        if (isEtsyAddressInvalid(order)) {
+            return res.status(409).json({
+                message: buildEtsyInvalidAddressMessage(order),
+                address_validation: order.address_validation || null,
+            });
+        }
+
+        const okToSend =
+            order.scale_overall_status === "Ready" ||
+            order.scale_overall_status === "Failed";
+        if (!okToSend) {
+            return res.status(409).json({
+                message: "Etsy order is not ready to send.",
+                scale_overall_status: order.scale_overall_status,
+            });
+        }
+
+        let providerKey = String(req.query.provider || req.body?.provider || "").trim().toLowerCase();
+        if (!providerKey) {
+            try {
+                const resolved = await resolveEtsyProviderFromOrder(order);
+                providerKey = resolved.providerKey || "";
+            } catch (err) {
+                const availableProviders = (FulfillmentService.PROVIDERS || []).map((entry) => entry.key);
+                const providersHint = availableProviders.length ? availableProviders.join(" | ") : "grabink";
+                return res.status(err.status || 409).json({
+                    message: "Unable to auto-select provider because multiple vendors were detected for this Etsy order.",
+                    error: err.message,
+                    providers: err.providers || [],
+                    hint: `Please specify "provider" in query/body, e.g., ?provider=${providersHint}`,
+                });
+            }
+        }
+
+        const availableProviders = (FulfillmentService.PROVIDERS || []).map((entry) => entry.key);
+        const providersHint = availableProviders.length ? availableProviders.join(" | ") : "grabink";
+        if (!providerKey) {
+            return res.status(409).json({
+                message: "Unable to determine provider automatically.",
+                hint: `Please specify "provider" in query/body, e.g., ?provider=${providersHint}`,
+            });
+        }
+        if (availableProviders.length && !availableProviders.includes(providerKey)) {
+            return res.status(400).json({
+                message: `Unknown provider: ${providerKey}`,
+                hint: `Valid providers: ${providersHint}`,
+            });
+        }
+
+        const submissions = order.vendor_submissions || {};
+        const submission =
+            submissions[providerKey] ||
+            (providerKey === "grabink" ? order.grabink_submission : null);
+        if (submission?.sent) {
+            return res.status(409).json({
+                message: `Etsy order already sent to ${providerKey}.`,
+                provider: providerKey,
+                last_response: submission?.last_response || null,
+                sent_at: submission?.sent_at || null,
+            });
+        }
+
+        const result = await sendEtsyOrderToVendor({
+            order,
+            provider: providerKey,
+            req,
+            previousOverallStatus: order.scale_overall_status,
+        });
+
+        return res.json({
+            message: result.alreadySent
+                ? `Etsy order already sent to ${result.vendorKey}.`
+                : `Etsy order sent to ${result.vendorKey}.`,
+            provider: result.vendorKey,
+            submission_response: result.response,
+        });
+    } catch (err) {
+        return res.status(err.status || 500).json({
+            message: "Retry Etsy fulfillment failed",
+            error: err.message,
+            hint: err.hint,
+        });
+    }
+};
 
 const assignEtsyOrderToCS = async (req, res) => {
     try {
@@ -3483,6 +3954,7 @@ module.exports = {
     getEtsyQCStatistics,
     uploadEtsyFulfillmentFileForItem,
     confirmEtsyScaleForItem,
+    retrySendEtsyFulfillment,
     updateEtsyQCNoteForItem,
     updateEtsyCSNoteForItem,
     assignEtsyOrderToCS,

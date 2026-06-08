@@ -88,11 +88,11 @@ function buildPayload(orderObj) {
     const customer = orderObj.customer_infor || {};
     const items = orderObj.items || [];
 
-    const shipping_country_code = (customer.country || "US").toUpperCase();
+    const shipping_country_code = ("US").toUpperCase();
     const shipping_country =
         shipping_country_code === "US"
-            ? "United States"
-            : customer.country || "United States";
+            ? "US"
+            : customer.country || "US";
 
     const shipping_province_code = (customer.state || "").toUpperCase();
     const shipping_province = customer.state || "";

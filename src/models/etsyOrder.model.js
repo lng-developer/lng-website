@@ -55,8 +55,10 @@ const EtsyOrderItemEmbeddedSchema = new Schema(
         transactionId: { type: String, required: true }, // unique in order (enforce by import logic)
         listingId: { type: String, index: true },
         sku: { type: String, index: true },
+        orderItemId: { type: String },
 
         itemName: { type: String },
+        title: { type: String },
         quantity: { type: Number, min: 1 },
         unitPrice: { type: Number, min: 0 },
         itemTotal: { type: Number, min: 0 },
@@ -70,6 +72,9 @@ const EtsyOrderItemEmbeddedSchema = new Schema(
             width: Number,
             height: Number,
         },
+        snapshotImage: String,
+        customized_url: String,
+        asin: String,
 
         tracking_info: {
             fulfillment: { type: String },
@@ -205,6 +210,19 @@ const EtsyOrderSchema = new Schema(
         base_cost_computed_at: { type: Date, default: null },
         base_cost_shipping_groups: { type: Schema.Types.Mixed, default: [] },
 
+        customer_infor: {
+            email: String,
+            name: String,
+            address: String,
+            address_2: String,
+            province: String,
+            city: String,
+            state: String,
+            zip_code: String,
+            country: String,
+            phone_number: String,
+        },
+
         scale_overall_status: {
             type: String,
             enum: [
@@ -250,6 +268,22 @@ const EtsyOrderSchema = new Schema(
             default: "Unassigned",
             index: true,
         },
+
+        grabink_submission: {
+            sent: { type: Boolean, default: false },
+            sent_at: { type: Date, default: null },
+            attempt_count: { type: Number, default: 0 },
+            last_response: { type: Object, default: null },
+            external_id: { type: String, default: null },
+        },
+
+        vendor_submissions: {
+            type: Schema.Types.Mixed,
+            default: undefined,
+        },
+
+        fulfilled_at: { type: Date, default: null },
+        external_order_id: { type: String, default: null },
 
         forced_vendor_id: {
             type: Schema.Types.ObjectId,
