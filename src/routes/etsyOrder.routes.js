@@ -132,6 +132,8 @@ router.put(
     authorizeRoles("Admin", "Design Leader", "Designer"),
     etsyOrderController.unassignEtsyOrderFromCS
 );
+router.patch('/:orderId/tracking', authenticateToken, etsyOrderController.updateEtsyOrderTrackingForAllItems);
+router.put('/:orderId/tracking', authenticateToken, etsyOrderController.updateEtsyOrderTrackingForAllItems);
 router.patch('/:orderId/items/:transactionId/tracking', etsyOrderController.updateEtsyOrderItemTracking);
 router.put('/:orderId/items/:transactionId/tracking', etsyOrderController.updateEtsyOrderItemTracking);
 router.get('/', etsyOrderController.getListOrders);

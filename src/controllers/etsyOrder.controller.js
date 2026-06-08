@@ -2846,6 +2846,184 @@ const updateEtsyOrderItemTracking = async (req, res) => {
     }
 };
 
+const updateEtsyOrderTrackingForAllItems = async (req, res) => {
+    try {
+        const orderId = String(req.params.orderId || "").trim();
+        const user = req.user;
+        const body = req.body || {};
+        const fulfillment = body.fulfillment !== undefined ? String(body.fulfillment).trim() : undefined;
+        const tracking = body.tracking !== undefined ? String(body.tracking).trim() : undefined;
+        const note = body.note !== undefined ? String(body.note) : undefined;
+        const status = body.status !== undefined ? String(body.status).trim() : undefined;
+        const noteTarget = String(body.transactionId || body.orderItemId || "").trim();
+        const rawItemNotes = body.itemNotes || body.notesByTransactionId || body.notes;
+
+        const noteUpdates = [];
+        if (note !== undefined && noteTarget) {
+            noteUpdates.push({ transactionId: noteTarget, note });
+        }
+        if (Array.isArray(rawItemNotes)) {
+            for (const entry of rawItemNotes) {
+                const transactionId = String(entry?.transactionId || entry?.orderItemId || "").trim();
+                if (transactionId) {
+                    noteUpdates.push({
+                        transactionId,
+                        note: entry?.note !== undefined ? String(entry.note) : "",
+                    });
+                }
+            }
+        } else if (rawItemNotes && typeof rawItemNotes === "object") {
+            for (const [transactionId, itemNote] of Object.entries(rawItemNotes)) {
+                const tx = String(transactionId || "").trim();
+                if (tx) noteUpdates.push({ transactionId: tx, note: itemNote !== undefined ? String(itemNote) : "" });
+            }
+        }
+
+        if (!orderId) return res.status(400).json({ message: "orderId is required" });
+        if (status && !ETSY_TRACKING_STATUSES.includes(status)) {
+            return res.status(400).json({
+                message: "Invalid status",
+                allowed: ETSY_TRACKING_STATUSES,
+            });
+        }
+
+        if (note !== undefined && !noteTarget && noteUpdates.length === 0) {
+            return res.status(400).json({
+                message: "note must target a specific item. Provide transactionId/orderItemId, or use itemNotes.",
+            });
+        }
+
+        if (
+            fulfillment === undefined &&
+            tracking === undefined &&
+            status === undefined &&
+            noteUpdates.length === 0
+        ) {
+            return res.status(400).json({
+                message: "No updatable fields provided (fulfillment/tracking/status/itemNotes)",
+            });
+        }
+
+        let nextStatus;
+        if (isEtsyCanceledStatus(status)) {
+            nextStatus = "Canceled";
+        } else if (tracking !== undefined && tracking.length > 0) {
+            nextStatus = "Shipped";
+        } else {
+            nextStatus = status;
+        }
+
+        const beforeDoc = await EtsyOrder.findOne({ orderId }, { orderId: 1, status: 1 }).lean();
+        if (!beforeDoc) {
+            return res.status(404).json({ message: "Etsy order not found" });
+        }
+
+        const oldOrderStatus = beforeDoc.status;
+        const set = {};
+        if (fulfillment !== undefined) set["items.$[].tracking_info.fulfillment"] = fulfillment;
+        if (tracking !== undefined) set["items.$[].tracking_info.tracking"] = tracking;
+
+        if (nextStatus !== undefined) {
+            set["items.$[].tracking_info.status"] = nextStatus;
+            if (["Fulfilled", "Shipping", "Shipped"].includes(nextStatus)) {
+                set["items.$[].scale_status"] = "Complete";
+                set.scale_overall_status = "Sent";
+            } else if (isEtsyCanceledStatus(nextStatus)) {
+                set["items.$[].scale_status"] = "Cancelled";
+                set.scale_overall_status = "Cancelled";
+            }
+        }
+        if (Object.keys(set).length > 0) {
+            set["items.$[].tracking_info.updated_at"] = new Date();
+        }
+
+        let updated = Object.keys(set).length > 0
+            ? await EtsyOrder.findOneAndUpdate(
+                { orderId },
+                { $set: set },
+                { new: true }
+            )
+            : await EtsyOrder.findOne({ orderId });
+
+        if (!updated) {
+            return res.status(404).json({ message: "Etsy order not found" });
+        }
+
+        const noteResults = [];
+        for (const noteUpdate of noteUpdates) {
+            const result = await EtsyOrder.updateOne(
+                { _id: updated._id, "items.transactionId": noteUpdate.transactionId },
+                {
+                    $set: {
+                        "items.$.tracking_info.note": noteUpdate.note,
+                        "items.$.tracking_info.updated_at": new Date(),
+                    },
+                }
+            );
+            noteResults.push({
+                transactionId: noteUpdate.transactionId,
+                matched: result.matchedCount || 0,
+                modified: result.modifiedCount || 0,
+            });
+        }
+
+        if (noteUpdates.length > 0) {
+            updated = await EtsyOrder.findById(updated._id);
+        }
+
+        const newOrderStatus = computeEtsyOrderStatusFromItems(updated.items || []);
+        if (newOrderStatus !== updated.status) {
+            await EtsyOrder.updateOne({ _id: updated._id }, { $set: { status: newOrderStatus } });
+            updated.status = newOrderStatus;
+        }
+
+        if (oldOrderStatus !== newOrderStatus) {
+            await logOrderHistory({
+                orderDoc: updated,
+                action: "UPDATE_STATUS",
+                description: `Etsy order status changed from ${oldOrderStatus} to ${newOrderStatus}`,
+                changes: [
+                    {
+                        field: "status",
+                        from: oldOrderStatus,
+                        to: newOrderStatus,
+                    },
+                ],
+                user,
+                context: {
+                    source: "PORTAL",
+                    ip: req.ip,
+                    userAgent: req.headers["user-agent"],
+                },
+            });
+        }
+
+        const responseScaleOverall =
+            ["Fulfilled", "Shipping", "Shipped"].includes(nextStatus)
+                ? "Sent"
+                : isEtsyCanceledStatus(nextStatus)
+                    ? "Cancelled"
+                    : updated.scale_overall_status;
+
+        return res.json({
+            message: "Etsy tracking updated for ALL items (priority: Canceled/Cancelled > auto-Ship on tracking). Item & order statuses synced.",
+            orderId: updated.orderId,
+            orderStatus: newOrderStatus,
+            scale_overall_status: responseScaleOverall,
+            applied: {
+                fulfillment,
+                tracking,
+                status: nextStatus,
+                noteUpdates,
+                noteResults,
+            },
+        });
+    } catch (err) {
+        console.error("updateEtsyOrderTrackingForAllItems error:", err);
+        return res.status(500).json({ message: "Update failed", error: err.message });
+    }
+};
+
 const ETSY_SCALE_KNOWN = [
     "Need Scale",
     "Pending",
@@ -3999,6 +4177,7 @@ module.exports = {
     createOrder,
     updateSumbittedoetsyStatus,
     updateEtsyOrderItemTracking,
+    updateEtsyOrderTrackingForAllItems,
     getEtsyScaleList,
     getEtsyScaleStatistics,
     getEtsyQCList,
