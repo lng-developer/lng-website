@@ -1689,6 +1689,11 @@ async function calculateEtsyCost(order) {
 const computeBaseCostForEtsyOrder = async (req, res) => {
     try {
         const { orderId, orderData } = req.body;
+        const forceAddressValidation = toBooleanStrict(
+            req.body?.forceAddressValidation ??
+            req.body?.forceSmartyValidation ??
+            req.body?.revalidateAddress
+        ) === true;
         if (!orderId) return res.status(400).json({ message: "Missing orderId" });
 
         // Sử dụng document gốc để có thể save() đoạn sau
@@ -1718,6 +1723,10 @@ const computeBaseCostForEtsyOrder = async (req, res) => {
             await validateAddressIfNeeded(order, { force: true });
         }
 
+        if (order && forceAddressValidation) {
+            await validateAddressIfNeeded(order, { force: true });
+        }
+
         if (!Array.isArray(order.items) || order.items.length === 0) {
             return res.status(400).json({ message: "Order has no items" });
         }
@@ -1734,6 +1743,9 @@ const computeBaseCostForEtsyOrder = async (req, res) => {
             preferred_vendor_id: calculationData.preferredVendorId || null,
             shipping_group_breakdowns: calculationData.groupBreakdowns,
             detail: calculationData.perItemResults,
+            address_validation: order.address_validation?.isValid ?? null,
+            address_validation_status: order.address_validation?.status || null,
+            address_validation_detail: order.address_validation || null,
         });
 
     } catch (err) {
