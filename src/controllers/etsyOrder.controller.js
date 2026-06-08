@@ -257,8 +257,15 @@ const getSmartyDpvMatchCode = (candidate = {}) => (
     String(candidate?.analysis?.dpv_match_code || "").trim().toUpperCase()
 );
 
+const getAcceptedSmartyDpvMatchCodes = () => (
+    String(process.env.ETSY_SMARTY_ACCEPT_DPV_CODES || "Y,S")
+        .split(",")
+        .map((code) => code.trim().toUpperCase())
+        .filter(Boolean)
+);
+
 const isSmartyCandidateDeliverable = (candidate = {}) => (
-    getSmartyDpvMatchCode(candidate) === "Y"
+    getAcceptedSmartyDpvMatchCodes().includes(getSmartyDpvMatchCode(candidate))
 );
 
 const isUsShippingCountry = (country) => {
