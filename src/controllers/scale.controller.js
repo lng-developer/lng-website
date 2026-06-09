@@ -8,6 +8,7 @@ const { uploadBufferToR2 } = require("../service/cloudflareR2/r2.service");
 const FulfillmentService = require("../service/fulfillment"); // <<< NEW
 const { addPointsFromTask, addPenaltyForScaleReject } = require("../service/pointsService");
 const TaskType = require('../enumeration/taskType')
+const { getAssignableDesignUser } = require("../service/designAssignee.service");
 const OrderCustomProduct = db.orderCustomProduct;
 const VendorProduct = db.vendorProduct;
 const Listing = db.listing;
@@ -1044,20 +1045,6 @@ const retrySendFulfillment = async (req, res) => {
 // ============================
 // LIST — khớp chuẩn STATISTICS
 // ============================
-
-// ===== Helper: chấp nhận role là string hoặc array, không phân biệt hoa/thường
-function hasRole(userRole, target) {
-  if (!userRole) return false;
-  const norm = (s) =>
-    String(s || "")
-      .trim()
-      .toLowerCase();
-  const wanted = norm(target);
-  return Array.isArray(userRole)
-    ? userRole.some((r) => norm(r) === wanted)
-    : norm(userRole) === wanted;
-}
-
 const getScaleList = async (req, res) => {
   try {
     const {
@@ -2997,6 +2984,198 @@ const resetScaleForOrdersBulk = async (req, res) => {
   }
 };
 
+const isPngScaleListing = (listing) => {
+  const asinType = String(listing?.asin_type || "").trim();
+  const psdStatus = String(listing?.psd?.status || "").trim().toLowerCase();
+
+  return (
+    ["Custom Image", "Outline"].includes(asinType) &&
+    psdStatus === "available"
+  );
+};
+
+const hasNeedScalePngTask = (order, validListingIds) => {
+  return (order.items || []).some((item) => {
+    const listingId = item?.listingId ? String(item.listingId) : "";
+    return listingId && validListingIds.has(listingId);
+  });
+};
+
+const assignScaleBulk = async (req, res) => {
+  try {
+    const {
+      orderIds = [],
+      scaleUserId,
+      allowReassign = false,
+    } = req.body || {};
+
+    if (!Array.isArray(orderIds) || orderIds.length === 0) {
+      return res.status(400).json({
+        message: "orderIds must be a non-empty array",
+      });
+    }
+
+    if (!mongoose.Types.ObjectId.isValid(scaleUserId)) {
+      return res.status(400).json({ message: "Invalid scaleUserId" });
+    }
+
+    const uniqueOrderIds = [
+      ...new Set(
+        orderIds
+          .map((id) => String(id || "").trim())
+          .filter(Boolean)
+      ),
+    ];
+
+    if (uniqueOrderIds.length === 0) {
+      return res.status(400).json({
+        message: "orderIds must contain at least one valid order id",
+      });
+    }
+
+    const { user: scaleUser, role } = await getAssignableDesignUser(scaleUserId, {
+      invalidMessage: "Invalid scaleUserId",
+      notFoundMessage: "Scale user not found",
+    });
+
+    const orders = await OrderCustomProduct.find({
+      orderId: { $in: uniqueOrderIds },
+    });
+    const orderMap = new Map(orders.map((order) => [String(order.orderId), order]));
+
+    const listingObjectIds = [];
+    const listingIdSet = new Set();
+    for (const order of orders) {
+      for (const item of order.items || []) {
+        const listingId = item?.listingId ? String(item.listingId) : "";
+        if (listingId && mongoose.Types.ObjectId.isValid(listingId) && !listingIdSet.has(listingId)) {
+          listingIdSet.add(listingId);
+          listingObjectIds.push(new mongoose.Types.ObjectId(listingId));
+        }
+      }
+    }
+
+    let validPngListingIds = new Set();
+    if (listingObjectIds.length > 0) {
+      const listings = await Listing.find({ _id: { $in: listingObjectIds } })
+        .select("_id asin_type psd.status")
+        .lean();
+
+      validPngListingIds = new Set(
+        listings
+          .filter(isPngScaleListing)
+          .map((listing) => String(listing._id))
+      );
+    }
+
+    const results = [];
+    const actor = req.user || {};
+
+    for (const orderId of uniqueOrderIds) {
+      const order = orderMap.get(orderId);
+
+      if (!order) {
+        results.push({
+          orderId,
+          status: "failed",
+          error: "Order not found",
+        });
+        continue;
+      }
+
+      if (order.scale_overall_status !== "Need Scale") {
+        results.push({
+          orderId,
+          status: "failed",
+          error: "Order is not Need Scale",
+          scale_overall_status: order.scale_overall_status || null,
+        });
+        continue;
+      }
+
+      if (!hasNeedScalePngTask(order, validPngListingIds)) {
+        results.push({
+          orderId,
+          status: "failed",
+          error: "Order is not a Need Scale PNG task with available PSD",
+        });
+        continue;
+      }
+
+      const previousScaleId = order.scaleId ? String(order.scaleId) : null;
+      if (
+        previousScaleId &&
+        previousScaleId !== String(scaleUser._id) &&
+        !allowReassign
+      ) {
+        results.push({
+          orderId,
+          status: "failed",
+          error: "Order already assigned",
+          scaleId: previousScaleId,
+        });
+        continue;
+      }
+
+      order.scaleId = scaleUser._id;
+      await order.save();
+
+      await logOrderHistory({
+        orderDoc: order,
+        action: "ASSIGN_SCALE_BULK",
+        description: `Assigned scale order to ${scaleUser.full_name || scaleUser.email || scaleUser._id}`,
+        changes: [
+          {
+            field: "scaleId",
+            from: previousScaleId,
+            to: String(scaleUser._id),
+          },
+        ],
+        user: actor,
+        context: {
+          source: "PORTAL",
+          ip: req.ip,
+          userAgent: req.headers?.["user-agent"],
+        },
+      });
+
+      results.push({
+        orderId,
+        status: "success",
+        scaleId: String(scaleUser._id),
+        scale_by: {
+          _id: scaleUser._id,
+          full_name: scaleUser.full_name,
+          email: scaleUser.email,
+          role_name: role?.name || null,
+        },
+      });
+    }
+
+    const success = results.filter((result) => result.status === "success").length;
+
+    return res.json({
+      message: "Bulk scale assignment completed",
+      total: uniqueOrderIds.length,
+      success,
+      failed: uniqueOrderIds.length - success,
+      results,
+    });
+  } catch (err) {
+    if (err.statusCode) {
+      return res.status(err.statusCode).json({
+        message: err.message,
+        ...(err.debug ? { debug: err.debug } : {}),
+      });
+    }
+
+    return res.status(500).json({
+      message: "Bulk scale assignment failed",
+      error: err.message,
+    });
+  }
+};
+
 const assignOrderToCS = async (req, res) => {
   try {
     const { orderId } = req.params;
@@ -3114,6 +3293,7 @@ module.exports = {
   getScaleListForDesign,
   getScaleStatisticsForDesign,
   resetScaleForOrdersBulk,
+  assignScaleBulk,
   assignOrderToCS,
   unassignOrderFromCS
 };

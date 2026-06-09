@@ -7,6 +7,7 @@ const { uploadBufferToWasabi } = require("../utils/wasabi.js");
 const mongoose = require("mongoose");
 const { addPointsFromTask, addPenaltyFromTask } = require('../service/pointsService.js');
 const TaskType = require('../enumeration/taskType')
+const { getAssignableDesignUser } = require("../service/designAssignee.service");
 // helper: chấp nhận role là string hoặc array
 function hasRole(userRole, target) {
   if (!userRole) return false;
@@ -230,12 +231,6 @@ const getTaskStatistics = async (req, res) => {
     return res.status(500).json({ error: err.message });
   }
 };
-
-// ===== Helper =====
-function escapeRegex(str) {
-  return String(str).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
 async function requestPSD(req, res) {
   try {
     const { taskId, note } = req.body;
@@ -283,6 +278,156 @@ const assignDesigner = async (req, res) => {
     res.json(task);
   } catch (err) {
     res.status(500).json({ error: err.message });
+  }
+};
+
+const assignDesignerBulk = async (req, res) => {
+  try {
+    const {
+      taskIds = [],
+      designer,
+      designerUserId,
+      priority,
+      difficulty,
+      dueAt,
+      allowReassign = false,
+    } = req.body || {};
+
+    const targetDesignerId = designer || designerUserId;
+
+    if (!Array.isArray(taskIds) || taskIds.length === 0) {
+      return res.status(400).json({
+        message: "taskIds must be a non-empty array",
+      });
+    }
+
+    const uniqueTaskIds = [
+      ...new Set(
+        taskIds
+          .map((id) => String(id || "").trim())
+          .filter(Boolean)
+      ),
+    ];
+
+    if (uniqueTaskIds.length === 0) {
+      return res.status(400).json({
+        message: "taskIds must contain at least one valid task id",
+      });
+    }
+
+    const { user: designerDoc, role } = await getAssignableDesignUser(targetDesignerId);
+
+    const validTaskIds = uniqueTaskIds.filter((taskId) =>
+      mongoose.Types.ObjectId.isValid(taskId)
+    );
+    const invalidTaskIds = uniqueTaskIds.filter(
+      (taskId) => !mongoose.Types.ObjectId.isValid(taskId)
+    );
+
+    const tasks = validTaskIds.length
+      ? await PsdTask.find({ _id: { $in: validTaskIds } })
+      : [];
+    const taskMap = new Map(tasks.map((task) => [String(task._id), task]));
+
+    const assignableStatuses = new Set([
+      "New",
+      "Requested",
+      "Assigned",
+      "QC Rejected",
+    ]);
+    const results = [];
+    const actorId = req.user?.userId || req.user?.id || req.user?._id || null;
+
+    for (const taskId of uniqueTaskIds) {
+      if (invalidTaskIds.includes(taskId)) {
+        results.push({
+          taskId,
+          status: "failed",
+          error: "Invalid taskId",
+        });
+        continue;
+      }
+
+      const task = taskMap.get(taskId);
+      if (!task) {
+        results.push({
+          taskId,
+          status: "failed",
+          error: "Task not found",
+        });
+        continue;
+      }
+
+      if (!assignableStatuses.has(task.status)) {
+        results.push({
+          taskId,
+          status: "failed",
+          error: "Task status cannot be assigned",
+          task_status: task.status,
+        });
+        continue;
+      }
+
+      const previousDesigner = task.designer ? String(task.designer) : null;
+      if (
+        previousDesigner &&
+        previousDesigner !== String(designerDoc._id) &&
+        !allowReassign
+      ) {
+        results.push({
+          taskId,
+          status: "failed",
+          error: "Task already assigned",
+          designer: previousDesigner,
+        });
+        continue;
+      }
+
+      const previousStatus = task.status;
+      task.status = "Assigned";
+      task.designer = designerDoc._id;
+      if (priority) task.priority = priority;
+      if (difficulty) task.difficulty = difficulty;
+      if (dueAt) task.dueAt = new Date(dueAt);
+
+      task.history.push({
+        by: actorId,
+        from: previousStatus,
+        to: "Assigned",
+        action: "Assign designer bulk",
+        note: req.body?.note || "",
+      });
+
+      await task.save();
+
+      results.push({
+        taskId,
+        status: "success",
+        task_status: task.status,
+        designer: {
+          _id: designerDoc._id,
+          full_name: designerDoc.full_name,
+          email: designerDoc.email,
+          role_name: role?.name || null,
+        },
+      });
+    }
+
+    const success = results.filter((result) => result.status === "success").length;
+
+    return res.json({
+      message: "Bulk PSD task assignment completed",
+      total: uniqueTaskIds.length,
+      success,
+      failed: uniqueTaskIds.length - success,
+      results,
+    });
+  } catch (err) {
+    return res.status(err.statusCode || 500).json({
+      message: "Bulk PSD task assignment failed",
+      error: err.message,
+      ...(err.debug ? { debug: err.debug } : {}),
+    });
   }
 };
 
@@ -491,6 +636,7 @@ module.exports = {
   getTasks,
   requestPSD,
   assignDesigner,
+  assignDesignerBulk,
   startTask,
   uploadPSD,
   qcPSD,

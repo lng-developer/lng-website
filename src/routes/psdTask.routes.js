@@ -34,6 +34,13 @@ router.post(
 
 // Leader actions
 router.post(
+  "/assign/bulk",
+  authenticateToken,
+  authorizeRoles("Admin", "Design Leader"),
+  PsdTaskController.assignDesignerBulk
+);
+
+router.post(
   "/:taskId/assign",
   authenticateToken,
   authorizeRoles("Admin", "Design Leader"),

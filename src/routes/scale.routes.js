@@ -100,6 +100,13 @@ router.put(
 );
 
 router.put(
+  "/orders/assign-scale/bulk",
+  authenticateToken,
+  authorizeRoles("Admin", "Design Leader"),
+  scaleController.assignScaleBulk
+);
+
+router.put(
   "/orders/:orderId/assign-cs",
   authenticateToken,
   authorizeRoles("Admin", "Design Leader"),
