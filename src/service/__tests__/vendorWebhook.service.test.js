@@ -136,4 +136,75 @@ describe("vendorWebhookService", () => {
 
     expect(db.EtsyOrder.findOne).not.toHaveBeenCalled();
   });
+
+  test("skips duplicate Onos webhook when tracking state is unchanged", async () => {
+    const order = {
+      orderId: "4081453973",
+      status: "Shipped",
+      shippedAt: new Date("2026-06-09T00:00:00.000Z"),
+      vendor_submissions: {
+        onos: {
+          sent: true,
+          external_id: "CS-76508-32458",
+          webhook_attempt_count: 1,
+          webhook_tracking: "YT1234567891234567",
+        },
+      },
+      items: [
+        {
+          transactionId: "5090766154",
+          cost_breakdown: { vendorProductId: "0123456789abcdef01234567" },
+          tracking_info: {
+            fulfillment: "Onos",
+            tracking: "YT1234567891234567",
+            status: "Shipped",
+            note: "carrier:USPS",
+          },
+        },
+      ],
+      markModified: jest.fn(),
+      save: jest.fn().mockResolvedValue(undefined),
+    };
+
+    db.EtsyOrder.findOne.mockImplementation((query) => {
+      if (query["vendor_submissions.onos.external_id"] === "CS-76508-32458") {
+        return Promise.resolve(order);
+      }
+      return Promise.resolve(null);
+    });
+    db.orderCustomProduct.findOne.mockResolvedValue(null);
+    mockSelectLean(db.vendorProduct.find, [
+      { _id: "0123456789abcdef01234567", vendor_id: "111111111111111111111111" },
+    ]);
+    mockSelectLean(db.vendor.find, [
+      { _id: "111111111111111111111111", name: "OnosPOD", fulfillment_type: "onos" },
+    ]);
+
+    const result = await vendorWebhookService.handleWebhook({
+      provider: "onos",
+      payload: {
+        status: true,
+        data: {
+          id: "CS-76508-32458",
+          order_id: "4081453973",
+          status: "Shipped",
+          tracking_number: "YT1234567891234567",
+          carrier: "USPS",
+        },
+      },
+      req: { headers: {}, query: {} },
+    });
+
+    expect(result.result).toEqual(
+      expect.objectContaining({
+        matchedItems: 1,
+        changedItems: 0,
+        orderStatusChanged: false,
+        skipped: true,
+      })
+    );
+    expect(order.vendor_submissions.onos.webhook_attempt_count).toBe(1);
+    expect(order.markModified).not.toHaveBeenCalled();
+    expect(order.save).not.toHaveBeenCalled();
+  });
 });

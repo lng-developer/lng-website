@@ -299,6 +299,7 @@ async function applyWebhookToOrder(provider, event, found) {
   const label = getProviderLabel(provider);
   const now = new Date();
   let changedItems = 0;
+  let matchedItems = 0;
 
   doc.items = (doc.items || []).map((item) => {
     const itemObj = item.toObject?.() ? item.toObject() : item;
@@ -306,6 +307,7 @@ async function applyWebhookToOrder(provider, event, found) {
     const itemProvider = vpid ? providerByVendorProductId.get(vpid) : "";
     const shouldUpdate = hasProviderMap ? itemProvider === provider : true;
     if (!shouldUpdate) return itemObj;
+    matchedItems += 1;
 
     const prev = itemObj.tracking_info || {};
     const prevTracking = norm(prev.tracking);
@@ -333,22 +335,6 @@ async function applyWebhookToOrder(provider, event, found) {
     return { ...itemObj, tracking_info: next };
   });
 
-  doc.vendor_submissions = doc.vendor_submissions || {};
-  doc.vendor_submissions[provider] = {
-    ...(doc.vendor_submissions[provider] || {}),
-    last_webhook: event.raw,
-    webhook_received_at: now,
-    webhook_attempt_count: (doc.vendor_submissions[provider]?.webhook_attempt_count || 0) + 1,
-    webhook_status: event.status || "",
-    webhook_tracking: event.tracking || "",
-    webhook_carrier: event.carrier || "",
-  };
-
-  if (typeof doc.markModified === "function") {
-    doc.markModified("items");
-    doc.markModified("vendor_submissions");
-  }
-
   const allShipped =
     (doc.items || []).length > 0 &&
     (doc.items || []).every((item) => lower(item?.tracking_info?.status) === "shipped");
@@ -359,13 +345,34 @@ async function applyWebhookToOrder(provider, event, found) {
     orderStatusChanged = true;
   }
 
-  await doc.save();
+  const hasChanges = changedItems > 0 || orderStatusChanged;
+  if (hasChanges) {
+    doc.vendor_submissions = doc.vendor_submissions || {};
+    doc.vendor_submissions[provider] = {
+      ...(doc.vendor_submissions[provider] || {}),
+      last_webhook: event.raw,
+      webhook_received_at: now,
+      webhook_attempt_count: (doc.vendor_submissions[provider]?.webhook_attempt_count || 0) + 1,
+      webhook_status: event.status || "",
+      webhook_tracking: event.tracking || "",
+      webhook_carrier: event.carrier || "",
+    };
+
+    if (typeof doc.markModified === "function") {
+      doc.markModified("items");
+      doc.markModified("vendor_submissions");
+    }
+
+    await doc.save();
+  }
 
   return {
     collection: kind === "etsy" ? "etsyorders" : "ordercustomproducts",
     orderId: doc.orderId,
+    matchedItems,
     changedItems,
     orderStatusChanged,
+    skipped: !hasChanges,
     tracking: event.tracking || "",
     carrier: event.carrier || "",
     shipped: !!event.shipped,

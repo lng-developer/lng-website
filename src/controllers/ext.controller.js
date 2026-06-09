@@ -1231,7 +1231,7 @@ function applyToEtsyItemsOfVendor(doc, vendorKey, { tracking, carrier, shipped, 
     return { ...(it.toObject?.() ? it.toObject() : it), tracking_info: nextTI };
   });
 
-  if (vendorKey === "onos") {
+  if (vendorKey === "onos" && changed > 0) {
     doc.vendor_submissions = doc.vendor_submissions || {};
     doc.vendor_submissions.onos = {
       ...(doc.vendor_submissions.onos || {}),
@@ -1308,10 +1308,13 @@ async function updateEtsyOrderByVendors(orderId, options = {}) {
     orderStatusChanged = true;
   }
 
-  await doc.save();
+  if (totalChanged > 0 || orderStatusChanged) {
+    await doc.save();
+  }
   return {
     updatedItems: totalChanged,
     orderStatusChanged,
+    skipped: totalChanged === 0 && !orderStatusChanged,
     vendorResults,
   };
 }
