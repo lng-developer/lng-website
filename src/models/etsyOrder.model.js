@@ -53,8 +53,8 @@ const EtsyCustomFileSchema = new Schema(
 const EtsyOrderItemEmbeddedSchema = new Schema(
     {
         transactionId: { type: String, required: true }, // unique in order (enforce by import logic)
-        listingId: { type: String, index: true },
-        sku: { type: String, index: true },
+        listingId: { type: String },
+        sku: { type: String },
         orderItemId: { type: String },
 
         itemName: { type: String },

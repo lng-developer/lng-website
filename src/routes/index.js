@@ -34,6 +34,7 @@ const autoConfigRoutes = require("./autoConfig.routes");
 const etsyAdsRoutes = require("./etsyAds.routes");
 const EtsyMessagesRoutes = require("./etsyMessages.routes");
 const devRoutes = require("./dev.routes");
+const vendorWebhookRoutes = require("./vendorWebhook.routes");
 
 module.exports = {
   roleRoutes,
@@ -72,4 +73,5 @@ module.exports = {
   etsyAdsRoutes,
   EtsyMessagesRoutes,
   devRoutes,
+  vendorWebhookRoutes,
 };
