@@ -1,3 +1,4 @@
+const crypto = require("crypto");
 const mongoose = require("mongoose");
 const db = require("../models");
 
@@ -390,10 +391,52 @@ function extractSecretFromRequest(req) {
   );
 }
 
+function getRawRequestBody(req) {
+  if (Buffer.isBuffer(req?.rawBody)) return req.rawBody;
+  if (typeof req?.rawBody === "string") return Buffer.from(req.rawBody, "utf8");
+  return Buffer.from(JSON.stringify(req?.body || {}), "utf8");
+}
+
+function normalizeHmacSignature(value) {
+  return norm(value)
+    .replace(/^sha256=/i, "")
+    .replace(/^hmac-sha256=/i, "")
+    .trim();
+}
+
+function timingSafeStringEqual(a, b) {
+  const left = Buffer.from(String(a || ""), "utf8");
+  const right = Buffer.from(String(b || ""), "utf8");
+  if (left.length !== right.length) return false;
+  return crypto.timingSafeEqual(left, right);
+}
+
+function verifyOnosHmac(req, expectedSecret) {
+  const received = normalizeHmacSignature(req.headers?.["x-onos-hmac-sha256"]);
+  if (!received) return false;
+
+  const rawBody = getRawRequestBody(req);
+  const digestHex = crypto
+    .createHmac("sha256", expectedSecret)
+    .update(rawBody)
+    .digest("hex");
+  const digestBase64 = crypto
+    .createHmac("sha256", expectedSecret)
+    .update(rawBody)
+    .digest("base64");
+
+  return (
+    timingSafeStringEqual(received, digestHex) ||
+    timingSafeStringEqual(received, digestBase64)
+  );
+}
+
 function verifyWebhookSecret(req, provider) {
   const envName = `${provider.toUpperCase()}_WEBHOOK_SECRET`;
   const expected = norm(process.env[envName] || process.env.VENDOR_WEBHOOK_SECRET);
   if (!expected) return;
+
+  if (provider === "onos" && verifyOnosHmac(req, expected)) return;
 
   const received = extractSecretFromRequest(req);
   if (received !== expected) {

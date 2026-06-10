@@ -13,7 +13,12 @@ const etsyVendorSyncScheduler = require("./src/service/etsyVendorSyncScheduler")
 // ===== App
 const app = express();
 app.set("trust proxy", true);
-app.use(express.json({ limit: "10mb" }));
+app.use(express.json({
+  limit: "10mb",
+  verify: (req, _res, buf) => {
+    req.rawBody = Buffer.from(buf || "");
+  },
+}));
 app.use(morgan("dev"));
 
 app.use(cors());
