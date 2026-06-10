@@ -36,7 +36,7 @@ function buildLogDocument({ provider, req, payload, result, error, httpStatus })
     eventStatus: norm(event.status),
     tracking: norm(event.tracking || resultData.tracking),
     carrier: norm(event.carrier || resultData.carrier),
-    collection: norm(resultData.collection),
+    matchedCollection: norm(resultData.collection),
     matchedItems: Number(resultData.matchedItems || 0),
     changedItems: Number(resultData.changedItems || 0),
     orderStatusChanged: !!resultData.orderStatusChanged,
