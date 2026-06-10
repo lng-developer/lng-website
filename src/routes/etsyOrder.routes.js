@@ -54,13 +54,13 @@ router.get(
 router.get(
     '/qc/list',
     authenticateToken,
-    authorizeRoles('Customer Service', "Admin", "Seller"),
+    authorizeRoles('Customer Service', "Admin", "Seller", "Design Leader"),
     etsyOrderController.getEtsyQCList
 );
 router.get(
     '/qc/statistics',
     authenticateToken,
-    authorizeRoles('Customer Service', "Admin", "Seller"),
+    authorizeRoles('Customer Service', "Admin", "Seller", "Design Leader"),
     etsyOrderController.getEtsyQCStatistics
 );
 router.patch('/sumbittedoetsy', etsyOrderController.updateSumbittedoetsyStatus);

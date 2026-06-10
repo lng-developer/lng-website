@@ -3,9 +3,9 @@ const { QCController } = require('../controllers');
 const router = express.Router();
 const { authenticateToken, authorizeRoles } = require('../middlewares/auth.middleware');
 
-router.get('/', authenticateToken, authorizeRoles('Customer Service', "Admin", "Seller"), QCController.getQCList);
+router.get('/', authenticateToken, authorizeRoles('Customer Service', "Admin", "Seller", "Design Leader"), QCController.getQCList);
 
-router.get('/statistics', authenticateToken, authorizeRoles('Customer Service', "Admin", "Seller"), QCController.getQCStatistics);
+router.get('/statistics', authenticateToken, authorizeRoles('Customer Service', "Admin", "Seller", "Design Leader"), QCController.getQCStatistics);
 
 router.post('/push-platform-orders', authenticateToken, authorizeRoles('Customer Service', "Admin", "Seller"), QCController.pushPlatformOrders);
 
