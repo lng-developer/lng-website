@@ -11,11 +11,25 @@ const path = require('path');
 const { parse } = require('csv-parse');
 const axios = require('axios');
 const multer = require("multer");
-const { uploadBufferToR2 } = require("../service/cloudflareR2/r2.service");
+const { uploadBufferToR2, uploadFilePathToR2 } = require("../service/cloudflareR2/r2.service");
 const FulfillmentService = require("../service/fulfillment");
 const { logOrderHistory } = require("../service/orderHistoryLogger");
 
-const etsyScaleUpload = multer({ storage: multer.memoryStorage() });
+const etsyFulfillmentUploadDir = path.join(process.cwd(), "tmp_uploads", "etsy_fulfillment");
+if (!fs.existsSync(etsyFulfillmentUploadDir)) fs.mkdirSync(etsyFulfillmentUploadDir, { recursive: true });
+
+const etsyScaleUpload = multer({
+    storage: multer.diskStorage({
+        destination: (_req, _file, cb) => cb(null, etsyFulfillmentUploadDir),
+        filename: (_req, file, cb) => {
+            const ext = path.extname(file.originalname || "");
+            cb(null, `${Date.now()}-${Math.random().toString(16).slice(2)}${ext}`);
+        },
+    }),
+    limits: {
+        fileSize: Number(process.env.ETSY_FULFILLMENT_FILE_MAX_BYTES || 1024 * 1024 * 1024),
+    },
+});
 
 /* ================== UTIL ================== */
 
@@ -3725,8 +3739,8 @@ const uploadEtsyFulfillmentFileForItem = [
                 const safeOrderId = String(order.orderId).replace(/[^\w.-]+/g, "_");
                 const safeTx = String(transactionId).replace(/[^\w.-]+/g, "_");
                 const safePos = pos.replace(/[^\w.-]+/g, "_");
-                const up = await uploadBufferToR2({
-                    buffer: file.buffer,
+                const up = await uploadFilePathToR2({
+                    filePath: file.path,
                     originalName: file.originalname,
                     mimeType: file.mimetype,
                     size: file.size,
@@ -3751,6 +3765,10 @@ const uploadEtsyFulfillmentFileForItem = [
         } catch (err) {
             console.error("uploadEtsyFulfillmentFileForItem error:", err);
             return res.status(500).json({ message: "Upload failed", error: err.message });
+        } finally {
+            for (const file of req.files || []) {
+                if (file?.path) fs.unlink(file.path, () => { });
+            }
         }
     },
 ];
