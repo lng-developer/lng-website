@@ -66,7 +66,8 @@ const {
   extensionLogRoutes,
   etsyAdsRoutes,
   vendorWebhookRoutes,
-  devRoutes
+  devRoutes,
+  shopifyRoutes
 } = require("./src/routes");
 
 app.use("/api/role", roleRoutes);
@@ -106,6 +107,7 @@ app.use("/api/auto-config", autoConfigRoutes);
 app.use("/api/ext/logs", extensionLogRoutes);
 app.use("/api/vendor-webhooks", vendorWebhookRoutes);
 app.use("/api/dev", devRoutes);
+app.use("/api/shopify", shopifyRoutes);
 
 app.use("/api/r2-test", require("./src/routes/upload.router.R2"));
 // ===== HTTP server
