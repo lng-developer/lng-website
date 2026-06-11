@@ -44,6 +44,8 @@ const toBooleanStrict = (value) => {
     return null;
 };
 
+const escapeRegExp = (value = "") => String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
 const ETSY_TRACKING_STATUSES = ["New", "In progress", "Fulfilled", "Shipping", "Shipped", "Canceled", "Cancelled"];
 const isEtsyCanceledStatus = (status) => ["Canceled", "Cancelled"].includes(String(status || "").trim());
 
@@ -1014,8 +1016,14 @@ const getListOrders = async (req, res) => {
         if (shippingType) filter.shipping_type = shippingType;
 
         // ===== Shop name filter =====
-        if (shopName) {
-            const shops = await Store.find({ name: new RegExp(shopName, "i") }).select("_id").lean();
+        if (shopName && String(shopName).trim()) {
+            const shopNameRegex = new RegExp(escapeRegExp(String(shopName).trim()), "i");
+            const shops = await Store.find({
+                $or: [
+                    { name: shopNameRegex },
+                    { store: shopNameRegex },
+                ],
+            }).select("_id").lean();
             const shopIds = shops.map(s => s._id);
             filter.shopId = { $in: shopIds };
         }
@@ -1147,7 +1155,7 @@ const getListOrders = async (req, res) => {
                 purchase_date: order.saleDate || null,
                 createdAt: order.createdAt || null,
                 shopId: shop._id ? String(shop._id) : String(order.shopId || ""),
-                shopName: shop.name || "",
+                shopName: shop.name || shop.store || "",
                 shipping_type: order.shipping_type || "Standard",
                 items: (order.items || []).map((item) => {
                     // Build cost_center
@@ -3398,7 +3406,14 @@ const buildEtsyScalePipeline = (req, activeStatuses, options = {}) => {
         },
         { $unwind: { path: "$cs_assignee", preserveNullAndEmptyArrays: true } },
         ...(shopName && shopName.trim()
-            ? [{ $match: { "shop.name": { $regex: new RegExp(shopName.trim(), "i") } } }]
+            ? [{
+                $match: {
+                    $or: [
+                        { "shop.name": { $regex: new RegExp(escapeRegExp(shopName.trim()), "i") } },
+                        { "shop.store": { $regex: new RegExp(escapeRegExp(shopName.trim()), "i") } },
+                    ],
+                },
+            }]
             : []),
     ];
 
@@ -3528,7 +3543,7 @@ async function buildEtsyVendorProductDisplayMap(orders = []) {
 const mapEtsyScaleOrder = (order, { vendorProductDisplayMap = new Map() } = {}) => ({
     orderId: order.orderId,
     shopId: order.shopId ? String(order.shopId) : null,
-    shopName: order.shop?.name || null,
+    shopName: order.shop?.name || order.shop?.store || null,
     status: order.status || "",
     saleDate: order.saleDate,
     createdAt: order.createdAt,
