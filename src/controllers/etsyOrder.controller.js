@@ -14,6 +14,10 @@ const multer = require("multer");
 const { uploadBufferToR2, uploadFilePathToR2 } = require("../service/cloudflareR2/r2.service");
 const FulfillmentService = require("../service/fulfillment");
 const { logOrderHistory } = require("../service/orderHistoryLogger");
+const {
+    buildEtsyTrackingInfoResponse,
+    buildEtsyTrackingSummary,
+} = require("../service/etsyTrackingResponse.service");
 
 const etsyFulfillmentUploadDir = path.join(process.cwd(), "tmp_uploads", "etsy_fulfillment");
 if (!fs.existsSync(etsyFulfillmentUploadDir)) fs.mkdirSync(etsyFulfillmentUploadDir, { recursive: true });
@@ -1176,7 +1180,8 @@ const getListOrders = async (req, res) => {
                         baseImageUrl: item.baseImage?.imageUrl || "",
                         listingId: item.listingId || null,
                         cost_center,
-                        tracking_info: item.tracking_info || {},
+                        tracking_info: buildEtsyTrackingInfoResponse(order, item),
+                        tracking_summary: buildEtsyTrackingSummary(order, item),
                         fulfillment_file: toPlainFulfillmentFile(item.fulfillment_file),
                         scale_status: item.scale_status || null,
                         ...buildCustomItemResponseFields(item),
@@ -1185,6 +1190,7 @@ const getListOrders = async (req, res) => {
                     };
                 }),
                 base_cost: order.base_cost || 0,
+                tracking_summary: buildEtsyTrackingSummary(order, (order.items || [])[0] || {}),
                 sumbittedoetsy: order.sumbittedoetsy ?? false,
                 address_validation: order.address_validation?.isValid ?? null,
                 address_validation_status: order.address_validation?.status || null,
@@ -3558,7 +3564,8 @@ const mapEtsyScaleOrder = (order, { vendorProductDisplayMap = new Map() } = {}) 
                 vendorProductSKU: item?.cost_breakdown?.matchedSku || null,
             },
             vendor_display_name: vendorProductDisplayName,
-            tracking_info: item.tracking_info || {},
+            tracking_info: buildEtsyTrackingInfoResponse(order, item),
+            tracking_summary: buildEtsyTrackingSummary(order, item),
             fulfillment_file: toPlainFulfillmentFile(item.fulfillment_file),
             scale_status: item.scale_status || "Need Scale",
             qc_note: item.qc_note || "",
@@ -3567,6 +3574,7 @@ const mapEtsyScaleOrder = (order, { vendorProductDisplayMap = new Map() } = {}) 
         };
     }),
     base_cost: order.base_cost || 0,
+    tracking_summary: buildEtsyTrackingSummary(order, (order.items || [])[0] || {}),
     address_validation: order.address_validation?.isValid ?? null,
     address_validation_status: order.address_validation?.status || null,
     address_validation_detail: order.address_validation || null,
@@ -4216,4 +4224,6 @@ module.exports = {
     assignEtsyOrderToCS,
     unassignEtsyOrderFromCS,
     testEtsySmartyAddressValidation,
+    buildEtsyTrackingSummary,
+    buildEtsyTrackingInfoResponse,
 };

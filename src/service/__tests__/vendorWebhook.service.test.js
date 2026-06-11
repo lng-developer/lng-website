@@ -203,6 +203,65 @@ describe("vendorWebhookService", () => {
     expect(order.save).toHaveBeenCalledTimes(1);
   });
 
+  test("parses Onos webhook nested tracking object", async () => {
+    const order = {
+      orderId: "4078447708",
+      status: "Fulfilled",
+      vendor_submissions: {
+        onos: {
+          sent: true,
+          external_id: "MX-18985-69156",
+        },
+      },
+      items: [
+        {
+          cost_breakdown: { vendorProductId: "0123456789abcdef01234567" },
+          tracking_info: { status: "New", tracking: "" },
+        },
+      ],
+      markModified: jest.fn(),
+      save: jest.fn().mockResolvedValue(undefined),
+    };
+
+    db.EtsyOrder.findOne.mockImplementation((query) => {
+      if (query["vendor_submissions.onos.external_id"] === "MX-18985-69156") {
+        return Promise.resolve(order);
+      }
+      return Promise.resolve(null);
+    });
+    db.orderCustomProduct.findOne.mockResolvedValue(null);
+    mockSelectLean(db.vendorProduct.find, [
+      { _id: "0123456789abcdef01234567", vendor_id: "111111111111111111111111" },
+    ]);
+    mockSelectLean(db.vendor.find, [
+      { _id: "111111111111111111111111", name: "OnosPOD", fulfillment_type: "onos" },
+    ]);
+
+    const result = await vendorWebhookService.handleWebhook({
+      provider: "onos",
+      payload: {
+        status: true,
+        data: {
+          id: "MX-18985-69156",
+          order_id: "4078447708",
+          referent_id: "4078447708",
+          status: "Shipped",
+          tracking: {
+            tracking: "9214490411384200030100",
+            carrier: "USPS",
+            url: "https://tools.usps.com/go/TrackConfirmAction?tLabels=9214490411384200030100",
+          },
+        },
+      },
+      req: { headers: {}, query: {} },
+    });
+
+    expect(result.result.tracking).toBe("9214490411384200030100");
+    expect(result.result.carrier).toBe("USPS");
+    expect(order.items[0].tracking_info.tracking).toBe("9214490411384200030100");
+    expect(order.items[0].tracking_info.tracking).not.toBe("[object Object]");
+  });
+
   test("rejects invalid Onos HMAC SHA256 signature", async () => {
     process.env.ONOS_WEBHOOK_SECRET = "expected-secret";
 
