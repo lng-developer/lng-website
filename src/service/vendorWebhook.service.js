@@ -53,32 +53,30 @@ function pickTracking(root) {
 }
 
 function parseOnosWebhook(payload = {}) {
-  const data = payload.data && typeof payload.data === "object" ? payload.data : payload;
   const tracking = normalizeVendorTrackingPayload("onos", payload);
 
   return {
     provider: "onos",
-    externalId: firstValue(data.id, payload.id, data.order_id, payload.order_id),
-    orderId: firstValue(data.referent_id, payload.referent_id, data.order_id, payload.order_id, data.orderId, payload.orderId),
+    externalId: tracking.externalOrderId,
+    orderId: tracking.orderId,
     tracking: tracking.trackingNumber,
     carrier: tracking.carrier,
-    status: tracking.status || lower(data.status || payload.status),
+    status: tracking.status,
     shipped: tracking.shipped,
     raw: payload,
   };
 }
 
 function parseGenericWebhook(provider, payload = {}) {
-  const data = payload.data && typeof payload.data === "object" ? payload.data : payload;
   const tracking = normalizeVendorTrackingPayload(provider, payload);
 
   return {
     provider,
-    externalId: firstValue(data.external_id, payload.external_id, data.id, payload.id, data.order_id, payload.order_id),
-    orderId: firstValue(data.referent_id, payload.referent_id, data.orderId, payload.orderId, data.order_id, payload.order_id),
+    externalId: tracking.externalOrderId,
+    orderId: tracking.orderId,
     tracking: tracking.trackingNumber,
     carrier: tracking.carrier,
-    status: tracking.status || lower(data.status || payload.status),
+    status: tracking.status,
     shipped: tracking.shipped,
     raw: payload,
   };

@@ -70,6 +70,34 @@ describe("vendorTrackingNormalizer", () => {
     );
   });
 
+  test("normalizes Onos order wrapper webhook payload", () => {
+    const result = normalizeVendorTrackingPayload("onos", {
+      order: {
+        id: "HQ-95254-44106",
+        order_id: "4078286134",
+        referent_id: "4078286134",
+        status: "Cancelled",
+        tracking: {
+          tracking: "",
+          carrier: "",
+          url: "https://tools.usps.com/go/TrackConfirmAction?tLabels=%2C",
+          shipping_label: "",
+        },
+      },
+    });
+
+    expect(result).toEqual(
+      expect.objectContaining({
+        provider: "onos",
+        externalOrderId: "HQ-95254-44106",
+        orderId: "4078286134",
+        status: "cancelled",
+        trackingNumber: "",
+        shipped: false,
+      })
+    );
+  });
+
   test("normalizes tracking from stored vendor submission", () => {
     const result = normalizeVendorSubmissionTracking("onos", {
       external_id: "MX-18985-69156",

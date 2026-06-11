@@ -50,6 +50,12 @@ function isPlainObject(value) {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
 
+function getPayloadRoot(payload = {}) {
+  if (isPlainObject(payload?.data)) return payload.data;
+  if (isPlainObject(payload?.order)) return payload.order;
+  return payload;
+}
+
 function firstValue(...values) {
   for (const value of values) {
     const v = cleanTrackingString(value);
@@ -189,6 +195,7 @@ function collectTrackingCandidates(root) {
     push(obj);
     push(obj.data);
     push(obj.tracking);
+    push(obj.order);
     push(obj.shipment);
     push(obj.shipping);
 
@@ -248,7 +255,7 @@ function pickBestTracking(root) {
 
 function normalizeVendorTrackingPayload(provider, payload = {}) {
   const key = normalizeProviderKey(provider);
-  const root = isPlainObject(payload?.data) ? payload.data : payload;
+  const root = getPayloadRoot(payload);
   const picked = pickBestTracking(payload);
   const status = picked.status || lower(root?.status || payload?.status || root?.shipment_status || root?.fulfillment_status);
   const shipped =

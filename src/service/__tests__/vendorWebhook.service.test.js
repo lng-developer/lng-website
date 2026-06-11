@@ -262,6 +262,126 @@ describe("vendorWebhookService", () => {
     expect(order.items[0].tracking_info.tracking).not.toBe("[object Object]");
   });
 
+  test("parses Onos webhook order wrapper payload", () => {
+    const event = vendorWebhookService.parseWebhook("onos", {
+      order: {
+        id: "HQ-95254-44106",
+        order_id: "4078286134",
+        referent_id: "4078286134",
+        status: "Cancelled",
+        tracking: {
+          tracking: "",
+          carrier: "",
+        },
+      },
+    });
+
+    expect(event).toEqual(
+      expect.objectContaining({
+        provider: "onos",
+        externalId: "HQ-95254-44106",
+        orderId: "4078286134",
+        status: "cancelled",
+        tracking: "",
+        carrier: "",
+        shipped: false,
+      })
+    );
+  });
+
+  test("handles Onos order wrapper webhook and updates Etsy order tracking", async () => {
+    const order = {
+      orderId: "4083354643",
+      status: "Fulfilled",
+      vendor_submissions: {
+        onos: {
+          sent: true,
+          external_id: "XS-22148-20960",
+        },
+      },
+      items: [
+        {
+          transactionId: "5093459812",
+          cost_breakdown: { vendorProductId: "0123456789abcdef01234567" },
+          tracking_info: { status: "New", tracking: "" },
+        },
+      ],
+      markModified: jest.fn(),
+      save: jest.fn().mockResolvedValue(undefined),
+    };
+
+    db.EtsyOrder.findOne.mockImplementation((query) => {
+      if (query["vendor_submissions.onos.external_id"] === "XS-22148-20960") {
+        return Promise.resolve(order);
+      }
+      return Promise.resolve(null);
+    });
+    db.orderCustomProduct.findOne.mockResolvedValue(null);
+    mockSelectLean(db.vendorProduct.find, [
+      { _id: "0123456789abcdef01234567", vendor_id: "111111111111111111111111" },
+    ]);
+    mockSelectLean(db.vendor.find, [
+      { _id: "111111111111111111111111", name: "OnosPOD", fulfillment_type: "onos" },
+    ]);
+
+    const result = await vendorWebhookService.handleWebhook({
+      provider: "onos",
+      payload: {
+        order: {
+          id: "XS-22148-20960",
+          order_id: "4083354643",
+          referent_id: "4083354643",
+          status: "In Production",
+          tracking: {
+            tracking: "9214490411384200030025",
+            carrier: "USPS",
+            url: "https://tools.usps.com/go/TrackConfirmAction?tLabels=9214490411384200030025",
+            shipping_label: "https://cdn.onosexpress.com/express/labels/label.pdf",
+          },
+        },
+      },
+      req: { headers: {}, query: {} },
+    });
+
+    expect(result.event).toEqual(
+      expect.objectContaining({
+        externalId: "XS-22148-20960",
+        orderId: "4083354643",
+        tracking: "9214490411384200030025",
+        carrier: "USPS",
+        status: "in production",
+        shipped: true,
+      })
+    );
+    expect(result.result).toEqual(
+      expect.objectContaining({
+        collection: "etsyorders",
+        orderId: "4083354643",
+        changedItems: 1,
+        orderStatusChanged: true,
+        tracking: "9214490411384200030025",
+        carrier: "USPS",
+        shipped: true,
+      })
+    );
+    expect(order.items[0].tracking_info).toEqual(
+      expect.objectContaining({
+        fulfillment: "Onos",
+        tracking: "9214490411384200030025",
+        status: "Shipped",
+        note: "carrier:USPS",
+      })
+    );
+    expect(order.vendor_submissions.onos).toEqual(
+      expect.objectContaining({
+        webhook_status: "in production",
+        webhook_tracking: "9214490411384200030025",
+        webhook_carrier: "USPS",
+      })
+    );
+    expect(order.save).toHaveBeenCalledTimes(1);
+  });
+
   test("rejects invalid Onos HMAC SHA256 signature", async () => {
     process.env.ONOS_WEBHOOK_SECRET = "expected-secret";
 
