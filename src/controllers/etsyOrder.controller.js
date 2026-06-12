@@ -52,7 +52,7 @@ const isEtsyCanceledStatus = (status) => ["Canceled", "Cancelled"].includes(Stri
 function computeEtsyOrderStatusFromItems(items = []) {
     const statuses = (items || []).map((item) => String(item?.tracking_info?.status || "New").trim());
     const active = statuses.filter((status) => !isEtsyCanceledStatus(status));
-    if (active.length === 0 && statuses.length > 0) return "Canceled";
+    if (active.length === 0 && statuses.length > 0) return "Cancelled";
     if (active.length > 0 && active.every((status) => status === "Shipped")) return "Shipped";
     if (active.includes("Shipping")) return "Shipping";
     if (active.includes("Fulfilled")) return "Fulfilled";
@@ -2823,7 +2823,7 @@ const updateEtsyOrderItemTracking = async (req, res) => {
 
         let nextStatus;
         if (isEtsyCanceledStatus(status)) {
-            nextStatus = "Canceled";
+            nextStatus = "Cancelled";
         } else if (tracking !== undefined && tracking.length > 0) {
             nextStatus = "Shipped";
         } else {
@@ -2941,7 +2941,7 @@ const updateEtsyOrderTrackingForAllItems = async (req, res) => {
 
         let nextStatus;
         if (isEtsyCanceledStatus(status)) {
-            nextStatus = "Canceled";
+            nextStatus = "Cancelled";
         } else if (tracking !== undefined && tracking.length > 0) {
             nextStatus = "Shipped";
         } else {
