@@ -293,6 +293,7 @@ const EtsyOrderSchema = new Schema(
 
         numberOfItems: { type: Number, default: 0 },
         sumbittedoetsy: { type: Boolean, default: false },
+        case: [{ type: Schema.Types.ObjectId, ref: "Case", required: true }],
 
         items: { type: [EtsyOrderItemEmbeddedSchema], default: [] },
         address_validation: {

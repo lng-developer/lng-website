@@ -1350,29 +1350,6 @@ async function selectConfigByProductType(configCode, labelValueMap, mapOptionVal
     return { cfg: null, reason: `Multiple configs (${cfgCandidates.length}) - partial matches (${partialMatches.length}); cannot determine by product type key/value` };
 }
 
-async function mapOptionValue({ configCode, key, rawValue }) {
-    let val = String(rawValue ?? "");
-    if (!val) return { value: val, ruleId: null, matchType: null };
-    const rules = await ConfigOptionMapping.find({ config_code: configCode, key, active: { $ne: false } })
-        .sort({ priority: 1, created_at: 1 }).lean();
-    const nl = (x) => normalize(x);
-    const n = (x) => String(x || "").trim();
-    for (const r of rules || []) {
-        const mt = String(r.match_type || "equals").toLowerCase();
-        const flags = r.regex_flags || "i";
-        const cs = !!r.case_sensitive;
-        const mval = String(r.match_value ?? ""); const mapped = String(r.mapped_value ?? "");
-
-        try {
-            if (mt === "equals") { if (cs ? n(val) === n(mval) : nl(val) === nl(mval)) return { value: mapped, ruleId: String(r._id), matchType: mt }; }
-            if (mt === "contains") { if (cs ? n(val).includes(n(mval)) : nl(val).includes(nl(mval))) return { value: mapped, ruleId: String(r._id), matchType: mt }; }
-            if (mt === "regex") { if (new RegExp(mval, flags).test(val)) return { value: mapped, ruleId: String(r._id), matchType: mt }; }
-            if (mt === "regex_replace") { const replaced = val.replace(new RegExp(mval, flags), mapped); if (replaced !== val) return { value: replaced, ruleId: String(r._id), matchType: mt }; }
-        } catch (_e) { }
-    }
-    return { value: val, ruleId: null, matchType: null };
-}
-
 function decodeEtsyHtmlEntities(value) {
     return String(value || "")
         .replace(/&#39;/g, "'")
@@ -1792,6 +1769,103 @@ const computeBaseCostForEtsyOrder = async (req, res) => {
         return res.status(500).json({ message: "Compute failed for Etsy Order", error: err.message });
     }
 }
+
+const resetBaseCostForEtsyOrder = async (req, res) => {
+    try {
+        const { orderId } = req.body;
+
+        if (!orderId) {
+            return res.status(400).json({ message: "Missing orderId" });
+        }
+
+        const order = await EtsyOrder.findOne({ orderId });
+        if (!order) {
+            return res.status(404).json({ message: "Etsy order not found" });
+        }
+
+        const oldBaseCost = Number(order.base_cost || 0);
+        const oldShippingGroups = Array.isArray(order.base_cost_shipping_groups)
+            ? order.base_cost_shipping_groups
+            : [];
+        const oldComputedAt = order.base_cost_computed_at || null;
+        const itemsWithCostBreakdown = Array.isArray(order.items)
+            ? order.items.filter((item) => item?.cost_breakdown != null).length
+            : 0;
+
+        order.base_cost = 0;
+        order.base_cost_shipping_groups = [];
+        order.base_cost_computed_at = null;
+
+        if (Array.isArray(order.items)) {
+            for (const item of order.items) {
+                item.cost_breakdown = undefined;
+            }
+        }
+
+        await order.save();
+
+        const changes = [];
+        if (oldBaseCost !== 0) {
+            changes.push({
+                field: "base_cost",
+                from: oldBaseCost,
+                to: 0,
+            });
+        }
+
+        if (oldShippingGroups.length > 0) {
+            changes.push({
+                field: "base_cost_shipping_groups",
+                from: oldShippingGroups,
+                to: [],
+            });
+        }
+
+        if (oldComputedAt) {
+            changes.push({
+                field: "base_cost_computed_at",
+                from: oldComputedAt,
+                to: null,
+            });
+        }
+
+        if (itemsWithCostBreakdown > 0) {
+            changes.push({
+                field: "items.cost_breakdown",
+                from: `${itemsWithCostBreakdown} item(s) had cost breakdown`,
+                to: "removed",
+            });
+        }
+
+        if (changes.length > 0) {
+            await logOrderHistory({
+                orderDoc: order,
+                action: "UPDATE_BASE_COST",
+                description: "Etsy order base cost reset to 0 and item cost breakdown removed",
+                changes,
+                user: req.user,
+                context: {
+                    source: "PORTAL",
+                    ip: req.ip,
+                    userAgent: req.headers["user-agent"],
+                },
+            });
+        }
+
+        return res.status(200).json({
+            message: "Etsy order base cost reset successfully",
+            orderId,
+            base_cost: 0,
+            removedCostBreakdownCount: itemsWithCostBreakdown,
+        });
+    } catch (error) {
+        return res.status(500).json({
+            message: "Failed to reset Etsy order base cost",
+            error: error.message,
+        });
+    }
+};
+
 /* ================== STATISTICS (GIỐNG AMAZON) ================== */
 
 const getEtsyOrderStatistics = async (req, res) => {
@@ -3358,7 +3432,9 @@ const buildEtsyScalePipeline = (req, activeStatuses, options = {}) => {
     const isCS = hasRole(role, "Customer Service");
     const restrictCsToAssigned = options.restrictCsToAssigned === true;
 
-    const matchStage = {};
+    const matchStage = {
+        status: { $nin: ["Canceled", "Cancelled"] },
+    };
     if (from && to) matchStage.createdAt = { $gte: new Date(from), $lte: new Date(to) };
     if (isSellerOnly && mongoose.Types.ObjectId.isValid(userId)) {
         matchStage["seller.sellerId"] = new mongoose.Types.ObjectId(userId);
@@ -4013,6 +4089,353 @@ const updateEtsyItemNote = (field) => async (req, res) => {
 const updateEtsyQCNoteForItem = updateEtsyItemNote("qc_note");
 const updateEtsyCSNoteForItem = updateEtsyItemNote("cs_note");
 
+const updateEtsyOrderItemQuantity = async (req, res) => {
+    try {
+        const { orderId, transactionId } = req.params;
+        const { quantity } = req.body;
+
+        if (quantity === undefined || quantity === null) {
+            return res.status(400).json({
+                message: "Quantity is required",
+            });
+        }
+
+        const parsedQuantity = Number(quantity);
+
+        if (!Number.isInteger(parsedQuantity) || parsedQuantity < 1) {
+            return res.status(400).json({
+                message: "Quantity must be an integer greater than 0",
+            });
+        }
+
+        const order = await EtsyOrder.findOne({ orderId });
+        if (!order) {
+            return res.status(404).json({
+                message: "Etsy order or order item not found",
+            });
+        }
+
+        const item = (order.items || []).find(
+            (entry) => String(entry.transactionId) === String(transactionId)
+        );
+        if (!item) {
+            return res.status(404).json({
+                message: "Etsy order or order item not found",
+            });
+        }
+
+        const oldQuantity = item.quantity ?? null;
+
+        if (oldQuantity === parsedQuantity) {
+            return res.status(200).json({
+                message: "No change",
+                data: {
+                    orderId,
+                    transactionId,
+                    orderItemId: transactionId,
+                    quantity: parsedQuantity,
+                },
+            });
+        }
+
+        item.quantity = parsedQuantity;
+        order.numberOfItems = (order.items || []).reduce(
+            (sum, entry) => sum + (Number(entry.quantity) || 0),
+            0
+        );
+        order.markModified("items");
+        await order.save();
+
+        await logOrderHistory({
+            orderDoc: order,
+            action: "UPDATE_ITEM_QUANTITY",
+            description: `Etsy order item quantity changed from ${oldQuantity} to ${parsedQuantity}`,
+            changes: [
+                {
+                    field: "items.quantity",
+                    from: oldQuantity,
+                    to: parsedQuantity,
+                },
+                {
+                    field: "numberOfItems",
+                    from: null,
+                    to: order.numberOfItems,
+                },
+            ],
+            orderItemId: transactionId,
+            user: req.user,
+            context: {
+                source: "PORTAL",
+                ip: req.ip,
+                userAgent: req.headers["user-agent"],
+            },
+        });
+
+        return res.status(200).json({
+            message: "Etsy order item quantity updated successfully",
+            data: {
+                orderId,
+                transactionId,
+                orderItemId: transactionId,
+                quantity: parsedQuantity,
+                numberOfItems: order.numberOfItems,
+            },
+        });
+    } catch (error) {
+        return res.status(500).json({
+            message: "Failed to update Etsy order item quantity",
+            error: error.message,
+        });
+    }
+};
+
+const openCaseInEtsyOrder = async (req, res) => {
+    try {
+        const { orderId, caseIds } = req.body;
+
+        if (!orderId || !Array.isArray(caseIds)) {
+            return res
+                .status(400)
+                .json({ message: "Missing orderId or caseIds (should be an array)" });
+        }
+
+        const order = await EtsyOrder.findOne({ orderId });
+        if (!order) {
+            return res.status(404).json({ message: "Etsy order not found" });
+        }
+
+        if (!Array.isArray(order.case)) {
+            order.case = [];
+        }
+
+        const oldCases = order.case.map((id) => String(id));
+        const newCaseIds = caseIds.filter((id) => !oldCases.includes(String(id)));
+
+        if (newCaseIds.length === 0) {
+            return res.status(200).json({
+                message: "No new case added",
+                orderId,
+                case: order.case,
+            });
+        }
+
+        order.case.push(...newCaseIds);
+        await order.save();
+
+        await logOrderHistory({
+            orderDoc: order,
+            action: "OPEN_CASE",
+            description: `Added ${newCaseIds.length} case(s) to Etsy order`,
+            changes: [
+                {
+                    field: "case",
+                    from: oldCases,
+                    to: order.case.map((id) => String(id)),
+                },
+            ],
+            user: req.user,
+            context: {
+                source: "PORTAL",
+                ip: req.ip,
+                userAgent: req.headers["user-agent"],
+            },
+        });
+
+        return res.status(200).json({
+            message: "Case field appended successfully",
+            orderId,
+            case: order.case,
+        });
+    } catch (error) {
+        return res.status(500).json({
+            message: "Failed to append case field",
+            error: error.message,
+        });
+    }
+};
+
+const removeCaseFromEtsyOrder = async (req, res) => {
+    try {
+        const { orderId, caseIds } = req.body;
+
+        if (!orderId || !Array.isArray(caseIds)) {
+            return res
+                .status(400)
+                .json({ message: "Missing orderId or caseIds (should be an array)" });
+        }
+
+        const normalizedCaseIds = [...new Set(caseIds.map((id) => String(id)))];
+
+        const invalidIds = normalizedCaseIds.filter(
+            (id) => !mongoose.Types.ObjectId.isValid(id)
+        );
+        if (invalidIds.length > 0) {
+            return res.status(400).json({
+                message: "Invalid caseId(s)",
+                invalidIds,
+            });
+        }
+
+        const order = await EtsyOrder.findOne({ orderId });
+        if (!order) {
+            return res.status(404).json({ message: "Etsy order not found" });
+        }
+
+        if (!Array.isArray(order.case)) {
+            order.case = [];
+        }
+
+        const oldCases = order.case.map((id) => String(id));
+        const newCases = oldCases.filter((id) => !normalizedCaseIds.includes(id));
+
+        if (newCases.length === oldCases.length) {
+            return res.status(200).json({
+                message: "No case removed",
+                orderId,
+                case: order.case,
+            });
+        }
+
+        order.case = newCases;
+        await order.save();
+
+        await logOrderHistory({
+            orderDoc: order,
+            action: "REMOVE_CASE",
+            description: `Removed ${oldCases.length - newCases.length} case(s) from Etsy order`,
+            changes: [
+                {
+                    field: "case",
+                    from: oldCases,
+                    to: newCases,
+                },
+            ],
+            user: req.user,
+            context: {
+                source: "PORTAL",
+                ip: req.ip,
+                userAgent: req.headers["user-agent"],
+            },
+        });
+
+        return res.status(200).json({
+            message: "Case(s) removed successfully",
+            orderId,
+            case: order.case,
+        });
+    } catch (error) {
+        return res.status(500).json({
+            message: "Failed to remove case(s)",
+            error: error.message,
+        });
+    }
+};
+
+const resetEtsyScaleForOrdersBulk = async (req, res) => {
+    try {
+        const { orderIds = [], note = "" } = req.body || {};
+        const resetNote = typeof note === "string" ? note.trim() : "";
+
+        if (!Array.isArray(orderIds) || orderIds.length === 0) {
+            return res.status(400).json({
+                message: "orderIds must be a non-empty array",
+            });
+        }
+
+        const results = [];
+
+        for (const oid of orderIds) {
+            try {
+                const order = await EtsyOrder.findOne({ orderId: oid });
+                if (!order) {
+                    results.push({
+                        orderId: oid,
+                        status: "failed",
+                        error: "Etsy order not found",
+                    });
+                    continue;
+                }
+
+                const previousOverallStatus = order.scale_overall_status || "Need Scale";
+                const previousStatus = order.status || "New";
+                const previousScaleId = order.scaleId || null;
+                const itemChanges = [];
+
+                for (const item of order.items || []) {
+                    const transactionId = item?.transactionId || item?.orderItemId || "";
+                    itemChanges.push({
+                        transactionId,
+                        scale_status: item?.scale_status || "Need Scale",
+                        qc_note: item?.qc_note || "",
+                        fulfillment_file: toPlainFulfillmentFile(item?.fulfillment_file),
+                    });
+
+                    item.scale_status = "Need Scale";
+                    item.fulfillment_file = new Map();
+                    item.qc_note = resetNote;
+                }
+
+                order.scale_overall_status = "Need Scale";
+                order.status = "New";
+                order.scaleId = null;
+                order.markModified("items");
+
+                await order.save();
+
+                await logOrderHistory({
+                    orderDoc: order,
+                    action: "RESET_SCALE_BULK",
+                    description: "Etsy scale reset to Need Scale for all items",
+                    changes: [
+                        { field: "scale_overall_status", from: previousOverallStatus, to: "Need Scale" },
+                        { field: "status", from: previousStatus, to: "New" },
+                        { field: "scaleId", from: previousScaleId, to: null },
+                        {
+                            field: "items.scale",
+                            from: itemChanges,
+                            to: (order.items || []).map((item) => ({
+                                transactionId: item?.transactionId || item?.orderItemId || "",
+                                scale_status: item?.scale_status || "Need Scale",
+                                qc_note: item?.qc_note || "",
+                                fulfillment_file: toPlainFulfillmentFile(item?.fulfillment_file),
+                            })),
+                        },
+                    ],
+                    user: req.user,
+                    context: {
+                        source: "PORTAL",
+                        ip: req.ip,
+                        userAgent: req.headers["user-agent"],
+                    },
+                });
+
+                results.push({
+                    orderId: oid,
+                    status: "success",
+                    scale_overall_status: "Need Scale",
+                });
+            } catch (err) {
+                results.push({
+                    orderId: oid,
+                    status: "failed",
+                    error: err.message,
+                });
+            }
+        }
+
+        return res.json({
+            message: "Bulk reset completed",
+            total: results.length,
+            results,
+        });
+    } catch (err) {
+        return res.status(500).json({
+            message: "Bulk reset failed",
+            error: err.message,
+        });
+    }
+};
+
 const retrySendEtsyFulfillment = async (req, res) => {
     try {
         const order = await EtsyOrder.findOne(buildEtsyOrderLookup(req));
@@ -4222,6 +4645,7 @@ module.exports = {
     importOrders,
     getListOrders,
     computeBaseCostForEtsyOrder,
+    resetBaseCostForEtsyOrder,
     getEtsyOrderStatistics,
     createOrder,
     updateSumbittedoetsyStatus,
@@ -4234,6 +4658,10 @@ module.exports = {
     uploadEtsyFulfillmentFileForItem,
     confirmEtsyScaleForItem,
     retrySendEtsyFulfillment,
+    resetEtsyScaleForOrdersBulk,
+    updateEtsyOrderItemQuantity,
+    openCaseInEtsyOrder,
+    removeCaseFromEtsyOrder,
     updateEtsyQCNoteForItem,
     updateEtsyCSNoteForItem,
     assignEtsyOrderToCS,
