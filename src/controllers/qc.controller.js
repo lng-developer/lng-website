@@ -124,6 +124,8 @@ const buildPortalPayload = (orders) => ({
             ? toPlainObject(item.listingId)
             : null;
         const listingId = listingDoc?._id || item.listingId || null;
+        const snapshotImageUrl = item.snapshotImageUrl || item.snapshotImage || "";
+        const baseImageUrl = item.baseImageUrl || item.baseImage?.imageUrl || listingDoc?.product_image || "";
 
         return {
           orderItemId: item.orderItemId || "",
@@ -133,8 +135,9 @@ const buildPortalPayload = (orders) => ({
           asin: item.asin || "",
           version3Data: extractVersion3Data(item),
           customized_url: item.customized_url || "",
-          baseImageUrl: item.baseImage?.imageUrl || "",
-          snapshotImage: item.snapshotImage || "",
+          baseImageUrl,
+          snapshotImage: snapshotImageUrl,
+          snapshotImageUrl,
           fulfillment_file: normalizeFulfillmentFile(item.fulfillment_file),
           listingId: listingId ? String(listingId) : "",
           listing: listingDoc
@@ -256,6 +259,63 @@ const serializeForPlatform = (value) => {
   }
   return value;
 };
+
+const resolvePortalSourceChannel = (order, fallbackSourceChannel = "UNKNOWN") => {
+  const explicitSourceCandidates = [
+    order?.sourceChannel,
+    order?.source_channel,
+    order?.platform,
+    order?.channel,
+    order?.source,
+    order?.orderType,
+  ].filter(Boolean);
+  const candidates = [
+    ...explicitSourceCandidates,
+    order?.shopName,
+    order?.shopId?.name,
+  ]
+    .filter(Boolean)
+    .map((value) => String(value).trim().toLowerCase());
+
+  if (candidates.some((value) => value.includes("etsy"))) return "ETSY";
+  if (
+    candidates.some((value) => value.includes("amazon")) ||
+    order?.merchantId ||
+    order?.marketplaceId
+  ) {
+    return "AMAZON";
+  }
+  if (explicitSourceCandidates.length > 0) return "UNKNOWN";
+
+  return fallbackSourceChannel;
+};
+
+const serializePortalOrderForPlatform = (order, fallbackSourceChannel = "UNKNOWN") => {
+  const serializedOrder = serializeForPlatform(order);
+
+  return {
+    ...serializedOrder,
+    source: "portal",
+    sourceChannel: resolvePortalSourceChannel(serializedOrder, fallbackSourceChannel),
+  };
+};
+
+const getFulfillmentFileKeys = (value) => {
+  const fileMap = normalizeFulfillmentFile(value);
+  return Object.keys(fileMap).filter((key) => fileMap[key]);
+};
+
+const buildFulfillmentPlatformPayloadPreview = (payload) =>
+  (Array.isArray(payload?.data) ? payload.data : []).flatMap((order) =>
+    (Array.isArray(order.items) ? order.items : []).map((item) => ({
+      orderId: order.orderId,
+      itemId: item.orderItemId || item.transactionId || "",
+      sku: item.sku || "",
+      hasSnapshotImage: Boolean(item.snapshotImageUrl || item.snapshotImage),
+      hasBaseImageUrl: Boolean(item.baseImageUrl),
+      fulfillmentFileKeys: getFulfillmentFileKeys(item.fulfillment_file || item.fulfillmentFile),
+    }))
+  );
 
 const toSafeFulfillmentSummary = (data, fallbackSuccess = true) => {
   const source = data && typeof data === "object" ? data : {};
@@ -1018,10 +1078,96 @@ const sendFailedOrdersToFulfillment = async (req, res) => {
   }
 };
 
+const recordFulfillmentPlatformV2Failure = async (orders, fulfillment, sourceChannel = "AMAZON") => {
+  await Promise.all(
+    (orders || []).map(async (order) => {
+      const prevSubmission = order.fulfillment_platform_v2_submission || {};
+      order.fulfillment_platform_v2_submission = {
+        sent: false,
+        sent_at: prevSubmission.sent_at || null,
+        attempt_count: (prevSubmission.attempt_count || 0) + 1,
+        last_response: fulfillment,
+        sourceChannel,
+      };
+      await order.save();
+    })
+  );
+};
+
+const recordFulfillmentPlatformV2Success = async ({
+  orders,
+  fulfillment,
+  req,
+  sourceChannel = "AMAZON",
+}) => {
+  const fulfilledAt = new Date();
+
+  await Promise.all(
+    (orders || []).map(async (order) => {
+      const prevOverallStatus = order.scale_overall_status;
+      const prevOrderStatus = order.status;
+      const prevSubmission = order.fulfillment_platform_v2_submission || {};
+
+      order.fulfillment_platform_v2_submission = {
+        sent: true,
+        sent_at: fulfilledAt,
+        attempt_count: (prevSubmission.attempt_count || 0) + 1,
+        last_response: fulfillment,
+        sourceChannel,
+      };
+      order.scale_overall_status = "Sent";
+      order.status = "Fulfilled";
+
+      for (const item of order.items || []) {
+        item.tracking_info = item.tracking_info || {};
+        if (
+          item.tracking_info.status !== "Shipped" &&
+          !isCanceledStatus(item.tracking_info.status)
+        ) {
+          item.tracking_info.status = "Fulfilled";
+        }
+        item.tracking_info.updated_at = fulfilledAt;
+      }
+
+      await order.save();
+
+      await logOrderHistory({
+        orderDoc: order,
+        action: "PUSH_TO_FULFILLMENT_PLATFORM_V2",
+        description: "Order pushed to Fulfillment Platform v2.",
+        changes: [
+          {
+            field: "scale_overall_status",
+            from: prevOverallStatus,
+            to: "Sent",
+          },
+          {
+            field: "status",
+            from: prevOrderStatus,
+            to: "Fulfilled",
+          },
+          {
+            field: "fulfillment_platform_v2_submission.sent",
+            from: !!prevSubmission.sent,
+            to: true,
+          },
+        ],
+        user: req.user,
+        context: {
+          source: "SYSTEM",
+          ip: req.ip,
+          userAgent: req.headers["user-agent"],
+        },
+      });
+    })
+  );
+};
+
 const pushPlatformOrders = async (req, res) => {
   const apiBaseUrl = String(process.env.FULFILLMENT_API_BASE_URL || "").trim();
   const tenantApiKey = String(process.env.FULFILLMENT_TENANT_API_KEY || "").trim();
   const timeoutMs = Number(process.env.FULFILLMENT_API_TIMEOUT_MS || 30000);
+  let orders = [];
 
   if (!apiBaseUrl || !tenantApiKey) {
     return res.status(500).json({
@@ -1058,7 +1204,7 @@ const pushPlatformOrders = async (req, res) => {
       query.sellerId = new mongoose.Types.ObjectId(userId);
     }
 
-    const orders = await OrderCustomProduct.find(query)
+    orders = await OrderCustomProduct.find(query)
       .populate({ path: "shopId", select: "name" })
       .populate({ path: "sellerId", select: "full_name email" })
       .populate({ path: "scaleId", select: "full_name email" })
@@ -1073,9 +1219,37 @@ const pushPlatformOrders = async (req, res) => {
       });
     }
 
-    const payload = {
-      data: orders.map(serializeForPlatform),
-    };
+    const notFailedOrders = orders
+      .filter((order) => order.scale_overall_status !== "Failed")
+      .map((order) => ({
+        orderId: order.orderId,
+        scale_overall_status: order.scale_overall_status || null,
+      }));
+    if (notFailedOrders.length > 0) {
+      return res.status(409).json({
+        message: "Only orders with scale_overall_status Failed can be pushed to Fulfillment Platform v2",
+        orders: notFailedOrders,
+      });
+    }
+
+    const payload = buildPortalPayload(orders);
+    payload.data = payload.data.map((order) => ({
+      ...order,
+      source: "portal",
+      sourceChannel: "AMAZON",
+    }));
+    const payloadErrors = validatePortalPayload(payload);
+    if (payloadErrors.length > 0) {
+      return res.status(400).json({
+        message: "Invalid Fulfillment Platform v2 payload",
+        errors: payloadErrors,
+      });
+    }
+
+    console.info(
+      "[QC][pushPlatformOrders] payload preview",
+      buildFulfillmentPlatformPayloadPreview(payload)
+    );
 
     const platformResponse = await axios.post(
       buildFulfillmentPlatformUrl(apiBaseUrl),
@@ -1089,31 +1263,46 @@ const pushPlatformOrders = async (req, res) => {
       }
     );
 
+    const fulfillment = toSafeFulfillmentSummary(platformResponse?.data, true);
+    await recordFulfillmentPlatformV2Success({
+      orders,
+      fulfillment,
+      req,
+      sourceChannel: "AMAZON",
+    });
+
     return res.json({
-      message: "Pushed orders to Fulfillment Platform",
+      message: "Pushed orders to Fulfillment Platform v2",
       attemptedCount: orders.length,
-      fulfillment: toSafeFulfillmentSummary(platformResponse?.data, true),
+      sentCount: orders.length,
+      fulfillment,
     });
   } catch (err) {
     if (err.response) {
+      const fulfillment = toSafeFulfillmentSummary(err.response.data, false);
+      await recordFulfillmentPlatformV2Failure(orders, fulfillment, "AMAZON");
+
       return res.status(err.response.status || 502).json({
         message: "Failed to push orders to Fulfillment Platform",
         attemptedCount: orderIds.length,
-        fulfillment: toSafeFulfillmentSummary(err.response.data, false),
+        fulfillment,
       });
     }
+
+    const fulfillment = toSafeFulfillmentSummary(
+      {
+        success: false,
+        errorsCount: 1,
+        errors: [{ message: err.message || "Fulfillment Platform request failed" }],
+      },
+      false
+    );
+    await recordFulfillmentPlatformV2Failure(orders, fulfillment, "AMAZON");
 
     return res.status(502).json({
       message: "Failed to push orders to Fulfillment Platform",
       attemptedCount: orderIds.length,
-      fulfillment: toSafeFulfillmentSummary(
-        {
-          success: false,
-          errorsCount: 1,
-          errors: [{ message: err.message || "Fulfillment Platform request failed" }],
-        },
-        false
-      ),
+      fulfillment,
     });
   }
 };

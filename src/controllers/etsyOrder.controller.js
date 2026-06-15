@@ -3084,6 +3084,260 @@ const toPlainFulfillmentFile = (value) => {
 
 const hasAnyFulfillmentFile = (value) => Object.values(toPlainFulfillmentFile(value)).some(Boolean);
 
+const normalizeOrderIds = (rawOrderIds) => {
+    if (!Array.isArray(rawOrderIds) || rawOrderIds.length === 0) return null;
+    return [
+        ...new Set(
+            rawOrderIds
+                .map((orderId) => (typeof orderId === "string" ? orderId.trim() : String(orderId || "").trim()))
+                .filter(Boolean)
+        ),
+    ];
+};
+
+const buildFulfillmentPlatformUrl = (baseUrl) =>
+    `${String(baseUrl || "").replace(/\/+$/, "")}/api/portal/orders`;
+
+const toSafeFulfillmentSummary = (data, fallbackSuccess = true) => {
+    const source = data && typeof data === "object" ? data : {};
+    const numberOrZero = (value) => {
+        const num = Number(value);
+        return Number.isFinite(num) ? num : 0;
+    };
+    const errors = Array.isArray(source.errors)
+        ? source.errors.map((error) => {
+            if (typeof error === "string") return { message: error };
+            if (!error || typeof error !== "object") return { message: String(error) };
+            return {
+                orderId: error.orderId,
+                field: error.field,
+                code: error.code,
+                message: error.message || error.error,
+            };
+        })
+        : [];
+    const orders = Array.isArray(source.orders)
+        ? source.orders.map((order) => {
+            if (typeof order === "string") return { orderId: order };
+            if (!order || typeof order !== "object") return { orderId: String(order) };
+            return {
+                orderId: order.orderId,
+                status: order.status,
+                action: order.action,
+                skipped: order.skipped,
+                message: order.message,
+            };
+        })
+        : [];
+
+    return {
+        success: typeof source.success === "boolean" ? source.success : Boolean(fallbackSuccess),
+        received: numberOrZero(source.received),
+        inserted: numberOrZero(source.inserted),
+        updated: numberOrZero(source.updated),
+        skipped: numberOrZero(source.skipped),
+        errorsCount: source.errorsCount !== undefined ? numberOrZero(source.errorsCount) : errors.length,
+        errors,
+        orders,
+    };
+};
+
+const pushVersion3Entry = (entries, label, value) => {
+    const normalizedLabel = String(label || "").trim();
+    if (!normalizedLabel) return;
+    entries.push({
+        label: normalizedLabel,
+        value: value === undefined || value === null ? "" : String(value),
+    });
+};
+
+const buildEtsyVersion3Data = (item = {}) => {
+    const entries = [];
+
+    if (Array.isArray(item.version3Data)) {
+        item.version3Data.forEach((entry) => {
+            pushVersion3Entry(entries, entry?.label || entry?.name, entry?.value);
+        });
+    }
+
+    if (item.variations && typeof item.variations === "object" && !Array.isArray(item.variations)) {
+        Object.entries(item.variations).forEach(([label, value]) => {
+            pushVersion3Entry(entries, label, value);
+        });
+    }
+
+    const customizations = item.customizations || {};
+    if (Array.isArray(customizations.textFields)) {
+        customizations.textFields.forEach((field) => {
+            pushVersion3Entry(entries, field?.name || field?.label || "Customization", field?.value);
+        });
+    }
+    if (customizations.buyerNote) {
+        pushVersion3Entry(entries, "Buyer Note", customizations.buyerNote);
+    }
+
+    const seen = new Set();
+    return entries.filter((entry) => {
+        const key = `${entry.label}::${entry.value}`;
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+    });
+};
+
+const getFulfillmentFileKeys = (value) => {
+    const fileMap = toPlainFulfillmentFile(value);
+    return Object.keys(fileMap).filter((key) => fileMap[key]);
+};
+
+const buildFulfillmentPlatformPayloadPreview = (payload) =>
+    (Array.isArray(payload?.data) ? payload.data : []).flatMap((order) =>
+        (Array.isArray(order.items) ? order.items : []).map((item) => ({
+            orderId: order.orderId,
+            itemId: item.orderItemId || item.transactionId || "",
+            sku: item.sku || "",
+            hasSnapshotImage: Boolean(item.snapshotImageUrl || item.snapshotImage),
+            hasBaseImageUrl: Boolean(item.baseImageUrl),
+            fulfillmentFileKeys: getFulfillmentFileKeys(item.fulfillment_file || item.fulfillmentFile),
+        }))
+    );
+
+const resolveEtsyBaseImageUrl = (item = {}) => {
+    if (typeof item.baseImage === "string") return firstNonBlankString(item.baseImage);
+
+    return firstNonBlankString(
+        item.baseImageUrl,
+        item.baseImage?.imageUrl,
+        item.baseImage?.url,
+        item.baseImage?.src,
+        item.baseImage?.previewUrl,
+        item.listing?.product_image,
+        item.listing?.imageUrl
+    );
+};
+
+const serializeEtsyOrderForFulfillmentPlatform = (order) => ({
+    orderId: order.orderId,
+    customer_infor: {
+        email: order.buyer?.email || "",
+        name: order.buyer?.fullName || order.shipping?.name || "",
+        address: order.shipping?.address1 || "",
+        address_2: order.shipping?.address2 || "",
+        city: order.shipping?.city || "",
+        state: order.shipping?.state || "",
+        zip_code: order.shipping?.zipcode || "",
+        country: order.shipping?.country || "US",
+        phone_number: order.shipping?.phone || "",
+    },
+    status: "Fulfilled",
+    purchase_date: order.saleDate ? new Date(order.saleDate).toISOString() : null,
+    shopId: order.shopId ? String(order.shopId?._id || order.shopId) : "",
+    shopName: order.shopId?.name || order.shopName || "",
+    shipping_type: order.shipping_type || "Standard",
+    items: (order.items || []).map((item) => {
+        const snapshotImageUrl = item.snapshotImageUrl || item.snapshotImage || "";
+        const baseImageUrl = resolveEtsyBaseImageUrl(item);
+
+        return {
+            orderItemId: item.transactionId || item.orderItemId || "",
+            transactionId: item.transactionId || "",
+            sku: item.sku || "",
+            title: item.itemName || item.title || "",
+            quantity: item.quantity || 1,
+            asin: item.asin || "",
+            version3Data: buildEtsyVersion3Data(item),
+            customized_url: item.customized_url || "",
+            baseImageUrl,
+            snapshotImage: snapshotImageUrl,
+            snapshotImageUrl,
+            fulfillment_file: toPlainFulfillmentFile(item.fulfillment_file),
+            listingId: item.listingId || "",
+            cost_center: item.cost_breakdown || {},
+            scale_status: item.scale_status || null,
+            qc_note: item.qc_note || "",
+            cs_note: item.cs_note || "",
+            customizations: item.customizations || null,
+            customFiles: item.customFiles || [],
+        };
+    }),
+    source: "portal",
+    sourceChannel: "ETSY",
+});
+
+const recordEtsyFulfillmentPlatformV2Failure = async (orders, fulfillment) => {
+    await Promise.all(
+        (orders || []).map(async (order) => {
+            const prevSubmission = order.fulfillment_platform_v2_submission || {};
+            order.fulfillment_platform_v2_submission = {
+                sent: false,
+                sent_at: prevSubmission.sent_at || null,
+                attempt_count: (prevSubmission.attempt_count || 0) + 1,
+                last_response: fulfillment,
+                sourceChannel: "ETSY",
+            };
+            await order.save();
+        })
+    );
+};
+
+const recordEtsyFulfillmentPlatformV2Success = async ({ orders, fulfillment, req }) => {
+    const fulfilledAt = new Date();
+
+    await Promise.all(
+        (orders || []).map(async (order) => {
+            const prevOverallStatus = order.scale_overall_status;
+            const prevOrderStatus = order.status;
+            const prevSubmission = order.fulfillment_platform_v2_submission || {};
+
+            order.fulfillment_platform_v2_submission = {
+                sent: true,
+                sent_at: fulfilledAt,
+                attempt_count: (prevSubmission.attempt_count || 0) + 1,
+                last_response: fulfillment,
+                sourceChannel: "ETSY",
+            };
+            order.scale_overall_status = "Sent";
+            order.status = "Fulfilled";
+            order.fulfilled_at = fulfilledAt;
+
+            for (const item of order.items || []) {
+                item.tracking_info = item.tracking_info || {};
+                if (
+                    item.tracking_info.status !== "Shipped" &&
+                    !isEtsyCanceledStatus(item.tracking_info.status)
+                ) {
+                    item.tracking_info.status = "Fulfilled";
+                }
+                item.tracking_info.updated_at = fulfilledAt;
+            }
+            order.markModified("items");
+
+            await order.save();
+
+            await logOrderHistory({
+                orderDoc: order,
+                action: "PUSH_TO_FULFILLMENT_PLATFORM_V2",
+                description: "Etsy order pushed to Fulfillment Platform v2.",
+                changes: [
+                    { field: "scale_overall_status", from: prevOverallStatus, to: "Sent" },
+                    { field: "status", from: prevOrderStatus, to: "Fulfilled" },
+                    {
+                        field: "fulfillment_platform_v2_submission.sent",
+                        from: !!prevSubmission.sent,
+                        to: true,
+                    },
+                ],
+                user: req.user,
+                context: {
+                    source: "SYSTEM",
+                    ip: req.ip,
+                    userAgent: req.headers["user-agent"],
+                },
+            });
+        })
+    );
+};
+
 const getRequester = (req) => ({
     userId: req.user?.userId || req.user?.id || req.user?._id || "",
     role: req.user?.role,
@@ -4066,6 +4320,170 @@ const retrySendEtsyFulfillment = async (req, res) => {
     }
 };
 
+const pushEtsyPlatformOrders = async (req, res) => {
+    const apiBaseUrl = String(process.env.FULFILLMENT_API_BASE_URL || "").trim();
+    const tenantApiKey = String(process.env.FULFILLMENT_TENANT_API_KEY || "").trim();
+    const timeoutMs = Number(process.env.FULFILLMENT_API_TIMEOUT_MS || 30000);
+    let orders = [];
+
+    if (!apiBaseUrl || !tenantApiKey) {
+        return res.status(500).json({
+            message: "Fulfillment Platform configuration is missing",
+        });
+    }
+
+    const orderIds = normalizeOrderIds(req.body?.orderIds);
+    if (!orderIds) {
+        return res.status(400).json({
+            message: "orderIds must be a non-empty array",
+        });
+    }
+
+    if (orderIds.length === 0) {
+        return res.status(400).json({
+            message: "orderIds must contain at least one valid order id",
+        });
+    }
+
+    try {
+        orders = await EtsyOrder.find({ orderId: { $in: orderIds } })
+            .populate({ path: "shopId", select: "name" })
+            .populate({ path: "seller.sellerId", select: "full_name email employee_id" });
+
+        const foundOrderIds = new Set(orders.map((order) => order.orderId));
+        const missingOrderIds = orderIds.filter((orderId) => !foundOrderIds.has(orderId));
+        if (missingOrderIds.length > 0) {
+            return res.status(404).json({
+                message: "Some Etsy orders were not found or are not accessible",
+                orderIds: missingOrderIds,
+            });
+        }
+
+        const accessErrors = orders
+            .map((order) => ({ orderId: order.orderId, message: ensureSellerCanAccessEtsyOrder(req, order) }))
+            .filter((entry) => entry.message);
+        if (accessErrors.length > 0) {
+            const invalidUser = accessErrors.some((entry) => entry.message.startsWith("Invalid"));
+            return res.status(invalidUser ? 400 : 403).json({
+                message: accessErrors[0].message,
+                orders: accessErrors,
+            });
+        }
+
+        const invalidAddressOrders = orders
+            .filter(isEtsyAddressInvalid)
+            .map((order) => ({
+                orderId: order.orderId,
+                message: buildEtsyInvalidAddressMessage(order),
+                address_validation: order.address_validation || null,
+            }));
+        if (invalidAddressOrders.length > 0) {
+            return res.status(409).json({
+                message: "Some Etsy orders have invalid addresses",
+                orders: invalidAddressOrders,
+            });
+        }
+
+        const notReadyOrders = orders
+            .filter((order) => !["Ready", "Failed"].includes(order.scale_overall_status))
+            .map((order) => ({
+                orderId: order.orderId,
+                scale_overall_status: order.scale_overall_status || null,
+            }));
+        if (notReadyOrders.length > 0) {
+            return res.status(409).json({
+                message: "Only Etsy orders with scale_overall_status Ready or Failed can be pushed to Fulfillment Platform v2",
+                orders: notReadyOrders,
+            });
+        }
+
+        const payload = {
+            data: orders.map(serializeEtsyOrderForFulfillmentPlatform),
+        };
+        const payloadErrors = [];
+        payload.data.forEach((order, orderIndex) => {
+            if (!String(order.orderId || "").trim()) {
+                payloadErrors.push({
+                    field: `data[${orderIndex}].orderId`,
+                    message: "orderId is required",
+                });
+            }
+            order.items.forEach((item, itemIndex) => {
+                if (!String(item.orderItemId || "").trim()) {
+                    payloadErrors.push({
+                        field: `data[${orderIndex}].items[${itemIndex}].orderItemId`,
+                        message: "orderItemId is required",
+                    });
+                }
+            });
+        });
+        if (payloadErrors.length > 0) {
+            return res.status(400).json({
+                message: "Invalid Fulfillment Platform v2 payload",
+                errors: payloadErrors,
+            });
+        }
+
+        console.info(
+            "[EtsyQC][pushPlatformOrders] payload preview",
+            buildFulfillmentPlatformPayloadPreview(payload)
+        );
+
+        const platformResponse = await axios.post(
+            buildFulfillmentPlatformUrl(apiBaseUrl),
+            payload,
+            {
+                headers: {
+                    "Content-Type": "application/json",
+                    Authorization: `Bearer ${tenantApiKey}`,
+                },
+                timeout: Number.isFinite(timeoutMs) ? timeoutMs : 30000,
+            }
+        );
+
+        const fulfillment = toSafeFulfillmentSummary(platformResponse?.data, true);
+        await recordEtsyFulfillmentPlatformV2Success({
+            orders,
+            fulfillment,
+            req,
+        });
+
+        return res.json({
+            message: "Pushed Etsy orders to Fulfillment Platform v2",
+            attemptedCount: orders.length,
+            sentCount: orders.length,
+            fulfillment,
+        });
+    } catch (err) {
+        if (err.response) {
+            const fulfillment = toSafeFulfillmentSummary(err.response.data, false);
+            await recordEtsyFulfillmentPlatformV2Failure(orders, fulfillment);
+
+            return res.status(err.response.status || 502).json({
+                message: "Failed to push Etsy orders to Fulfillment Platform",
+                attemptedCount: orderIds.length,
+                fulfillment,
+            });
+        }
+
+        const fulfillment = toSafeFulfillmentSummary(
+            {
+                success: false,
+                errorsCount: 1,
+                errors: [{ message: err.message || "Fulfillment Platform request failed" }],
+            },
+            false
+        );
+        await recordEtsyFulfillmentPlatformV2Failure(orders, fulfillment);
+
+        return res.status(502).json({
+            message: "Failed to push Etsy orders to Fulfillment Platform",
+            attemptedCount: orderIds.length,
+            fulfillment,
+        });
+    }
+};
+
 const assignEtsyOrderToCS = async (req, res) => {
     try {
         const { orderId } = req.params;
@@ -4192,6 +4610,7 @@ module.exports = {
     uploadEtsyFulfillmentFileForItem,
     confirmEtsyScaleForItem,
     retrySendEtsyFulfillment,
+    pushEtsyPlatformOrders,
     updateEtsyQCNoteForItem,
     updateEtsyCSNoteForItem,
     assignEtsyOrderToCS,
