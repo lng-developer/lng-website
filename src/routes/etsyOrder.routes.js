@@ -63,6 +63,12 @@ router.get(
     authorizeRoles('Customer Service', "Admin", "Seller", "Design Leader"),
     etsyOrderController.getEtsyQCStatistics
 );
+router.post(
+    '/qc/push-platform-orders',
+    authenticateToken,
+    authorizeRoles('Customer Service', "Admin", "Seller"),
+    etsyOrderController.pushEtsyPlatformOrders
+);
 router.patch('/sumbittedoetsy', etsyOrderController.updateSumbittedoetsyStatus);
 router.put('/manual-mapping', authenticateToken, orderCustomProductController.applyManualVendorMapping);
 router.put('/reset-base-cost', authenticateToken, etsyOrderController.resetBaseCostForEtsyOrder);

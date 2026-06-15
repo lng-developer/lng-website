@@ -229,9 +229,11 @@ describe("sendFailedOrdersToFulfillment", () => {
 
 describe("pushPlatformOrders", () => {
   const oldEnv = process.env;
+  let consoleInfoSpy;
 
   beforeEach(() => {
     jest.clearAllMocks();
+    consoleInfoSpy = jest.spyOn(console, "info").mockImplementation(() => {});
     process.env = {
       ...oldEnv,
       FULFILLMENT_API_BASE_URL: "https://platform.example",
@@ -240,21 +242,29 @@ describe("pushPlatformOrders", () => {
     };
   });
 
+  afterEach(() => {
+    consoleInfoSpy.mockRestore();
+  });
+
   afterAll(() => {
     process.env = oldEnv;
   });
 
-  test("pushes selected DB orders to Fulfillment Platform without mutating portal orders", async () => {
+  test("pushes selected failed DB orders to Fulfillment Platform v2 and marks local order fulfilled", async () => {
     const save = jest.fn().mockResolvedValue(undefined);
     const order = {
       orderId: "112-0745906-0345025-R1",
       status: "New",
-      scale_overall_status: "Ready",
+      scale_overall_status: "Failed",
       customer_infor: { name: "Jane Buyer" },
+      fulfillment_platform_v2_submission: { sent: false, attempt_count: 1 },
       items: [
         {
           orderItemId: "ITEM-1",
           sku: "SKU-1",
+          title: "Product title",
+          baseImage: { imageUrl: "https://cdn.example/product.png" },
+          snapshotImage: "https://cdn.example/preview.jpg",
           fulfillment_file: new Map([["front", "https://cdn.example/front.png"]]),
           tracking_info: { status: "New", tracking: "" },
         },
@@ -292,11 +302,16 @@ describe("pushPlatformOrders", () => {
         data: [
           expect.objectContaining({
             orderId: "112-0745906-0345025-R1",
-            status: "New",
-            scale_overall_status: "Ready",
+            source: "portal",
+            sourceChannel: "AMAZON",
+            status: "Fulfilled",
+            shipping_type: "Standard",
             items: [
               expect.objectContaining({
                 orderItemId: "ITEM-1",
+                snapshotImage: "https://cdn.example/preview.jpg",
+                snapshotImageUrl: "https://cdn.example/preview.jpg",
+                baseImageUrl: "https://cdn.example/product.png",
                 fulfillment_file: { front: "https://cdn.example/front.png" },
               }),
             ],
@@ -311,14 +326,42 @@ describe("pushPlatformOrders", () => {
         timeout: 30000,
       }
     );
-    expect(order.status).toBe("New");
-    expect(order.scale_overall_status).toBe("Ready");
-    expect(order.items[0].tracking_info.status).toBe("New");
-    expect(save).not.toHaveBeenCalled();
-    expect(logOrderHistory).not.toHaveBeenCalled();
+    expect(consoleInfoSpy).toHaveBeenCalledWith(
+      "[QC][pushPlatformOrders] payload preview",
+      [
+        {
+          orderId: "112-0745906-0345025-R1",
+          itemId: "ITEM-1",
+          sku: "SKU-1",
+          hasSnapshotImage: true,
+          hasBaseImageUrl: true,
+          fulfillmentFileKeys: ["front"],
+        },
+      ]
+    );
+    expect(order.status).toBe("Fulfilled");
+    expect(order.scale_overall_status).toBe("Sent");
+    expect(order.items[0].tracking_info.status).toBe("Fulfilled");
+    expect(order.fulfillment_platform_v2_submission.sent).toBe(true);
+    expect(order.fulfillment_platform_v2_submission.attempt_count).toBe(2);
+    expect(order.fulfillment_platform_v2_submission.sourceChannel).toBe("AMAZON");
+    expect(save).toHaveBeenCalledTimes(1);
+    expect(logOrderHistory).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: "PUSH_TO_FULFILLMENT_PLATFORM_V2",
+        changes: expect.arrayContaining([
+          expect.objectContaining({
+            field: "status",
+            from: "New",
+            to: "Fulfilled",
+          }),
+        ]),
+      })
+    );
     expect(res.json).toHaveBeenCalledWith({
-      message: "Pushed orders to Fulfillment Platform",
+      message: "Pushed orders to Fulfillment Platform v2",
       attemptedCount: 1,
+      sentCount: 1,
       fulfillment: {
         success: true,
         received: 1,
@@ -332,12 +375,13 @@ describe("pushPlatformOrders", () => {
     });
   });
 
-  test("does not save or write order history when Fulfillment Platform rejects the push", async () => {
+  test("persists failed v2 submission details when Fulfillment Platform rejects the push", async () => {
     const save = jest.fn().mockResolvedValue(undefined);
     const order = {
       orderId: "ORDER-REJECTED",
       status: "New",
-      scale_overall_status: "Ready",
+      scale_overall_status: "Failed",
+      fulfillment_platform_v2_submission: { sent: false, attempt_count: 2 },
       items: [{ orderItemId: "ITEM-1" }],
       save,
     };
@@ -369,7 +413,12 @@ describe("pushPlatformOrders", () => {
 
     await controller.pushPlatformOrders(req, res);
 
-    expect(save).not.toHaveBeenCalled();
+    expect(order.status).toBe("New");
+    expect(order.scale_overall_status).toBe("Failed");
+    expect(order.fulfillment_platform_v2_submission.sent).toBe(false);
+    expect(order.fulfillment_platform_v2_submission.attempt_count).toBe(3);
+    expect(order.fulfillment_platform_v2_submission.sourceChannel).toBe("AMAZON");
+    expect(save).toHaveBeenCalledTimes(1);
     expect(logOrderHistory).not.toHaveBeenCalled();
     expect(res.status).toHaveBeenCalledWith(409);
     expect(res.json).toHaveBeenCalledWith({
