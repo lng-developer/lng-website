@@ -97,7 +97,7 @@ const getSmartyDpvMatchCode = (candidate = {}) => (
 );
 
 const getAcceptedSmartyDpvMatchCodes = () => (
-    String(process.env.ETSY_SMARTY_ACCEPT_DPV_CODES || "Y,S")
+    String(process.env.ETSY_SMARTY_ACCEPT_DPV_CODES || "Y,S,D")
         .split(",")
         .map((code) => code.trim().toUpperCase())
         .filter(Boolean)

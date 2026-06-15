@@ -9,9 +9,10 @@ const lng = require('./providers/lng');
 const ss88 = require('./providers/ss88');
 const pgprint = require('./providers/pgprint'); // <<< NEW
 const luxurypro = require('./providers/luxurypro');
+const onos = require('./providers/onos');
 
 
-const PROVIDERS = [grabink, merchfox, merchize, printway, mangotee, lng, lenful, ss88, pgprint, luxurypro];
+const PROVIDERS = [grabink, merchfox, merchize, printway, mangotee, lng, lenful, ss88, pgprint, luxurypro, onos];
 const PROVIDER_MAP = new Map(PROVIDERS.map(p => [p.key, p]));
 
 /**
@@ -44,7 +45,7 @@ function writeSubmission(orderDoc, vendorKey, submission) {
 /**
  * Gửi đơn tới vendor cụ thể.
  * @param {Document} orderDoc - Mongoose doc
- * @param {string} vendorKey - 'grabink' | 'merchfox' | 'merchize' | 'printway' | 'mangotee' | 'lng' | 'lenful' | 'ss88' | 'pgprint' | 'luxurypro'
+ * @param {string} vendorKey - 'grabink' | 'merchfox' | 'merchize' | 'printway' | 'mangotee' | 'lng' | 'lenful' | 'ss88' | 'pgprint' | 'luxurypro' | 'onos'
  */
 async function sendToVendor(orderDoc, vendorKey) {
     const provider = PROVIDER_MAP.get(vendorKey);

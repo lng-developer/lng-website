@@ -388,9 +388,10 @@ const getQCList = async (req, res) => {
     const userRole = req.user?.role;
     const userId = req.user?.userId || req.user?.id || req.user?._id || "";
     const isSeller = hasRole(userRole, "Seller");
-    const isAdmin = hasRole(userRole, "Admin" || "Design Leader");
+    const isAdmin = hasRole(userRole, "Admin");
+    const isDesignLeader = hasRole(userRole, "Design Leader");
     const isCS = hasRole(userRole, "Customer Service");
-    const isSellerOnly = isSeller && !(isAdmin || isCS);
+    const isSellerOnly = isSeller && !(isAdmin || isDesignLeader || isCS);
 
     const matchStage = {};
     if (from && to) {
@@ -703,9 +704,10 @@ const getQCStatistics = async (req, res) => {
     const userRole = req.user?.role;
     const userId = req.user?.userId || req.user?.id || req.user?._id || "";
     const isSeller = hasRole(userRole, "Seller");
-    const isAdmin = hasRole(userRole, "Admin" || "Design Leader");
+    const isAdmin = hasRole(userRole, "Admin");
+    const isDesignLeader = hasRole(userRole, "Design Leader");
     const isCS = hasRole(userRole, "Customer Service");
-    const isSellerOnly = isSeller && !(isAdmin || isCS);
+    const isSellerOnly = isSeller && !(isAdmin || isDesignLeader || isCS);
 
     const matchStage = {};
     if (from && to) {

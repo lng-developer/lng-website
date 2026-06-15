@@ -6,6 +6,9 @@ const OrderCustomProduct = db.orderCustomProduct;
 const EtsyOrder = db.EtsyOrder;
 const taskStatusService = require("../service/taskStatus.service");
 const { emitTaskToMachine, buildTaskId } = require("../lib/taskEmitter");
+const {
+  normalizeVendorTrackingPayload,
+} = require("../service/vendorTrackingNormalizer.service");
 
 const mongoose = require("mongoose");
 const axios = require("axios").default;
@@ -51,6 +54,9 @@ const {
   LUXURYPRO_DETAIL_ENDPOINT = "",
   LUXURYPRO_ENDPOINT = "",
   LUXURYPRO_AUTH_MODE = "bearer",
+  ONOS_API_BASE_URL = "https://api-app.onospod.com/api/v1",
+  ONOS_API_KEY = "",
+  ONOS_ACCESS_TOKEN = "",
 
   // Debug flag cho server (tuỳ set)
   VENDOR_SYNC_DEBUG = "0",
@@ -127,6 +133,12 @@ const httpLuxuryPro = axios.create({
   validateStatus: () => true,
 });
 
+const httpOnos = axios.create({
+  baseURL: ONOS_API_BASE_URL.replace(/\/+$/, ""),
+  timeout: 20000,
+  validateStatus: () => true,
+});
+
 // ====== HELPERS ======
 const norm = (s) => String(s || "").trim();
 const lower = (s) => norm(s).toLowerCase();
@@ -134,6 +146,7 @@ const lower = (s) => norm(s).toLowerCase();
 function isValidTrackingNumber(s) {
   const t = norm(s);
   if (!t) return false;
+  if (/^\[object\s+Object\]$/i.test(t)) return false;
   if (t === "-" || t === "---") return false;
   if (/^0+$/.test(t)) return false;
   if (!/[A-Za-z0-9]/.test(t)) return false;
@@ -157,7 +170,8 @@ function normalizeVendorKey(nameOrType) {
     return "mangotee";
   if (s.includes("ss88") || s.includes("mmoseller")) return "ss88";
   if (s.includes("luxurypro") || s.includes("luxury pro")) return "luxurypro";
-  if (["beeful", "merchfox", "merchize", "printway", "mangotee", "ss88", "luxurypro"].includes(s))
+  if (s.includes("onos")) return "onos";
+  if (["beeful", "merchfox", "merchize", "printway", "mangotee", "ss88", "luxurypro", "onos"].includes(s))
     return s;
   return "";
 }
@@ -343,6 +357,7 @@ function getVendorFulfillmentName(vendorKey) {
       mangotee: "MangoTee",
       ss88: "SS88",
       luxurypro: "LuxuryPro",
+      onos: "Onos",
     }[vendorKey] || ""
   );
 }
@@ -355,6 +370,7 @@ async function fetchTrackingByVendorKey(vendorKey, orderId, doc) {
   if (vendorKey === "mangotee") return fetchMangoTee(orderId);
   if (vendorKey === "ss88") return fetchSS88(orderId);
   if (vendorKey === "luxurypro") return fetchLuxuryPro(orderId);
+  if (vendorKey === "onos") return fetchOnos(orderId, doc);
   throw new Error(`Unsupported vendor: ${vendorKey}`);
 }
 
@@ -710,6 +726,71 @@ async function fetchSS88(orderId) {
   return { tracking, carrier, shipped, raw: data };
 }
 
+function getOnosExternalOrderId(orderId, doc = {}) {
+  return (
+    norm(doc?.vendor_submissions?.onos?.external_id) ||
+    norm(doc?.external_order_id) ||
+    norm(orderId)
+  );
+}
+
+function pickOnosTracking(raw) {
+  const normalized = normalizeVendorTrackingPayload("onos", raw);
+  const root = raw?.data && typeof raw.data === "object" ? raw.data : raw;
+  return {
+    tracking: normalized.trackingNumber,
+    carrier: normalized.carrier,
+    shipped: normalized.shipped,
+    raw: root || raw,
+  };
+}
+
+async function fetchOnos(orderId, doc) {
+  const apiKey = ONOS_API_KEY || ONOS_ACCESS_TOKEN;
+  if (!apiKey) throw new Error("Onos missing API key (ONOS_API_KEY)");
+
+  const onosOrderId = getOnosExternalOrderId(orderId, doc);
+  const headers = {
+    Accept: "application/json",
+    Authorization: `Bearer ${apiKey}`,
+  };
+
+  const detailRes = await httpOnos.get(`/order/${encodeURIComponent(onosOrderId)}`, { headers });
+  if (detailRes.status >= 400) {
+    throw new Error(`Onos HTTP ${detailRes.status}: ${detailRes.data?.message || detailRes.data?.error || "order detail failed"}`);
+  }
+  if (!detailRes.data || typeof detailRes.data !== "object") throw new Error("Onos empty order detail payload");
+  if (detailRes.data.status === false || detailRes.data.error) {
+    throw new Error(`Onos bad order detail response: ${detailRes.data.message || detailRes.data.error || "status=false"}`);
+  }
+
+  const eventsRes = await httpOnos.get(`/order/${encodeURIComponent(onosOrderId)}/shipment/events`, { headers });
+  if (eventsRes.status >= 400 && DEBUG) {
+    console.warn(`[Onos][shipment/events] HTTP ${eventsRes.status} for ${onosOrderId}`);
+  }
+
+  const raw = {
+    detail: detailRes.data,
+    shipment_events:
+      eventsRes.status < 400 && eventsRes.data && typeof eventsRes.data === "object"
+        ? eventsRes.data
+        : null,
+  };
+
+  const events = Array.isArray(eventsRes.data?.data)
+    ? eventsRes.data.data
+    : Array.isArray(eventsRes.data?.events)
+      ? eventsRes.data.events
+      : [];
+  const detailData =
+    detailRes.data?.data && typeof detailRes.data.data === "object"
+      ? detailRes.data.data
+      : detailRes.data;
+  const picked = pickOnosTracking({ data: { ...detailData, events } });
+
+  return { ...picked, raw };
+}
+
 function buildLuxuryProTrackingUrl(orderId) {
   const configured =
     LUXURYPRO_TRACKING_ENDPOINT ||
@@ -843,6 +924,8 @@ function applyToItemsOfVendor(
                     ? "SS88"
                     : vendorKey === "luxurypro"
                       ? "LuxuryPro"
+                      : vendorKey === "onos"
+                        ? "Onos"
                     : norm(ti.fulfillment),
       tracking: tracking || prevTracking,
       status: shipped ? "Shipped" : thePrevStatus || "New",
@@ -914,6 +997,15 @@ function applyToItemsOfVendor(
       last_response: raw,
       lp_status: norm(raw?.status || raw?.production_status || raw?.fulfillment_status),
     };
+  } else if (vendorKey === "onos") {
+    doc.vendor_submissions = doc.vendor_submissions || {};
+    doc.vendor_submissions.onos = {
+      ...(doc.vendor_submissions.onos || {}),
+      tracking_attempt_count: (doc.vendor_submissions.onos?.tracking_attempt_count || 0) + 1,
+      tracking_last_response: raw,
+      tracking_status: norm(raw?.detail?.data?.status || raw?.detail?.status || ""),
+    };
+    if (typeof doc.markModified === "function") doc.markModified("vendor_submissions");
   }
 
   return changed;
@@ -935,7 +1027,7 @@ async function updateOrderByVendors(orderId, vpidToVendorPrefetched = null) {
 
   const groups = groupItemsByVendorWithMap(doc, vpidToVendor);
   const vendorKeys = Object.keys(groups).filter((k) =>
-    ["beeful", "merchfox", "merchize", "printway", "mangotee", "ss88", "luxurypro"].includes(k)
+    ["beeful", "merchfox", "merchize", "printway", "mangotee", "ss88", "luxurypro", "onos"].includes(k)
   );
 
   if (vendorKeys.length === 0) {
@@ -955,6 +1047,7 @@ async function updateOrderByVendors(orderId, vpidToVendorPrefetched = null) {
       else if (vk === "mangotee") res = await fetchMangoTee(orderId);
       else if (vk === "ss88") res = await fetchSS88(orderId);
       else if (vk === "luxurypro") res = await fetchLuxuryPro(orderId);
+      else if (vk === "onos") res = await fetchOnos(orderId, doc);
       else continue;
 
       totalChanged += applyToItemsOfVendor(doc, vk, res);
@@ -993,7 +1086,7 @@ async function runBatch({ max = 1100, dryRun = false } = {}) {
 
   const vpidToVendor = await buildVendorMapsFromVpidSet(vpidSet);
 
-  const knownKeys = new Set(["beeful", "merchfox", "merchize", "printway", "mangotee", "ss88", "luxurypro"]);
+  const knownKeys = new Set(["beeful", "merchfox", "merchize", "printway", "mangotee", "ss88", "luxurypro", "onos"]);
   const filtered = candidates.filter((o) => {
     const groups = groupItemsByVendorWithMap(o, vpidToVendor);
     return Object.keys(groups).some((k) => knownKeys.has(k));
@@ -1042,7 +1135,7 @@ function buildTrackingNote(prevNote, carrier) {
   return parts.join(" | ");
 }
 
-function applyToEtsyItemsOfVendor(doc, vendorKey, { tracking, carrier, shipped }) {
+function applyToEtsyItemsOfVendor(doc, vendorKey, { tracking, carrier, shipped, raw }) {
   let changed = 0;
   const fulfillment = getVendorFulfillmentName(vendorKey);
 
@@ -1079,6 +1172,17 @@ function applyToEtsyItemsOfVendor(doc, vendorKey, { tracking, carrier, shipped }
     return { ...(it.toObject?.() ? it.toObject() : it), tracking_info: nextTI };
   });
 
+  if (vendorKey === "onos" && changed > 0) {
+    doc.vendor_submissions = doc.vendor_submissions || {};
+    doc.vendor_submissions.onos = {
+      ...(doc.vendor_submissions.onos || {}),
+      tracking_attempt_count: (doc.vendor_submissions.onos?.tracking_attempt_count || 0) + 1,
+      tracking_last_response: raw,
+      tracking_status: norm(raw?.detail?.data?.status || raw?.detail?.status || ""),
+    };
+    if (typeof doc.markModified === "function") doc.markModified("vendor_submissions");
+  }
+
   return changed;
 }
 
@@ -1104,7 +1208,7 @@ async function updateEtsyOrderByVendors(orderId, options = {}) {
     options.vpidToVendorPrefetched || (await buildVendorMapsFromVpidSet(vpidSet));
   doc.__vpidToVendor = vpidToVendor;
 
-  const knownKeys = new Set(["beeful", "merchfox", "merchize", "printway", "mangotee", "ss88", "luxurypro"]);
+  const knownKeys = new Set(["beeful", "merchfox", "merchize", "printway", "mangotee", "ss88", "luxurypro", "onos"]);
   const groups = groupItemsByVendorWithMap(doc, vpidToVendor);
   const vendorKeys = Object.keys(groups).filter((k) => knownKeys.has(k));
 
@@ -1145,10 +1249,13 @@ async function updateEtsyOrderByVendors(orderId, options = {}) {
     orderStatusChanged = true;
   }
 
-  await doc.save();
+  if (totalChanged > 0 || orderStatusChanged) {
+    await doc.save();
+  }
   return {
     updatedItems: totalChanged,
     orderStatusChanged,
+    skipped: totalChanged === 0 && !orderStatusChanged,
     vendorResults,
   };
 }
@@ -1174,7 +1281,7 @@ async function runEtsyVendorBatch({ max = 1100, dryRun = false, shopId = null, s
   }
 
   const vpidToVendor = await buildVendorMapsFromVpidSet(vpidSet);
-  const knownKeys = new Set(["beeful", "merchfox", "merchize", "printway", "mangotee", "ss88", "luxurypro"]);
+  const knownKeys = new Set(["beeful", "merchfox", "merchize", "printway", "mangotee", "ss88", "luxurypro", "onos"]);
   const filtered = candidates.filter((o) => {
     const groups = groupItemsByVendorWithMap(o, vpidToVendor);
     return Object.keys(groups).some((k) => knownKeys.has(k));
@@ -2139,5 +2246,6 @@ module.exports = {
   updateEtsyOrderByVendors,
   runBatch,
   runEtsyVendorBatch,
+  pickOnosTracking,
 };
 

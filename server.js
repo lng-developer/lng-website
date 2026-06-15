@@ -2,8 +2,7 @@
 const express = require("express");
 const morgan = require("morgan");
 const cors = require("cors");
-const dotenv = require("dotenv");
-dotenv.config();
+require("./src/config/env.config")();
 
 const http = require("http");
 const connectDB = require("./src/config/db.config");
@@ -14,7 +13,12 @@ const etsyVendorSyncScheduler = require("./src/service/etsyVendorSyncScheduler")
 // ===== App
 const app = express();
 app.set("trust proxy", true);
-app.use(express.json({ limit: "10mb" }));
+app.use(express.json({
+  limit: "10mb",
+  verify: (req, _res, buf) => {
+    req.rawBody = Buffer.from(buf || "");
+  },
+}));
 app.use(morgan("dev"));
 
 app.use(cors());
@@ -61,6 +65,7 @@ const {
   autoConfigRoutes,
   extensionLogRoutes,
   etsyAdsRoutes,
+  vendorWebhookRoutes,
   devRoutes
 } = require("./src/routes");
 
@@ -99,6 +104,7 @@ app.use("/api/etsy-messages", EtsyMessagesRoutes);
 app.use("/api/etsy-ads", etsyAdsRoutes);
 app.use("/api/auto-config", autoConfigRoutes);
 app.use("/api/ext/logs", extensionLogRoutes);
+app.use("/api/vendor-webhooks", vendorWebhookRoutes);
 app.use("/api/dev", devRoutes);
 
 app.use("/api/r2-test", require("./src/routes/upload.router.R2"));

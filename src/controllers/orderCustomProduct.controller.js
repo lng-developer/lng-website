@@ -43,7 +43,7 @@ const {
 
 const mongoose = require("mongoose");
 
-require("dotenv").config();
+require("../config/env.config")();
 
 const ALLOWED = ["New", "Fulfilled", "Shipping", "Shipped", "Canceled", "Cancelled"];
 const isCanceledStatus = (s) => s === "Canceled" || s === "Cancelled";
@@ -1622,7 +1622,12 @@ const updateOrdersFromXlsx = async (req, res) => {
     if (autoCompute && ordersToCompute.size > 0) {
       for (const oid of ordersToCompute) {
         const one = await new Promise((resolve) => {
-          const fakeReq = { body: { orderId: oid } };
+          const fakeReq = {
+            body: { orderId: oid },
+            user: req.user,
+            ip: req.ip,
+            headers: req.headers,
+          };
           const fakeRes = {
             json: (obj) => resolve({ orderId: oid, ...obj }),
             status: (code) => ({
@@ -3426,6 +3431,88 @@ async function getVendorIdByVendorProductId(vendorProductId) {
   return vp?.vendor_id ? String(vp.vendor_id) : null;
 }
 
+function buildBaseCostItemBreakdownMap(items = []) {
+  const map = new Map();
+  for (const item of items || []) {
+    const itemId = item?.orderItemId ? String(item.orderItemId) : null;
+    if (!itemId) continue;
+    const breakdown = item?.cost_breakdown
+      ? JSON.parse(JSON.stringify(item.cost_breakdown))
+      : null;
+    map.set(itemId, breakdown);
+  }
+  return map;
+}
+
+function buildBaseCostComputeChanges({
+  oldBaseCost,
+  newBaseCost,
+  oldShippingGroups,
+  newShippingGroups,
+  oldComputedAt,
+  newComputedAt,
+  oldItemBreakdowns,
+  items,
+}) {
+  const changes = [];
+
+  if (Number(oldBaseCost || 0) !== Number(newBaseCost || 0)) {
+    changes.push({
+      field: "base_cost",
+      from: Number(oldBaseCost || 0),
+      to: Number(newBaseCost || 0),
+    });
+  }
+
+  if (JSON.stringify(oldShippingGroups || []) !== JSON.stringify(newShippingGroups || [])) {
+    changes.push({
+      field: "base_cost_shipping_groups",
+      from: oldShippingGroups || [],
+      to: newShippingGroups || [],
+    });
+  }
+
+  const oldComputedAtValue = oldComputedAt ? new Date(oldComputedAt).toISOString() : null;
+  const newComputedAtValue = newComputedAt ? new Date(newComputedAt).toISOString() : null;
+  if (oldComputedAtValue !== newComputedAtValue) {
+    changes.push({
+      field: "base_cost_computed_at",
+      from: oldComputedAt || null,
+      to: newComputedAt || null,
+    });
+  }
+
+  let changedItemBreakdowns = 0;
+  for (const item of items || []) {
+    const itemId = item?.orderItemId ? String(item.orderItemId) : null;
+    if (!itemId) continue;
+
+    const before = oldItemBreakdowns.get(itemId) || null;
+    const after = item?.cost_breakdown
+      ? JSON.parse(JSON.stringify(item.cost_breakdown))
+      : null;
+
+    if (JSON.stringify(before) !== JSON.stringify(after)) {
+      changedItemBreakdowns += 1;
+      changes.push({
+        field: `items[orderItemId=${itemId}].cost_breakdown`,
+        from: before,
+        to: after,
+      });
+    }
+  }
+
+  if (changedItemBreakdowns > 0) {
+    changes.push({
+      field: "items.cost_breakdown_changed_count",
+      from: 0,
+      to: changedItemBreakdowns,
+    });
+  }
+
+  return changes;
+}
+
 // ================== COMPUTE BASE COST (FULL) ==================
 const computeBaseCostForOrder = async (req, res) => {
   try {
@@ -3437,6 +3524,13 @@ const computeBaseCostForOrder = async (req, res) => {
     if (!Array.isArray(order.items) || order.items.length === 0) {
       return res.status(400).json({ message: "Order has no items" });
     }
+
+    const oldBaseCost = Number(order.base_cost || 0);
+    const oldShippingGroups = Array.isArray(order.base_cost_shipping_groups)
+      ? JSON.parse(JSON.stringify(order.base_cost_shipping_groups))
+      : [];
+    const oldComputedAt = order.base_cost_computed_at || null;
+    const oldItemBreakdowns = buildBaseCostItemBreakdownMap(order.items);
 
     const shippingTypeForOrder = order.shipping_type || "Standard";
 
@@ -4194,6 +4288,32 @@ const computeBaseCostForOrder = async (req, res) => {
 
     await order.save();
 
+    const changes = buildBaseCostComputeChanges({
+      oldBaseCost,
+      newBaseCost: order.base_cost,
+      oldShippingGroups,
+      newShippingGroups: order.base_cost_shipping_groups,
+      oldComputedAt,
+      newComputedAt: order.base_cost_computed_at,
+      oldItemBreakdowns,
+      items: order.items,
+    });
+
+    if (changes.length > 0) {
+      await logOrderHistory({
+        orderDoc: order,
+        action: "UPDATE_BASE_COST",
+        description: "Order base cost computed",
+        changes,
+        user: req.user,
+        context: {
+          source: req.user ? "PORTAL" : "SYSTEM",
+          ip: req.ip,
+          userAgent: req.headers?.["user-agent"],
+        },
+      });
+    }
+
     return res.json({
       message:
         "Computed base cost with vendor-preference & consolidated shipping (priority for Expedited, international otherwise)",
@@ -4228,7 +4348,12 @@ const computeBaseCostForMany = async (req, res) => {
 
     const results = [];
     for (const o of orders) {
-      const fakeReq = { body: { orderId: o.orderId } };
+      const fakeReq = {
+        body: { orderId: o.orderId },
+        user: req.user,
+        ip: req.ip,
+        headers: req.headers,
+      };
       const fakeRes = {
         json: (r) => results.push({ orderId: o.orderId, ...r }),
         status: (code) => ({
@@ -4890,7 +5015,12 @@ const applyManualVendorMapping = async (req, res) => {
     // 👉 GỌI TRỰC TIẾP HÀM computeBaseCostForOrder ĐỂ TỰ ĐỘNG GOM NHÓM VÀ TÍNH SHIP CHUẨN XÁC DO MÌNH VỪA FIX
     // Tránh việc tự cộng dồn tay gộp shipping sai ở đây.
     let computedResult = null;
-    const mockReq = { body: { orderId } };
+    const mockReq = {
+      body: { orderId },
+      user: req.user,
+      ip: req.ip,
+      headers: req.headers,
+    };
     const mockRes = {
       status: function () { return this; },
       json: function (data) { computedResult = data; return this; }

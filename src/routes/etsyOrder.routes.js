@@ -54,13 +54,13 @@ router.get(
 router.get(
     '/qc/list',
     authenticateToken,
-    authorizeRoles('Customer Service', "Admin", "Seller"),
+    authorizeRoles('Customer Service', "Admin", "Seller", "Design Leader"),
     etsyOrderController.getEtsyQCList
 );
 router.get(
     '/qc/statistics',
     authenticateToken,
-    authorizeRoles('Customer Service', "Admin", "Seller"),
+    authorizeRoles('Customer Service', "Admin", "Seller", "Design Leader"),
     etsyOrderController.getEtsyQCStatistics
 );
 router.post(
@@ -71,6 +71,10 @@ router.post(
 );
 router.patch('/sumbittedoetsy', etsyOrderController.updateSumbittedoetsyStatus);
 router.put('/manual-mapping', authenticateToken, orderCustomProductController.applyManualVendorMapping);
+router.put('/reset-base-cost', authenticateToken, etsyOrderController.resetBaseCostForEtsyOrder);
+router.put('/scale/orders/reset/bulk', authenticateToken, etsyOrderController.resetEtsyScaleForOrdersBulk);
+router.put('/open-case', authenticateToken, etsyOrderController.openCaseInEtsyOrder);
+router.put('/remove-case', authenticateToken, etsyOrderController.removeCaseFromEtsyOrder);
 router.post(
     '/custom-files/download-pending',
     authenticateToken,
@@ -137,6 +141,11 @@ router.put(
     authenticateToken,
     authorizeRoles("Admin", "Design Leader", "Designer"),
     etsyOrderController.unassignEtsyOrderFromCS
+);
+router.patch(
+    '/:orderId/items/:transactionId/quantity',
+    authenticateToken,
+    etsyOrderController.updateEtsyOrderItemQuantity
 );
 router.patch('/:orderId/tracking', authenticateToken, etsyOrderController.updateEtsyOrderTrackingForAllItems);
 router.put('/:orderId/tracking', authenticateToken, etsyOrderController.updateEtsyOrderTrackingForAllItems);

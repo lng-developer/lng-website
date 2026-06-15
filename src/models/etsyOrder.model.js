@@ -53,8 +53,8 @@ const EtsyCustomFileSchema = new Schema(
 const EtsyOrderItemEmbeddedSchema = new Schema(
     {
         transactionId: { type: String, required: true }, // unique in order (enforce by import logic)
-        listingId: { type: String, index: true },
-        sku: { type: String, index: true },
+        listingId: { type: String },
+        sku: { type: String },
         orderItemId: { type: String },
 
         itemName: { type: String },
@@ -301,6 +301,7 @@ const EtsyOrderSchema = new Schema(
 
         numberOfItems: { type: Number, default: 0 },
         sumbittedoetsy: { type: Boolean, default: false },
+        case: [{ type: Schema.Types.ObjectId, ref: "Case", required: true }],
 
         items: { type: [EtsyOrderItemEmbeddedSchema], default: [] },
         address_validation: {

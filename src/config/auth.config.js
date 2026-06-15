@@ -1,5 +1,4 @@
-const dotenv = require('dotenv');
-dotenv.config();
+require("./env.config")();
 module.exports = {
     secret: process.env.JWT_SECRET,
     jwtExpiration: 86400, //1h
