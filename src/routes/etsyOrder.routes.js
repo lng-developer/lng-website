@@ -147,8 +147,8 @@ router.patch(
     authenticateToken,
     etsyOrderController.updateEtsyOrderItemQuantity
 );
-router.patch('/:orderId/tracking', authenticateToken, etsyOrderController.updateEtsyOrderTrackingForAllItems);
-router.put('/:orderId/tracking', authenticateToken, etsyOrderController.updateEtsyOrderTrackingForAllItems);
+router.patch('/:orderId/tracking',  etsyOrderController.updateEtsyOrderTrackingForAllItems);
+router.put('/:orderId/tracking',  etsyOrderController.updateEtsyOrderTrackingForAllItems);
 router.patch('/:orderId/items/:transactionId/tracking', etsyOrderController.updateEtsyOrderItemTracking);
 router.put('/:orderId/items/:transactionId/tracking', etsyOrderController.updateEtsyOrderItemTracking);
 router.get('/', etsyOrderController.getListOrders);
