@@ -2100,6 +2100,39 @@ const normalizeEtsyShippingPayload = (body = {}) => {
     };
 };
 
+const pickEtsyShippingAddress = (shipping = {}) => ({
+    name: shipping?.name || "",
+    address1: shipping?.address1 || "",
+    address2: shipping?.address2 || "",
+    city: shipping?.city || "",
+    state: shipping?.state || "",
+    zipcode: shipping?.zipcode || "",
+    country: shipping?.country || "",
+});
+
+const buildEtsyCustomerInfoFromShipping = (order, shipping = {}) => ({
+    email: order.customer_infor?.email || "",
+    name: shipping.name || order.buyer?.fullName || order.buyer?.display || "",
+    address: shipping.address1 || "",
+    address_2: shipping.address2 || "",
+    province: shipping.state || "",
+    city: shipping.city || "",
+    state: shipping.state || "",
+    zip_code: shipping.zipcode || "",
+    country: shipping.country || "",
+    phone_number: order.customer_infor?.phone_number || "",
+});
+
+const buildEtsyAddressChanges = (before = {}, after = {}) => (
+    ["name", "address1", "address2", "city", "state", "zipcode", "country"]
+        .filter((field) => normalizeComparableAddressValue(before[field]) !== normalizeComparableAddressValue(after[field]))
+        .map((field) => ({
+            field: `shipping.${field}`,
+            from: before[field] || "",
+            to: after[field] || "",
+        }))
+);
+
 const MAX_CUSTOM_TEXT_FIELDS = 50;
 const MAX_CUSTOM_FILES = 50;
 const MAX_CUSTOM_STRING = 2000;
@@ -2862,6 +2895,157 @@ const updateSumbittedoetsyStatus = async (req, res) => {
     } catch (err) {
         console.error("updateSumbittedoetsyStatus error:", err);
         return res.status(500).json({ ok: false, message: "Internal Server Error", error: err.message });
+    }
+};
+
+const updateEtsyOrderAddress = async (req, res) => {
+    try {
+        const incomingShipping = normalizeEtsyShippingPayload(req.body || {});
+        const providedFields = Object.entries(incomingShipping)
+            .filter(([, value]) => !isMissingValue(value))
+            .map(([field]) => field);
+
+        if (providedFields.length === 0) {
+            return res.status(400).json({
+                message: "At least one address field is required",
+                acceptedFields: [
+                    "shipping.name",
+                    "shipping.address1",
+                    "shipping.address2",
+                    "shipping.city",
+                    "shipping.state",
+                    "shipping.zipcode",
+                    "shipping.country",
+                    "customer_infor.address",
+                    "customer_infor.address_2",
+                    "address1",
+                    "address2",
+                    "city",
+                    "state",
+                    "zipcode",
+                    "country",
+                ],
+            });
+        }
+
+        const order = await EtsyOrder.findOne(buildEtsyOrderLookup(req));
+        if (!order) {
+            return res.status(404).json({ message: "Etsy order not found" });
+        }
+
+        const accessError = ensureSellerCanAccessEtsyOrder(req, order);
+        if (accessError) {
+            return res.status(accessError.startsWith("Invalid") ? 400 : 403).json({ message: accessError });
+        }
+
+        const beforeShipping = pickEtsyShippingAddress(order.shipping || {});
+        const beforeAddressValidation = order.address_validation
+            ? order.address_validation.toObject?.() || order.address_validation
+            : null;
+        const beforeScaleOverallStatus = order.scale_overall_status || null;
+        const nextShipping = {
+            ...beforeShipping,
+            ...Object.fromEntries(
+                Object.entries(incomingShipping).filter(([, value]) => !isMissingValue(value))
+            ),
+        };
+
+        const addressChanges = buildEtsyAddressChanges(beforeShipping, nextShipping);
+        if (addressChanges.length === 0) {
+            return res.status(200).json({
+                message: "No address change",
+                orderId: order.orderId,
+                shipping: order.shipping || {},
+                customer_infor: getEtsyCustomerInfo(order),
+                address_validation: order.address_validation || null,
+                scale_overall_status: order.scale_overall_status,
+            });
+        }
+
+        const shippingAddressChanged = hasEtsyShippingAddressChanged(beforeShipping, nextShipping);
+        order.shipping = nextShipping;
+        order.customer_infor = buildEtsyCustomerInfoFromShipping(order, nextShipping);
+
+        if (shippingAddressChanged) {
+            order.address_validation = isUsShippingCountry(nextShipping.country)
+                ? {
+                    provider: "smarty",
+                    scope: "etsy_us_street",
+                    envSource: "ETSY_US_STREET_SMARTY_*",
+                    status: "pending",
+                    isValid: null,
+                    checkedAt: null,
+                    smartyResponse: null,
+                }
+                : {
+                    provider: "smarty",
+                    scope: "etsy_us_street",
+                    envSource: "ETSY_US_STREET_SMARTY_*",
+                    status: null,
+                    isValid: null,
+                    checkedAt: null,
+                    smartyResponse: null,
+                };
+        }
+
+        order.markModified("shipping");
+        order.markModified("customer_infor");
+        order.markModified("address_validation");
+        await order.save();
+
+        if (shippingAddressChanged) {
+            await validateAddressIfNeeded(order, { force: isUsShippingCountry(nextShipping.country) });
+        }
+
+        const nextAddressInvalid = isEtsyAddressInvalid(order);
+        if (nextAddressInvalid && order.scale_overall_status !== "Address Invalid") {
+            order.scale_overall_status = "Address Invalid";
+            await order.save();
+        } else if (!nextAddressInvalid && beforeScaleOverallStatus === "Address Invalid") {
+            order.scale_overall_status = "Pending";
+            await order.save();
+        }
+
+        await logOrderHistory({
+            orderDoc: order,
+            action: "UPDATE_ADDRESS",
+            description: "Etsy shipping address updated",
+            changes: [
+                ...addressChanges,
+                {
+                    field: "address_validation",
+                    from: beforeAddressValidation,
+                    to: order.address_validation || null,
+                },
+                ...(beforeScaleOverallStatus !== order.scale_overall_status
+                    ? [{
+                        field: "scale_overall_status",
+                        from: beforeScaleOverallStatus,
+                        to: order.scale_overall_status,
+                    }]
+                    : []),
+            ],
+            user: req.user,
+            context: {
+                source: "PORTAL",
+                ip: req.ip,
+                userAgent: req.headers["user-agent"],
+            },
+        });
+
+        return res.json({
+            message: "Etsy address updated",
+            orderId: order.orderId,
+            shipping: order.shipping || {},
+            customer_infor: getEtsyCustomerInfo(order),
+            address_validation: order.address_validation || null,
+            scale_overall_status: order.scale_overall_status,
+        });
+    } catch (err) {
+        return res.status(500).json({
+            message: "Update Etsy address failed",
+            error: err.message,
+        });
     }
 };
 
@@ -5069,6 +5253,7 @@ module.exports = {
     getEtsyOrderStatistics,
     createOrder,
     updateSumbittedoetsyStatus,
+    updateEtsyOrderAddress,
     updateEtsyOrderItemTracking,
     updateEtsyOrderTrackingForAllItems,
     getEtsyScaleList,

@@ -142,6 +142,18 @@ router.put(
     authorizeRoles("Admin", "Design Leader", "Designer"),
     etsyOrderController.unassignEtsyOrderFromCS
 );
+router.put(
+    '/:orderId/address',
+    authenticateToken,
+    authorizeRoles("Customer Service", "Admin", "Seller"),
+    etsyOrderController.updateEtsyOrderAddress
+);
+router.patch(
+    '/:orderId/address',
+    authenticateToken,
+    authorizeRoles("Customer Service", "Admin", "Seller"),
+    etsyOrderController.updateEtsyOrderAddress
+);
 router.patch(
     '/:orderId/items/:transactionId/quantity',
     authenticateToken,
