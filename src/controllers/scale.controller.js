@@ -2950,7 +2950,19 @@ const resetScaleForOrdersBulk = async (req, res) => {
         }
 
         // Reset từng item trong order
+        const previousOverallStatus = order.scale_overall_status || "Need Scale";
+        const previousStatus = order.status || "New";
+        const previousScaleId = order.scaleId || null;
+        const itemChanges = [];
+
         for (const item of order.items || []) {
+          itemChanges.push({
+            orderItemId: item?.orderItemId || "",
+            scale_status: item?.scale_status || "Need Scale",
+            qc_note: item?.qc_note || "",
+            fulfillment_file: toPlainFF(item?.fulfillment_file),
+          });
+
           item.scale_status = "Need Scale";
           item.fulfillment_file = new Map();
           item.qc_note = note || "";
@@ -2968,7 +2980,35 @@ const resetScaleForOrdersBulk = async (req, res) => {
         // order.vendor_submissions = {};
         // order.grabink_submission = undefined;
 
+        order.markModified("items");
         await order.save();
+
+        await logOrderHistory({
+          orderDoc: order,
+          action: "RESET_SCALE_BULK",
+          description: "Scale reset to Need Scale for all items",
+          changes: [
+            { field: "scale_overall_status", from: previousOverallStatus, to: "Need Scale" },
+            { field: "status", from: previousStatus, to: "New" },
+            { field: "scaleId", from: previousScaleId, to: null },
+            {
+              field: "items.scale",
+              from: itemChanges,
+              to: (order.items || []).map((item) => ({
+                orderItemId: item?.orderItemId || "",
+                scale_status: item?.scale_status || "Need Scale",
+                qc_note: item?.qc_note || "",
+                fulfillment_file: toPlainFF(item?.fulfillment_file),
+              })),
+            },
+          ],
+          user: req.user,
+          context: {
+            source: "PORTAL",
+            ip: req.ip,
+            userAgent: req.headers["user-agent"],
+          },
+        });
 
         results.push({
           orderId: oid,
