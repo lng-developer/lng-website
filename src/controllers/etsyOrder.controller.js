@@ -1100,6 +1100,7 @@ const getListOrders = async (req, res) => {
             EtsyOrder.find(filter)
                 .populate("shopId", "name store merchant")
                 .populate("seller.sellerId", "full_name email employee_id")
+                .populate("case", "name description")
                 .sort({ [sortField]: sortDir })
                 .skip(skip)
                 .limit(limitNum)
@@ -1157,6 +1158,7 @@ const getListOrders = async (req, res) => {
                 shopId: shop._id ? String(shop._id) : String(order.shopId || ""),
                 shopName: shop.name || shop.store || "",
                 shipping_type: order.shipping_type || "Standard",
+                case: order.case || [],
                 items: (order.items || []).map((item) => {
                     // Build cost_center
                     let cost_center = null;
