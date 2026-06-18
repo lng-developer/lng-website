@@ -18,7 +18,7 @@ const vendorWebhookLogSchema = new mongoose.Schema(
     tracking: { type: String, index: true, default: "" },
     carrier: { type: String, default: "" },
 
-    collection: { type: String, enum: ["etsyorders", "ordercustomproducts", ""], default: "" },
+    matchedCollection: { type: String, enum: ["etsyorders", "ordercustomproducts", ""], default: "" },
     matchedItems: { type: Number, default: 0 },
     changedItems: { type: Number, default: 0 },
     orderStatusChanged: { type: Boolean, default: false },

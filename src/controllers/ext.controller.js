@@ -6,6 +6,9 @@ const OrderCustomProduct = db.orderCustomProduct;
 const EtsyOrder = db.EtsyOrder;
 const taskStatusService = require("../service/taskStatus.service");
 const { emitTaskToMachine, buildTaskId } = require("../lib/taskEmitter");
+const {
+  normalizeVendorTrackingPayload,
+} = require("../service/vendorTrackingNormalizer.service");
 
 const mongoose = require("mongoose");
 const axios = require("axios").default;
@@ -143,6 +146,7 @@ const lower = (s) => norm(s).toLowerCase();
 function isValidTrackingNumber(s) {
   const t = norm(s);
   if (!t) return false;
+  if (/^\[object\s+Object\]$/i.test(t)) return false;
   if (t === "-" || t === "---") return false;
   if (/^0+$/.test(t)) return false;
   if (!/[A-Za-z0-9]/.test(t)) return false;
@@ -731,77 +735,14 @@ function getOnosExternalOrderId(orderId, doc = {}) {
 }
 
 function pickOnosTracking(raw) {
+  const normalized = normalizeVendorTrackingPayload("onos", raw);
   const root = raw?.data && typeof raw.data === "object" ? raw.data : raw;
-  const candidates = [];
-
-  const push = (obj = {}) => {
-    if (!obj || typeof obj !== "object") return;
-
-    const tracking = norm(
-      obj.tracking_number ||
-      obj.trackingNumber ||
-      obj.tracking ||
-      obj.tracking_code ||
-      obj.trackingCode ||
-      obj.tracking_id ||
-      obj.trackingId
-    );
-    const carrier = norm(
-      obj.carrier ||
-      obj.carrier_name ||
-      obj.carrierName ||
-      obj.tracking_company ||
-      obj.shipping_carrier ||
-      obj.shippingCarrier ||
-      obj.shipping_provider ||
-      obj.shippingProvider
-    );
-    const status = norm(
-      obj.status ||
-      obj.shipment_status ||
-      obj.fulfillment_status ||
-      obj.production_status
-    );
-    const updatedAtMs = new Date(
-      obj.updated_at ||
-      obj.updatedAt ||
-      obj.shipped_at ||
-      obj.shippedAt ||
-      obj.created_at ||
-      obj.createdAt ||
-      0
-    ).getTime();
-
-    if (tracking || carrier || status) candidates.push({ tracking, carrier, status, updatedAtMs });
+  return {
+    tracking: normalized.trackingNumber,
+    carrier: normalized.carrier,
+    shipped: normalized.shipped,
+    raw: root || raw,
   };
-
-  push(root);
-  push(root?.tracking);
-  push(root?.shipment);
-  push(root?.shipping);
-
-  for (const key of ["trackings", "tracking_list", "shipments", "shipment_events", "events", "fulfillments", "items", "line_items"]) {
-    const arr = root?.[key];
-    if (!Array.isArray(arr)) continue;
-    for (const entry of arr) {
-      push(entry);
-      push(entry?.tracking);
-      push(entry?.shipment);
-    }
-  }
-
-  const picked = candidates
-    .filter((c) => isValidTrackingNumber(c.tracking) || c.carrier || c.status)
-    .sort((a, b) => (b.updatedAtMs || 0) - (a.updatedAtMs || 0))[0] || {};
-
-  const tracking = isValidTrackingNumber(picked.tracking) ? picked.tracking : "";
-  const carrier = picked.carrier || "";
-  const status = lower(picked.status || root?.status || root?.shipment_status || root?.fulfillment_status);
-  const shipped =
-    ["shipped", "delivered", "fulfilled", "completed", "complete"].includes(status) ||
-    Boolean(tracking);
-
-  return { tracking, carrier, shipped, raw: root || raw };
 }
 
 async function fetchOnos(orderId, doc) {
@@ -2305,5 +2246,6 @@ module.exports = {
   updateEtsyOrderByVendors,
   runBatch,
   runEtsyVendorBatch,
+  pickOnosTracking,
 };
 

@@ -36,6 +36,7 @@ const orderHistorySchema = new mongoose.Schema(
                 "SEND_TO_VENDOR",
                 "SEND_TO_VENDOR_FAILED",
                 "SEND_TO_FULFILLMENT_PORTAL",
+                "PUSH_TO_FULFILLMENT_PLATFORM_V2",
                 "UPDATE_ITEM_TRACKING_BULK",
                 "OTHER"
             ],

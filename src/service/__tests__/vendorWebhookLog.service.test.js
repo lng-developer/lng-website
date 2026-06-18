@@ -66,7 +66,7 @@ describe("vendorWebhookLog.service", () => {
         externalId: "ONOS-1",
         tracking: "TRACK-1",
         carrier: "USPS",
-        collection: "etsyorders",
+        matchedCollection: "etsyorders",
         matchedItems: 1,
         changedItems: 1,
         orderStatusChanged: true,

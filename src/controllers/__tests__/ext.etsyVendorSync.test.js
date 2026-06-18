@@ -119,4 +119,31 @@ describe("ext Etsy vendor sync", () => {
       message: "Etsy order not found in DB: ETSY-MISSING",
     });
   });
+
+  test("parses Onos nested tracking object without stringifying it", () => {
+    const result = controller.pickOnosTracking({
+      status: true,
+      data: {
+        id: "MX-1",
+        order_id: "ORDER-1",
+        status: "In Production",
+        tracking: {
+          tracking: "9214490411384200030100",
+          carrier: "USPS",
+          url: "https://tools.usps.com/go/TrackConfirmAction?tLabels=9214490411384200030100",
+          shipping_label: "https://cdn.onosexpress.com/label.pdf",
+        },
+        updated_at: "2026-06-10T11:42:33.000Z",
+      },
+    });
+
+    expect(result).toEqual(
+      expect.objectContaining({
+        tracking: "9214490411384200030100",
+        carrier: "USPS",
+        shipped: true,
+      })
+    );
+    expect(result.tracking).not.toBe("[object Object]");
+  });
 });

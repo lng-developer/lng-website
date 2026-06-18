@@ -1,5 +1,6 @@
 const path = require("path");
 const crypto = require("crypto");
+const fs = require("fs");
 const {
   S3Client,
   PutObjectCommand,
@@ -112,6 +113,44 @@ async function uploadBufferToR2({
   };
 }
 
+async function uploadFilePathToR2({
+  filePath,
+  originalName,
+  mimeType,
+  size,
+  folder = "mockup",
+  key,
+}) {
+  if (!filePath) {
+    throw new Error("Missing file path");
+  }
+
+  const finalFolder = normalizeFolder(folder);
+  const finalKey = key || buildKey(originalName, finalFolder, mimeType);
+
+  await r2Client.send(
+    new PutObjectCommand({
+      Bucket: process.env.R2_PUBLIC_BUCKET,
+      Key: finalKey,
+      Body: fs.createReadStream(filePath),
+      ContentType: mimeType || "application/octet-stream",
+      ContentLength: size,
+    })
+  );
+
+  const url = `${process.env.R2_PUBLIC_BASE_URL}/${finalKey}`;
+
+  return {
+    provider: "cloudflare-r2",
+    bucket: process.env.R2_PUBLIC_BUCKET,
+    key: finalKey,
+    url,
+    folder: finalFolder,
+    mimeType,
+    size,
+  };
+}
+
 async function headR2Object(key) {
   if (!key) {
     throw new Error("key is required");
@@ -135,6 +174,7 @@ async function headR2Object(key) {
 
 module.exports = {
   uploadBufferToR2,
+  uploadFilePathToR2,
   headR2Object,
   buildKey,
   normalizeFolder,

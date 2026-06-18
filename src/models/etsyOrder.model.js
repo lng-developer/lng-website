@@ -282,6 +282,14 @@ const EtsyOrderSchema = new Schema(
             default: undefined,
         },
 
+        fulfillment_platform_v2_submission: {
+            sent: { type: Boolean, default: false },
+            sent_at: { type: Date, default: null },
+            attempt_count: { type: Number, default: 0 },
+            last_response: { type: Object, default: null },
+            sourceChannel: { type: String, default: "ETSY" },
+        },
+
         fulfilled_at: { type: Date, default: null },
         external_order_id: { type: String, default: null },
 
@@ -293,6 +301,7 @@ const EtsyOrderSchema = new Schema(
 
         numberOfItems: { type: Number, default: 0 },
         sumbittedoetsy: { type: Boolean, default: false },
+        case: [{ type: Schema.Types.ObjectId, ref: "Case", required: true }],
 
         items: { type: [EtsyOrderItemEmbeddedSchema], default: [] },
         address_validation: {

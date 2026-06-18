@@ -1,6 +1,13 @@
 const crypto = require("crypto");
 const mongoose = require("mongoose");
 const db = require("../models");
+const {
+  cleanTrackingString,
+  getProviderLabel: getNormalizedProviderLabel,
+  isValidTrackingNumber: isNormalizedTrackingNumber,
+  normalizeProviderKey: normalizeTrackingProviderKey,
+  normalizeVendorTrackingPayload,
+} = require("./vendorTrackingNormalizer.service");
 
 const EtsyOrder = db.EtsyOrder || mongoose.model("EtsyOrder");
 const OrderCustomProduct = db.orderCustomProduct || mongoose.model("OrderCustomProduct");
@@ -8,7 +15,7 @@ const VendorProduct = db.vendorProduct || mongoose.model("VendorProduct");
 const Vendor = db.vendor || mongoose.model("Vendor");
 
 function norm(value) {
-  return value === undefined || value === null ? "" : String(value).trim();
+  return cleanTrackingString(value);
 }
 
 function lower(value) {
@@ -16,47 +23,15 @@ function lower(value) {
 }
 
 function normalizeProviderKey(value) {
-  const s = lower(value);
-  if (!s) return "";
-  if (s.includes("grabink") || s.includes("beeful")) return "grabink";
-  if (s.includes("merchfox") || s.includes("merch fox")) return "merchfox";
-  if (s.includes("merchize")) return "merchize";
-  if (s.includes("printway") || s.includes("print way") || s === "pw") return "printway";
-  if (s.includes("mangotee") || s.includes("mango tee")) return "mangotee";
-  if (s.includes("ss88") || s.includes("mmoseller")) return "ss88";
-  if (s.includes("luxurypro") || s.includes("luxury pro")) return "luxurypro";
-  if (s.includes("onos")) return "onos";
-  if (s.includes("lenful")) return "lenful";
-  if (s.includes("pgprint")) return "pgprint";
-  if (s.includes("lng")) return "lng";
-  return s;
+  return normalizeTrackingProviderKey(value);
 }
 
 function getProviderLabel(provider) {
-  return (
-    {
-      grabink: "Grabink",
-      merchfox: "MerchFox",
-      merchize: "Merchize",
-      printway: "Printway",
-      mangotee: "MangoTee",
-      ss88: "SS88",
-      luxurypro: "LuxuryPro",
-      onos: "Onos",
-      lenful: "Lenful",
-      pgprint: "PGPrint",
-      lng: "LNG",
-    }[provider] || provider
-  );
+  return getNormalizedProviderLabel(provider);
 }
 
 function isValidTrackingNumber(value) {
-  const t = norm(value);
-  if (!t) return false;
-  if (t === "-" || t === "---") return false;
-  if (/^0+$/.test(t)) return false;
-  if (!/[A-Za-z0-9]/.test(t)) return false;
-  return t.length >= 8;
+  return isNormalizedTrackingNumber(value);
 }
 
 function firstValue(...values) {
@@ -67,141 +42,41 @@ function firstValue(...values) {
   return "";
 }
 
-function collectTrackingCandidates(root) {
-  const candidates = [];
-
-  const push = (obj = {}) => {
-    if (!obj || typeof obj !== "object") return;
-
-    const tracking = firstValue(
-      obj.tracking_number,
-      obj.trackingNumber,
-      obj.tracking,
-      obj.tracking_code,
-      obj.trackingCode,
-      obj.tracking_id,
-      obj.trackingId
-    );
-    const carrier = firstValue(
-      obj.carrier,
-      obj.carrier_name,
-      obj.carrierName,
-      obj.tracking_company,
-      obj.shipping_carrier,
-      obj.shippingCarrier,
-      obj.shipping_provider,
-      obj.shippingProvider
-    );
-    const status = firstValue(
-      obj.status,
-      obj.shipment_status,
-      obj.fulfillment_status,
-      obj.production_status
-    );
-    const updatedAtMs = new Date(
-      obj.updated_at ||
-        obj.updatedAt ||
-        obj.shipped_at ||
-        obj.shippedAt ||
-        obj.created_at ||
-        obj.createdAt ||
-        0
-    ).getTime();
-
-    if (tracking || carrier || status) {
-      candidates.push({ tracking, carrier, status, updatedAtMs });
-    }
-  };
-
-  push(root);
-  push(root?.data);
-  push(root?.tracking);
-  push(root?.shipment);
-  push(root?.shipping);
-  push(root?.data?.tracking);
-  push(root?.data?.shipment);
-  push(root?.data?.shipping);
-
-  for (const parent of [root, root?.data]) {
-    if (!parent || typeof parent !== "object") continue;
-    for (const key of [
-      "trackings",
-      "tracking_list",
-      "shipments",
-      "shipment_events",
-      "events",
-      "fulfillments",
-      "items",
-      "line_items",
-    ]) {
-      const arr = parent[key];
-      if (!Array.isArray(arr)) continue;
-      for (const entry of arr) {
-        push(entry);
-        push(entry?.tracking);
-        push(entry?.shipment);
-      }
-    }
-  }
-
-  return candidates;
-}
-
 function pickTracking(root) {
-  const picked =
-    collectTrackingCandidates(root)
-      .filter((candidate) => isValidTrackingNumber(candidate.tracking) || candidate.carrier || candidate.status)
-      .sort((a, b) => {
-        const aHasTracking = isValidTrackingNumber(a.tracking) ? 1 : 0;
-        const bHasTracking = isValidTrackingNumber(b.tracking) ? 1 : 0;
-        if (aHasTracking !== bHasTracking) return bHasTracking - aHasTracking;
-        return (b.updatedAtMs || 0) - (a.updatedAtMs || 0);
-      })[0] || {};
-
-  const tracking = isValidTrackingNumber(picked.tracking) ? picked.tracking : "";
-  const carrier = picked.carrier || "";
-  const status = lower(
-    picked.status ||
-      root?.status ||
-      root?.data?.status ||
-      root?.shipment_status ||
-      root?.data?.shipment_status ||
-      root?.fulfillment_status ||
-      root?.data?.fulfillment_status
-  );
-  const shipped =
-    ["shipped", "delivered", "fulfilled", "completed", "complete"].includes(status) || Boolean(tracking);
-
-  return { tracking, carrier, status, shipped };
+  const normalized = normalizeVendorTrackingPayload("", root);
+  return {
+    tracking: normalized.trackingNumber,
+    carrier: normalized.carrier,
+    status: normalized.status,
+    shipped: normalized.shipped,
+  };
 }
 
 function parseOnosWebhook(payload = {}) {
-  const data = payload.data && typeof payload.data === "object" ? payload.data : payload;
-  const tracking = pickTracking(payload);
+  const tracking = normalizeVendorTrackingPayload("onos", payload);
 
   return {
     provider: "onos",
-    externalId: firstValue(data.id, payload.id, data.order_id, payload.order_id),
-    orderId: firstValue(data.referent_id, payload.referent_id, data.order_id, payload.order_id, data.orderId, payload.orderId),
-    tracking: tracking.tracking,
+    externalId: tracking.externalOrderId,
+    orderId: tracking.orderId,
+    tracking: tracking.trackingNumber,
     carrier: tracking.carrier,
-    status: tracking.status || lower(data.status || payload.status),
+    status: tracking.status,
     shipped: tracking.shipped,
     raw: payload,
   };
 }
 
 function parseGenericWebhook(provider, payload = {}) {
-  const data = payload.data && typeof payload.data === "object" ? payload.data : payload;
-  const tracking = pickTracking(payload);
+  const tracking = normalizeVendorTrackingPayload(provider, payload);
 
   return {
     provider,
-    externalId: firstValue(data.external_id, payload.external_id, data.id, payload.id, data.order_id, payload.order_id),
-    orderId: firstValue(data.referent_id, payload.referent_id, data.orderId, payload.orderId, data.order_id, payload.order_id),
-    tracking: tracking.tracking,
+    externalId: tracking.externalOrderId,
+    orderId: tracking.orderId,
+    tracking: tracking.trackingNumber,
     carrier: tracking.carrier,
-    status: tracking.status || lower(data.status || payload.status),
+    status: tracking.status,
     shipped: tracking.shipped,
     raw: payload,
   };
