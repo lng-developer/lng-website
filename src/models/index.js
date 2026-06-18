@@ -36,6 +36,7 @@ const ExtensionTask = require("./extensionTask.model")
 const EtsyAdsDailySummary = require("./etsyAdsDailySummary.model")
 const EtsyMessageThread = require("./etsyMessageThread.model")
 const VendorWebhookLog = require("./vendorWebhookLog.model")
+const OrderProductShopify = require("./orderProductShopify.model")
 
 // Cau hinh mongoose dang global
 mongoose.Promise = global.Promise;
@@ -80,6 +81,7 @@ db.ExtensionTask = ExtensionTask
 db.EtsyAdsDailySummary = EtsyAdsDailySummary
 db.EtsyMessageThread = EtsyMessageThread
 db.VendorWebhookLog = VendorWebhookLog
+db.orderProductShopify = OrderProductShopify
 db.connectDB = async () => {
   await mongoose
     .connect(process.env.MONGO_URI, {

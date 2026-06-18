@@ -62,6 +62,11 @@ const normalizeFulfillmentFile = (value) => {
   return plain && typeof plain === "object" ? plain : {};
 };
 
+const getFullSizeEtsyImageUrl = (src) => {
+  if (typeof src !== "string") return src;
+  return src.replace(/il_\d+x(?:N|\d+)/, "il_fullxfull");
+};
+
 const toIsoDateStringOrNull = (value) => {
   if (!value) return null;
   const date = value instanceof Date ? value : new Date(value);
