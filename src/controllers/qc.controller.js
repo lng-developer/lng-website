@@ -62,6 +62,11 @@ const normalizeFulfillmentFile = (value) => {
   return plain && typeof plain === "object" ? plain : {};
 };
 
+const getFullSizeEtsyImageUrl = (src) => {
+  if (typeof src !== "string") return src;
+  return src.replace(/il_\d+x(?:N|\d+)/, "il_fullxfull");
+};
+
 const toIsoDateStringOrNull = (value) => {
   if (!value) return null;
   const date = value instanceof Date ? value : new Date(value);
@@ -255,6 +260,28 @@ const serializeForPlatform = (value) => {
     );
   }
   return value;
+};
+
+const normalizePlatformOrderImageUrls = (order) => {
+  if (!order || typeof order !== "object") return order;
+  return {
+    ...order,
+    items: Array.isArray(order.items)
+      ? order.items.map((item) => ({
+          ...item,
+          ...(Object.prototype.hasOwnProperty.call(item, "baseImageUrl")
+            ? { baseImageUrl: getFullSizeEtsyImageUrl(item.baseImageUrl || "") }
+            : {}),
+          baseImage:
+            item.baseImage && typeof item.baseImage === "object"
+              ? {
+                  ...item.baseImage,
+                  imageUrl: getFullSizeEtsyImageUrl(item.baseImage.imageUrl || ""),
+                }
+              : item.baseImage,
+        }))
+      : order.items,
+  };
 };
 
 const toSafeFulfillmentSummary = (data, fallbackSuccess = true) => {
@@ -1074,7 +1101,7 @@ const pushPlatformOrders = async (req, res) => {
     }
 
     const payload = {
-      data: orders.map(serializeForPlatform),
+      data: orders.map((order) => normalizePlatformOrderImageUrls(serializeForPlatform(order))),
     };
 
     const platformResponse = await axios.post(
