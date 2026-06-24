@@ -3654,6 +3654,85 @@ const recordEtsyFulfillmentPlatformV2Success = async ({ orders, fulfillment, req
     );
 };
 
+const pushEtsyOrdersToFulfillmentPlatformV2 = async ({ orders, req }) => {
+    const apiBaseUrl = String(process.env.FULFILLMENT_API_BASE_URL || "").trim();
+    const tenantApiKey = String(process.env.FULFILLMENT_TENANT_API_KEY || "").trim();
+    const timeoutMs = Number(process.env.FULFILLMENT_API_TIMEOUT_MS || 30000);
+
+    if (!apiBaseUrl || !tenantApiKey) {
+        const err = new Error("Fulfillment Platform configuration is missing");
+        err.status = 500;
+        throw err;
+    }
+
+    const payload = { data: orders.map(serializeEtsyOrderForFulfillmentPlatform) };
+    const payloadErrors = [];
+    payload.data.forEach((order, orderIndex) => {
+        if (!String(order.orderId || "").trim()) {
+            payloadErrors.push({
+                field: `data[${orderIndex}].orderId`,
+                message: "orderId is required",
+            });
+        }
+        order.items.forEach((item, itemIndex) => {
+            if (!String(item.orderItemId || "").trim()) {
+                payloadErrors.push({
+                    field: `data[${orderIndex}].items[${itemIndex}].orderItemId`,
+                    message: "orderItemId is required",
+                });
+            }
+        });
+    });
+    if (payloadErrors.length > 0) {
+        const err = new Error("Invalid Fulfillment Platform v2 payload");
+        err.status = 400;
+        err.errors = payloadErrors;
+        throw err;
+    }
+
+    console.info(
+        "[EtsyQC][pushPlatformOrders] payload preview",
+        buildFulfillmentPlatformPayloadPreview(payload)
+    );
+
+    try {
+        const platformResponse = await axios.post(
+            buildFulfillmentPlatformUrl(apiBaseUrl),
+            payload,
+            {
+                headers: {
+                    "Content-Type": "application/json",
+                    Authorization: `Bearer ${tenantApiKey}`,
+                },
+                timeout: Number.isFinite(timeoutMs) ? timeoutMs : 30000,
+            }
+        );
+
+        const fulfillment = toSafeFulfillmentSummary(platformResponse?.data, true);
+        await recordEtsyFulfillmentPlatformV2Success({ orders, fulfillment, req });
+        return { fulfillment };
+    } catch (err) {
+        const fulfillment = err.response
+            ? toSafeFulfillmentSummary(err.response.data, false)
+            : toSafeFulfillmentSummary(
+                {
+                    success: false,
+                    errorsCount: 1,
+                    errors: [{ message: err.message || "Fulfillment Platform request failed" }],
+                },
+                false
+            );
+
+        await recordEtsyFulfillmentPlatformV2Failure(orders, fulfillment);
+
+        const wrapped = new Error("Failed to push Etsy orders to Fulfillment Platform");
+        wrapped.status = err.response?.status || err.status || 502;
+        wrapped.fulfillment = fulfillment;
+        wrapped.errors = err.errors;
+        throw wrapped;
+    }
+};
+
 const getRequester = (req) => ({
     userId: req.user?.userId || req.user?.id || req.user?._id || "",
     role: req.user?.role,
@@ -3880,6 +3959,27 @@ async function sendEtsyOrderToVendor({ order, provider, req, previousOverallStat
         err.providerKey = providerKey;
         throw err;
     }
+}
+
+async function sendEtsyReadyOrderAfterQc({ order, req }) {
+    const resolved = await resolveEtsyProviderFromOrder(order);
+    const providerKey = resolved.providerKey || "";
+
+    if (providerKey === "lng") {
+        const result = await pushEtsyOrdersToFulfillmentPlatformV2({
+            orders: [order],
+            req,
+        });
+        return { mode: "platform", fulfillment: result.fulfillment };
+    }
+
+    const result = await sendEtsyOrderToVendor({
+        order,
+        provider: providerKey,
+        req,
+        previousOverallStatus: "Ready",
+    });
+    return { mode: "vendor", ...result };
 }
 
 const buildEtsyScalePipeline = (req, activeStatuses, options = {}) => {
@@ -4526,7 +4626,7 @@ const uploadEtsyFulfillmentFileForItem = [
 const confirmEtsyScaleForItem = async (req, res) => {
     try {
         const { transactionId } = req.params;
-        const { decision, note, provider } = req.body || {};
+        const { decision, note } = req.body || {};
         const user = req.user;
         const d = String(decision || "").toLowerCase();
         if (!["approve", "reject"].includes(d)) {
@@ -4660,12 +4760,19 @@ const confirmEtsyScaleForItem = async (req, res) => {
             await order.save();
 
             try {
-                const result = await sendEtsyOrderToVendor({
+                const result = await sendEtsyReadyOrderAfterQc({
                     order,
-                    provider,
                     req,
-                    previousOverallStatus: "Ready",
                 });
+
+                if (result.mode === "platform") {
+                    return res.json({
+                        message: "Approved and pushed Etsy order to Fulfillment Platform v2.",
+                        item_scale_status: item.scale_status,
+                        order_scale_overall_status: order.scale_overall_status,
+                        fulfillment: result.fulfillment,
+                    });
+                }
 
                 return res.json({
                     message: result.alreadySent
@@ -4688,8 +4795,10 @@ const confirmEtsyScaleForItem = async (req, res) => {
                 return res.status(err.status || 502).json({
                     message: err.providerKey
                         ? `Approved but sending Etsy order to ${err.providerKey} failed. Overall status set to Failed.`
-                        : err.message,
+                        : "Approved but pushing/sending Etsy order failed.",
                     error: err.message,
+                    fulfillment: err.fulfillment,
+                    errors: err.errors,
                     hint: err.hint,
                 });
             }
@@ -5290,16 +5399,7 @@ const retrySendEtsyFulfillment = async (req, res) => {
 };
 
 const pushEtsyPlatformOrders = async (req, res) => {
-    const apiBaseUrl = String(process.env.FULFILLMENT_API_BASE_URL || "").trim();
-    const tenantApiKey = String(process.env.FULFILLMENT_TENANT_API_KEY || "").trim();
-    const timeoutMs = Number(process.env.FULFILLMENT_API_TIMEOUT_MS || 30000);
     let orders = [];
-
-    if (!apiBaseUrl || !tenantApiKey) {
-        return res.status(500).json({
-            message: "Fulfillment Platform configuration is missing",
-        });
-    }
 
     const orderIds = normalizeOrderIds(req.body?.orderIds);
     if (!orderIds) {
@@ -5366,54 +5466,8 @@ const pushEtsyPlatformOrders = async (req, res) => {
             });
         }
 
-        const payload = {
-            data: orders.map(serializeEtsyOrderForFulfillmentPlatform),
-        };
-        const payloadErrors = [];
-        payload.data.forEach((order, orderIndex) => {
-            if (!String(order.orderId || "").trim()) {
-                payloadErrors.push({
-                    field: `data[${orderIndex}].orderId`,
-                    message: "orderId is required",
-                });
-            }
-            order.items.forEach((item, itemIndex) => {
-                if (!String(item.orderItemId || "").trim()) {
-                    payloadErrors.push({
-                        field: `data[${orderIndex}].items[${itemIndex}].orderItemId`,
-                        message: "orderItemId is required",
-                    });
-                }
-            });
-        });
-        if (payloadErrors.length > 0) {
-            return res.status(400).json({
-                message: "Invalid Fulfillment Platform v2 payload",
-                errors: payloadErrors,
-            });
-        }
-
-        console.info(
-            "[EtsyQC][pushPlatformOrders] payload preview",
-            buildFulfillmentPlatformPayloadPreview(payload)
-        );
-
-        const platformResponse = await axios.post(
-            buildFulfillmentPlatformUrl(apiBaseUrl),
-            payload,
-            {
-                headers: {
-                    "Content-Type": "application/json",
-                    Authorization: `Bearer ${tenantApiKey}`,
-                },
-                timeout: Number.isFinite(timeoutMs) ? timeoutMs : 30000,
-            }
-        );
-
-        const fulfillment = toSafeFulfillmentSummary(platformResponse?.data, true);
-        await recordEtsyFulfillmentPlatformV2Success({
+        const { fulfillment } = await pushEtsyOrdersToFulfillmentPlatformV2({
             orders,
-            fulfillment,
             req,
         });
 
@@ -5424,31 +5478,11 @@ const pushEtsyPlatformOrders = async (req, res) => {
             fulfillment,
         });
     } catch (err) {
-        if (err.response) {
-            const fulfillment = toSafeFulfillmentSummary(err.response.data, false);
-            await recordEtsyFulfillmentPlatformV2Failure(orders, fulfillment);
-
-            return res.status(err.response.status || 502).json({
-                message: "Failed to push Etsy orders to Fulfillment Platform",
-                attemptedCount: orderIds.length,
-                fulfillment,
-            });
-        }
-
-        const fulfillment = toSafeFulfillmentSummary(
-            {
-                success: false,
-                errorsCount: 1,
-                errors: [{ message: err.message || "Fulfillment Platform request failed" }],
-            },
-            false
-        );
-        await recordEtsyFulfillmentPlatformV2Failure(orders, fulfillment);
-
-        return res.status(502).json({
-            message: "Failed to push Etsy orders to Fulfillment Platform",
+        return res.status(err.status || 502).json({
+            message: err.message || "Failed to push Etsy orders to Fulfillment Platform",
             attemptedCount: orderIds.length,
-            fulfillment,
+            fulfillment: err.fulfillment,
+            errors: err.errors,
         });
     }
 };

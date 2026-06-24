@@ -1,5 +1,6 @@
 jest.mock('../../models', () => ({
   EtsyOrder: { findOne: jest.fn(), aggregate: jest.fn() },
+  vendorProduct: { find: jest.fn() },
   user: {},
   role: {},
   shop: {},
@@ -10,7 +11,10 @@ jest.mock('../../service/cloudflareR2/r2.service', () => ({
   uploadFilePathToR2: jest.fn(),
 }));
 
-jest.mock('../../service/fulfillment', () => ({}));
+jest.mock('../../service/fulfillment', () => ({
+  PROVIDERS: [{ key: 'lng' }, { key: 'merchize' }],
+  send: jest.fn(),
+}));
 
 jest.mock('../../service/orderHistoryLogger', () => ({
   logOrderHistory: jest.fn().mockResolvedValue(undefined),
@@ -21,7 +25,13 @@ jest.mock('../../service/etsyTrackingResponse.service', () => ({
   buildEtsyTrackingSummary: jest.fn(),
 }));
 
+jest.mock('axios', () => ({
+  post: jest.fn(),
+}));
+
+const axios = require('axios');
 const db = require('../../models');
+const FulfillmentService = require('../../service/fulfillment');
 const { logOrderHistory } = require('../../service/orderHistoryLogger');
 const controller = require('../etsyOrder.controller');
 
@@ -29,6 +39,15 @@ function makeRes() {
   const res = { status: jest.fn(), json: jest.fn() };
   res.status.mockReturnValue(res);
   return res;
+}
+
+function mockVendorProvider(name, fulfillmentType = name) {
+  const lean = jest.fn().mockResolvedValue([
+    { vendor_id: { name, fulfillment_type: fulfillmentType, status: 'active' } },
+  ]);
+  const populate = jest.fn().mockReturnValue({ lean });
+  const select = jest.fn().mockReturnValue({ populate });
+  db.vendorProduct.find.mockReturnValue({ select });
 }
 
 describe('resetBaseCostForEtsyOrder', () => {
@@ -406,6 +425,134 @@ describe('retrySendEtsyFulfillment', () => {
       message: 'Cannot retry vendor send for order status Shipped',
       status: 'Shipped',
     });
+  });
+});
+
+describe('confirmEtsyScaleForItem', () => {
+  const originalEnv = { ...process.env };
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    process.env = {
+      ...originalEnv,
+      FULFILLMENT_API_BASE_URL: 'https://fulfillment.example',
+      FULFILLMENT_TENANT_API_KEY: 'tenant-key',
+      FULFILLMENT_API_TIMEOUT_MS: '15000',
+    };
+  });
+
+  afterAll(() => {
+    process.env = originalEnv;
+  });
+
+  test('auto pushes LNG orders to the same fulfillment platform flow when QC approval makes order ready', async () => {
+    axios.post.mockResolvedValue({
+      data: { success: true, received: 1, inserted: 1, updated: 0, skipped: 0 },
+    });
+    mockVendorProvider('LNG Group', 'lng');
+
+    const save = jest.fn().mockResolvedValue(true);
+    const markModified = jest.fn();
+    const order = {
+      _id: 'etsy-oid-1',
+      orderId: 'ETSY-1001',
+      status: 'New',
+      scale_overall_status: 'Pending',
+      shopId: { _id: 'shop-1', name: 'Etsy Shop' },
+      buyer: { email: 'buyer@example.com', fullName: 'Jane Doe' },
+      shipping: { name: 'Jane Doe', address1: '1 Main', city: 'Austin', state: 'TX', zipcode: '73301', country: 'US' },
+      items: [
+        {
+          transactionId: 't1',
+          scale_status: 'Pending',
+          fulfillment_file: { front: 'https://cdn/front.png' },
+          cost_breakdown: { matchedSku: 'LNG-SKU', vendorProductId: '507f1f77bcf86cd799439011' },
+        },
+      ],
+      markModified,
+      save,
+    };
+    db.EtsyOrder.findOne.mockResolvedValue(order);
+
+    const req = {
+      params: { orderId: 'ETSY-1001', transactionId: 't1' },
+      query: {},
+      body: { decision: 'approve' },
+      user: { _id: 'u1', email: 'cs@example.com' },
+      ip: '127.0.0.1',
+      headers: { 'user-agent': 'jest' },
+    };
+    const res = makeRes();
+
+    await controller.confirmEtsyScaleForItem(req, res);
+
+    expect(axios.post).toHaveBeenCalledWith(
+      'https://fulfillment.example/api/portal/orders',
+      expect.objectContaining({
+        data: [expect.objectContaining({ orderId: 'ETSY-1001', sourceChannel: 'ETSY' })],
+      }),
+      expect.objectContaining({
+        headers: expect.objectContaining({ Authorization: 'Bearer tenant-key' }),
+        timeout: 15000,
+      })
+    );
+    expect(order.scale_overall_status).toBe('Sent');
+    expect(order.status).toBe('Fulfilled');
+    expect(FulfillmentService.send).not.toHaveBeenCalled();
+    expect(res.json).toHaveBeenCalledWith(expect.objectContaining({
+      message: 'Approved and pushed Etsy order to Fulfillment Platform v2.',
+      order_scale_overall_status: 'Sent',
+      fulfillment: expect.objectContaining({ success: true }),
+    }));
+  });
+
+  test('auto sends Merchize orders through the vendor provider when QC approval makes order ready', async () => {
+    mockVendorProvider('Merchize', 'merchize');
+    FulfillmentService.send.mockResolvedValue({
+      alreadySent: false,
+      vendorKey: 'merchize',
+      response: { ok: true },
+    });
+
+    const save = jest.fn().mockResolvedValue(true);
+    const markModified = jest.fn();
+    const order = {
+      _id: 'etsy-oid-2',
+      orderId: 'ETSY-2002',
+      status: 'New',
+      scale_overall_status: 'Pending',
+      items: [
+        {
+          transactionId: 't1',
+          scale_status: 'Pending',
+          fulfillment_file: { front: 'https://cdn/front.png' },
+          cost_breakdown: { matchedSku: 'MZ-SKU', vendorProductId: '507f1f77bcf86cd799439012' },
+        },
+      ],
+      markModified,
+      save,
+    };
+    db.EtsyOrder.findOne.mockResolvedValue(order);
+
+    const req = {
+      params: { orderId: 'ETSY-2002', transactionId: 't1' },
+      query: {},
+      body: { decision: 'approve' },
+      user: { _id: 'u1', email: 'cs@example.com' },
+      ip: '127.0.0.1',
+      headers: { 'user-agent': 'jest' },
+    };
+    const res = makeRes();
+
+    await controller.confirmEtsyScaleForItem(req, res);
+
+    expect(axios.post).not.toHaveBeenCalled();
+    expect(FulfillmentService.send).toHaveBeenCalledWith(order, 'merchize');
+    expect(res.json).toHaveBeenCalledWith(expect.objectContaining({
+      message: 'Approved and Etsy order sent to merchize.',
+      submission_vendor: 'merchize',
+      submission_response: { ok: true },
+    }));
   });
 });
 
