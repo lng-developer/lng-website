@@ -1,6 +1,52 @@
 // services/fulfillment/providers/printway.js
 const axios = require("axios");
 
+let cachedAccessToken = "";
+
+const getEnv = (name) => String(process.env[name] || "").trim();
+
+async function loginPrintway() {
+    const email = getEnv("PRINTWAY_EMAIL");
+    const password = getEnv("PRINTWAY_PASSWORD");
+    if (!email || !password) return "";
+
+    const endpoint =
+        getEnv("PRINTWAY_AUTH_ENDPOINT") ||
+        "https://api.printway.io/cdn/api/auth/v1/token";
+
+    const resp = await axios.post(endpoint, { email, password }, {
+        headers: { "Content-Type": "application/json" },
+    });
+    const token = resp?.data?.result?.access_token || "";
+    if (token) cachedAccessToken = token;
+    return token;
+}
+
+async function getAccessToken({ forceLogin = false } = {}) {
+    if (!forceLogin && cachedAccessToken) return cachedAccessToken;
+    if (!forceLogin && getEnv("PRINTWAY_ACCESS_TOKEN")) return getEnv("PRINTWAY_ACCESS_TOKEN");
+    return loginPrintway();
+}
+
+async function postPrintway(endpoint, payload, token) {
+    try {
+        return await axios.post(endpoint, payload, {
+            headers: {
+                "Content-Type": "application/json",
+                "pw-access-token": token,
+            },
+        });
+    } catch (e) {
+        const status = e?.response?.status;
+        const data = e?.response?.data;
+        const err = new Error(`Printway request failed: status=${status || "unknown"}, message=${data?.message || e.message}`);
+        err.status = status;
+        err.code = status === 401 ? "PRINTWAY_AUTH_FAILED" : "PRINTWAY_REQUEST_FAILED";
+        err.vendorResponse = data;
+        throw err;
+    }
+}
+
 function splitName(full = "") {
     const name = String(full || "").trim();
     if (!name) return { firstName: "", lastName: "" };
@@ -261,17 +307,28 @@ async function send(orderDoc) {
         process.env.PRINTWAY_ENDPOINT ||
         "https://api.printway.io/cdn/api/orders/v3/create";
 
-    const headers = {
-        "Content-Type": "application/json",
-        "pw-access-token": process.env.PRINTWAY_ACCESS_TOKEN,
-    };
+    let accessToken = await getAccessToken();
+    if (!accessToken) {
+        const err = new Error("Missing PRINTWAY_ACCESS_TOKEN or PRINTWAY_EMAIL/PRINTWAY_PASSWORD in environment");
+        err.code = "PRINTWAY_MISSING_AUTH";
+        throw err;
+    }
 
     // Log đầy đủ
     console.log("[PRINTWAY] Create order endpoint:", createEndpoint);
     console.log("[PRINTWAY] Sending payload:", JSON.stringify(payload, null, 2));
 
     // Create order
-    const resp = await axios.post(createEndpoint, payload, { headers });
+    let resp;
+    try {
+        resp = await postPrintway(createEndpoint, payload, accessToken);
+    } catch (err) {
+        if (err.status !== 401) throw err;
+        const refreshedToken = await getAccessToken({ forceLogin: true });
+        if (!refreshedToken || refreshedToken === accessToken) throw err;
+        accessToken = refreshedToken;
+        resp = await postPrintway(createEndpoint, payload, accessToken);
+    }
     const body = resp?.data;
 
     if (!body || typeof body !== "object") {
@@ -299,7 +356,10 @@ async function send(orderDoc) {
         try {
             payResult = await payOrder(
                 pwOrderId,
-                headers,
+                {
+                    "Content-Type": "application/json",
+                    "pw-access-token": accessToken,
+                },
                 process.env.PRINTWAY_PAID_ENDPOINT
             );
         } catch (e) {

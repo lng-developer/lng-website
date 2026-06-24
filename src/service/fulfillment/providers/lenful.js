@@ -564,8 +564,9 @@ function parseResponseForLenful(body) {
 
     const externalId = pickExternalId(body) || extractOrderNumberFromMessage(msg);
 
-    if (typeof body?.success === "boolean") {
-        if (body.success) {
+    if (typeof body?.success === "boolean" || typeof body?.status === "boolean") {
+        const isSuccess = body.success === true || body.status === true;
+        if (isSuccess) {
             return {
                 ok: true,
                 externalId,
@@ -603,6 +604,14 @@ function parseResponseForLenful(body) {
             ok: true,
             externalId: externalId || body.order_number || body.orderNo || body.id || null,
             normalized: { message: msg || "OK (soft)", data: body, soft: true },
+        };
+    }
+
+    if (externalId && /\bsuccess\b/i.test(msg)) {
+        return {
+            ok: true,
+            externalId,
+            normalized: { success: true, message: msg, data: body, soft: true },
         };
     }
 
@@ -702,5 +711,6 @@ module.exports = {
         buildDesigns,
         buildEmbroidereds,
         buildMockups,
+        parseResponseForLenful,
     },
 };

@@ -118,6 +118,12 @@ router.post(
     authorizeRoles("Customer Service", "Admin", "Seller"),
     etsyOrderController.retrySendEtsyFulfillment
 );
+router.patch(
+    '/:orderId/scale/reopen-qc',
+    authenticateToken,
+    authorizeRoles("Customer Service", "Admin", "Seller", "Design Leader"),
+    etsyOrderController.reopenEtsyQc
+);
 router.put(
     '/:orderId/items/:transactionId/cs-note',
     authenticateToken,

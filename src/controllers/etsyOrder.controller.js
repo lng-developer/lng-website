@@ -3331,7 +3331,7 @@ const ETSY_SCALE_KNOWN = [
 ];
 
 const ETSY_SCALE_ACTIVE = ["Need Scale", "Pending", "Sent", "QC Rejected"];
-const ETSY_QC_ACTIVE = ["Pending", "Sent", "QC Rejected", "Ready", "Address Invalid"];
+const ETSY_QC_ACTIVE = ["Pending", "Sent", "QC Rejected", "Ready", "Failed", "Address Invalid"];
 
 const hasRole = (userRole, target) => {
     if (!userRole) return false;
@@ -3371,6 +3371,34 @@ const toPlainFulfillmentFile = (value) => {
 };
 
 const hasAnyFulfillmentFile = (value) => Object.values(toPlainFulfillmentFile(value)).some(Boolean);
+
+const buildEtsyVendorFailure = (order) => {
+    const submissions = order?.vendor_submissions || {};
+    for (const [provider, submission] of Object.entries(submissions)) {
+        if (!submission || submission.sent === true) continue;
+        const response = submission.last_response || {};
+        const error = response.error || response.message || "";
+        if (!error) continue;
+        return {
+            provider,
+            error,
+            attempt_count: submission.attempt_count || 0,
+            at: response.at || submission.sent_at || null,
+        };
+    }
+
+    const grabink = order?.grabink_submission;
+    if (grabink?.sent === false && grabink?.last_response?.error) {
+        return {
+            provider: "grabink",
+            error: grabink.last_response.error,
+            attempt_count: grabink.attempt_count || 0,
+            at: grabink.last_response.at || grabink.sent_at || null,
+        };
+    }
+
+    return null;
+};
 
 const normalizeOrderIds = (rawOrderIds) => {
     if (!Array.isArray(rawOrderIds) || rawOrderIds.length === 0) return null;
@@ -3813,7 +3841,7 @@ async function sendEtsyOrderToVendor({ order, provider, req, previousOverallStat
             ...(prev || {}),
             sent: false,
             attempt_count: (prev?.attempt_count || 0) + 1,
-            last_response: { error: err.message, at: new Date() },
+            last_response: { error: err.message, vendorResponse: err.vendorResponse || null, at: new Date() },
         };
 
         order.vendor_submissions = order.vendor_submissions || {};
@@ -3865,6 +3893,12 @@ const buildEtsyScalePipeline = (req, activeStatuses, options = {}) => {
         cs_assignee_id = "",
         cs_assignment_status = "",
         sellerId,
+        vendor,
+        failureReason,
+        orderStatus,
+        scaleBy,
+        qcBy,
+        hasScaleFile,
     } = req.query;
 
     const { userId, role } = getRequester(req);
@@ -3872,12 +3906,18 @@ const buildEtsyScalePipeline = (req, activeStatuses, options = {}) => {
     const isCS = hasRole(role, "Customer Service");
     const restrictCsToAssigned = options.restrictCsToAssigned === true;
 
-    const matchStage = {
-        status: { $nin: ["Canceled", "Cancelled"] },
-    };
+    const matchStage = {};
+    if (orderStatus && String(orderStatus).trim() && !/^all$/i.test(String(orderStatus).trim())) {
+        matchStage.status = String(orderStatus).trim();
+    } else {
+        matchStage.status = { $nin: ["Canceled", "Cancelled"] };
+    }
     if (from && to) matchStage.createdAt = { $gte: new Date(from), $lte: new Date(to) };
     if (isSellerOnly && mongoose.Types.ObjectId.isValid(userId)) {
         matchStage["seller.sellerId"] = new mongoose.Types.ObjectId(userId);
+    }
+    if (scaleBy && mongoose.Types.ObjectId.isValid(scaleBy)) {
+        matchStage.scaleId = new mongoose.Types.ObjectId(scaleBy);
     }
     if (restrictCsToAssigned && isCS && mongoose.Types.ObjectId.isValid(userId)) {
         matchStage.csAssigneeId = new mongoose.Types.ObjectId(userId);
@@ -3967,11 +4007,110 @@ const buildEtsyScalePipeline = (req, activeStatuses, options = {}) => {
             },
         });
     }
-    if (cs_assignee_id && mongoose.Types.ObjectId.isValid(cs_assignee_id)) {
-        pipeline.push({ $match: { csAssigneeId: new mongoose.Types.ObjectId(cs_assignee_id) } });
+    const qcAssigneeId = qcBy || cs_assignee_id;
+    if (qcAssigneeId && mongoose.Types.ObjectId.isValid(qcAssigneeId)) {
+        pipeline.push({ $match: { csAssigneeId: new mongoose.Types.ObjectId(qcAssigneeId) } });
     }
     if (cs_assignment_status && String(cs_assignment_status).trim()) {
         pipeline.push({ $match: { cs_assignment_status: String(cs_assignment_status).trim() } });
+    }
+
+    if (vendor && String(vendor).trim()) {
+        const vendorPattern = escapeRegExp(String(vendor).trim());
+        pipeline.push(
+            {
+                $addFields: {
+                    vendorProductObjectIds: {
+                        $filter: {
+                            input: {
+                                $map: {
+                                    input: { $ifNull: ["$items", []] },
+                                    as: "it",
+                                    in: {
+                                        $convert: {
+                                            input: "$$it.cost_breakdown.vendorProductId",
+                                            to: "objectId",
+                                            onError: null,
+                                            onNull: null,
+                                        },
+                                    },
+                                },
+                            },
+                            as: "id",
+                            cond: { $ne: ["$$id", null] },
+                        },
+                    },
+                },
+            },
+            {
+                $lookup: {
+                    from: "vendorproducts",
+                    localField: "vendorProductObjectIds",
+                    foreignField: "_id",
+                    as: "itemVendorProducts",
+                },
+            },
+            {
+                $lookup: {
+                    from: "vendors",
+                    localField: "itemVendorProducts.vendor_id",
+                    foreignField: "_id",
+                    as: "itemVendors",
+                },
+            },
+            {
+                $lookup: {
+                    from: "vendors",
+                    localField: "forced_vendor_id",
+                    foreignField: "_id",
+                    as: "forcedVendor",
+                },
+            },
+            {
+                $addFields: {
+                    vendor_filter_values: {
+                        $setUnion: [
+                            {
+                                $map: {
+                                    input: { $ifNull: ["$itemVendors", []] },
+                                    as: "v",
+                                    in: "$$v.name",
+                                },
+                            },
+                            {
+                                $map: {
+                                    input: { $ifNull: ["$itemVendors", []] },
+                                    as: "v",
+                                    in: "$$v.fulfillment_type",
+                                },
+                            },
+                            {
+                                $map: {
+                                    input: { $ifNull: ["$forcedVendor", []] },
+                                    as: "v",
+                                    in: "$$v.name",
+                                },
+                            },
+                            {
+                                $map: {
+                                    input: { $ifNull: ["$forcedVendor", []] },
+                                    as: "v",
+                                    in: "$$v.fulfillment_type",
+                                },
+                            },
+                            {
+                                $map: {
+                                    input: { $objectToArray: { $ifNull: ["$vendor_submissions", {}] } },
+                                    as: "sub",
+                                    in: "$$sub.k",
+                                },
+                            },
+                        ],
+                    },
+                },
+            },
+            { $match: { vendor_filter_values: { $elemMatch: { $regex: vendorPattern, $options: "i" } } } }
+        );
     }
 
     pipeline.push({
@@ -3991,8 +4130,79 @@ const buildEtsyScalePipeline = (req, activeStatuses, options = {}) => {
                     in: { $cond: [{ $in: ["$$s", ETSY_SCALE_KNOWN] }, "$$s", "Other"] },
                 },
             },
+            allItemsHaveScaleFile: {
+                $let: {
+                    vars: { orderItems: { $ifNull: ["$items", []] } },
+                    in: {
+                        $and: [
+                            { $gt: [{ $size: "$$orderItems" }, 0] },
+                            {
+                                $allElementsTrue: {
+                                    $map: {
+                                        input: "$$orderItems",
+                                        as: "it",
+                                        in: {
+                                            $gt: [
+                                                {
+                                                    $size: {
+                                                        $filter: {
+                                                            input: { $objectToArray: { $ifNull: ["$$it.fulfillment_file", {}] } },
+                                                            as: "ff",
+                                                            cond: {
+                                                                $and: [
+                                                                    { $ne: ["$$ff.v", null] },
+                                                                    { $ne: ["$$ff.v", ""] },
+                                                                ],
+                                                            },
+                                                        },
+                                                    },
+                                                },
+                                                0,
+                                            ],
+                                        },
+                                    },
+                                },
+                            },
+                        ],
+                    },
+                },
+            },
+            vendor_failure_errors: {
+                $filter: {
+                    input: {
+                        $map: {
+                            input: { $objectToArray: { $ifNull: ["$vendor_submissions", {}] } },
+                            as: "sub",
+                            in: "$$sub.v.last_response.error",
+                        },
+                    },
+                    as: "error",
+                    cond: {
+                        $and: [
+                            { $ne: ["$$error", null] },
+                            { $ne: ["$$error", ""] },
+                        ],
+                    },
+                },
+            },
         },
     });
+
+    if (failureReason && String(failureReason).trim()) {
+        const failurePattern = escapeRegExp(String(failureReason).trim());
+        pipeline.push({
+            $match: {
+                vendor_failure_errors: {
+                    $elemMatch: { $regex: failurePattern, $options: "i" },
+                },
+            },
+        });
+    }
+
+    const hasScaleFileValue = String(hasScaleFile || "").trim().toLowerCase();
+    if (["true", "false"].includes(hasScaleFileValue)) {
+        pipeline.push({ $match: { allItemsHaveScaleFile: hasScaleFileValue === "true" } });
+    }
 
     let onlyPending = false;
     if (scale_status && String(scale_status).trim()) {
@@ -4110,6 +4320,7 @@ const mapEtsyScaleOrder = (order, { vendorProductDisplayMap = new Map() } = {}) 
     address_validation_status: order.address_validation?.status || null,
     address_validation_detail: order.address_validation || null,
     scale_overall_status: order.scale_overall_status || "Need Scale",
+    vendor_failure: buildEtsyVendorFailure(order),
     scaledBy: order.scaledBy
         ? { _id: order.scaledBy._id, full_name: order.scaledBy.full_name, email: order.scaledBy.email }
         : null,
@@ -4233,7 +4444,7 @@ const getEtsyQCStatistics = async (req, res) => {
             "Address Invalid": c["Address Invalid"] || 0,
             Other: c.Other || 0,
         };
-        counts.All = counts.Pending + counts.Sent + counts["QC Rejected"] + counts.Ready + counts["Address Invalid"];
+        counts.All = counts.Pending + counts.Sent + counts["QC Rejected"] + counts.Ready + counts.Failed + counts["Address Invalid"];
         return res.json({ overall: { totalOrders: counts.All, counts } });
     } catch (err) {
         return res.status(500).json({ message: "Failed to retrieve Etsy QC statistics", error: err.message });
@@ -4876,6 +5087,105 @@ const resetEtsyScaleForOrdersBulk = async (req, res) => {
     }
 };
 
+const reopenEtsyQc = async (req, res) => {
+    try {
+        const order = await EtsyOrder.findOne(buildEtsyOrderLookup(req));
+        if (!order) return res.status(404).json({ message: "Etsy order not found" });
+
+        const accessError = ensureSellerCanAccessEtsyOrder(req, order);
+        if (accessError) return res.status(accessError.startsWith("Invalid") ? 400 : 403).json({ message: accessError });
+
+        const orderStatus = String(order.status || "").trim();
+        if (["Shipped", "Cancelled", "Canceled", "Fulfilled"].includes(orderStatus)) {
+            return res.status(409).json({
+                message: `Cannot reopen QC for order status ${orderStatus}`,
+                status: orderStatus,
+            });
+        }
+
+        const previousOverallStatus = order.scale_overall_status || "Need Scale";
+        if (!["Failed", "Ready"].includes(previousOverallStatus)) {
+            return res.status(409).json({
+                message: "Only Etsy orders with scale_overall_status Failed or Ready can be reopened for QC",
+                scale_overall_status: previousOverallStatus,
+            });
+        }
+
+        const items = Array.isArray(order.items) ? order.items : [];
+        if (items.length === 0) {
+            return res.status(409).json({ message: "Cannot reopen QC because this Etsy order has no items" });
+        }
+
+        const notCompleteItems = items
+            .filter((item) => String(item?.scale_status || "").trim() !== "Complete")
+            .map((item) => item?.transactionId || item?.orderItemId || "");
+        if (notCompleteItems.length > 0) {
+            return res.status(409).json({
+                message: "Cannot reopen QC because not all items are Complete",
+                items: notCompleteItems,
+            });
+        }
+
+        const missingFileItems = items
+            .filter((item) => !hasAnyFulfillmentFile(item?.fulfillment_file))
+            .map((item) => item?.transactionId || item?.orderItemId || "");
+        if (missingFileItems.length > 0) {
+            return res.status(409).json({
+                message: "Cannot reopen QC because some items are missing scale files",
+                items: missingFileItems,
+            });
+        }
+
+        const previousItems = items.map((item) => ({
+            transactionId: item?.transactionId || item?.orderItemId || "",
+            scale_status: item?.scale_status || "Need Scale",
+            fulfillment_file: toPlainFulfillmentFile(item?.fulfillment_file),
+        }));
+
+        for (const item of items) {
+            item.scale_status = "Pending";
+        }
+        order.scale_overall_status = "Pending";
+        order.markModified("items");
+        await order.save();
+
+        await logOrderHistory({
+            orderDoc: order,
+            action: "UPDATE_SCALE_STATUS",
+            description: "Etsy order reopened for QC without clearing scale files",
+            changes: [
+                { field: "scale_overall_status", from: previousOverallStatus, to: "Pending" },
+                {
+                    field: "items.scale_status",
+                    from: previousItems,
+                    to: items.map((item) => ({
+                        transactionId: item?.transactionId || item?.orderItemId || "",
+                        scale_status: item?.scale_status || "Need Scale",
+                        fulfillment_file: toPlainFulfillmentFile(item?.fulfillment_file),
+                    })),
+                },
+            ],
+            user: req.user,
+            context: {
+                source: "PORTAL",
+                ip: req.ip,
+                userAgent: req.headers["user-agent"],
+            },
+        });
+
+        return res.json({
+            message: "Etsy order reopened for QC",
+            orderId: order.orderId,
+            scale_overall_status: order.scale_overall_status,
+        });
+    } catch (error) {
+        return res.status(500).json({
+            message: "Failed to reopen Etsy order for QC",
+            error: error.message,
+        });
+    }
+};
+
 const retrySendEtsyFulfillment = async (req, res) => {
     try {
         const order = await EtsyOrder.findOne(buildEtsyOrderLookup(req));
@@ -4884,6 +5194,14 @@ const retrySendEtsyFulfillment = async (req, res) => {
         const accessError = ensureSellerCanAccessEtsyOrder(req, order);
         if (accessError) {
             return res.status(accessError.startsWith("Invalid") ? 400 : 403).json({ message: accessError });
+        }
+
+        const orderStatus = String(order.status || "").trim();
+        if (["Shipped", "Cancelled", "Canceled", "Fulfilled"].includes(orderStatus)) {
+            return res.status(409).json({
+                message: `Cannot retry vendor send for order status ${orderStatus}`,
+                status: orderStatus,
+            });
         }
 
         if (isEtsyAddressInvalid(order)) {
@@ -5263,6 +5581,7 @@ module.exports = {
     uploadEtsyFulfillmentFileForItem,
     confirmEtsyScaleForItem,
     retrySendEtsyFulfillment,
+    reopenEtsyQc,
     pushEtsyPlatformOrders,
     resetEtsyScaleForOrdersBulk,
     updateEtsyOrderItemQuantity,

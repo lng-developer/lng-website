@@ -1,5 +1,5 @@
 jest.mock('../../models', () => ({
-  EtsyOrder: { findOne: jest.fn() },
+  EtsyOrder: { findOne: jest.fn(), aggregate: jest.fn() },
   user: {},
   role: {},
   shop: {},
@@ -235,6 +235,176 @@ describe('resetEtsyScaleForOrdersBulk', () => {
       message: 'Bulk reset completed',
       total: 1,
       results: [{ orderId: 'ETSY-1001', status: 'success', scale_overall_status: 'Need Scale' }],
+    });
+  });
+});
+
+describe('reopenEtsyQc', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
+
+  test('reopens a failed Etsy order for QC while keeping scale files and submissions', async () => {
+    const save = jest.fn().mockResolvedValue(true);
+    const markModified = jest.fn();
+    const fulfillmentFile = new Map([['front', 'https://cdn/front.png']]);
+    const costBreakdown = { matchedSku: 'MZ-SKU' };
+    const vendorSubmissions = {
+      merchize: {
+        sent: false,
+        attempt_count: 1,
+        last_response: { error: 'Request failed with status code 403' },
+      },
+    };
+    const order = {
+      _id: 'etsy-oid-1',
+      orderId: 'ETSY-1001',
+      status: 'New',
+      scale_overall_status: 'Failed',
+      scaleId: 'designer-1',
+      vendor_submissions: vendorSubmissions,
+      items: [
+        {
+          transactionId: 't1',
+          scale_status: 'Complete',
+          qc_note: 'ok',
+          fulfillment_file: fulfillmentFile,
+          cost_breakdown: costBreakdown,
+        },
+      ],
+      markModified,
+      save,
+    };
+    db.EtsyOrder.findOne.mockResolvedValue(order);
+
+    const req = {
+      params: { orderId: 'ETSY-1001' },
+      query: {},
+      body: { reason: 'retry after vendor auth fix' },
+      user: { _id: 'u1', email: 'cs@example.com' },
+      ip: '127.0.0.1',
+      headers: { 'user-agent': 'jest' },
+    };
+    const res = makeRes();
+
+    await controller.reopenEtsyQc(req, res);
+
+    expect(order.status).toBe('New');
+    expect(order.scale_overall_status).toBe('Pending');
+    expect(order.scaleId).toBe('designer-1');
+    expect(order.vendor_submissions).toBe(vendorSubmissions);
+    expect(order.items[0].scale_status).toBe('Pending');
+    expect(order.items[0].fulfillment_file).toBe(fulfillmentFile);
+    expect(order.items[0].cost_breakdown).toBe(costBreakdown);
+    expect(markModified).toHaveBeenCalledWith('items');
+    expect(save).toHaveBeenCalledTimes(1);
+    expect(logOrderHistory).toHaveBeenCalledWith(expect.objectContaining({
+      action: 'UPDATE_SCALE_STATUS',
+      description: 'Etsy order reopened for QC without clearing scale files',
+      changes: expect.arrayContaining([
+        expect.objectContaining({ field: 'scale_overall_status', from: 'Failed', to: 'Pending' }),
+        expect.objectContaining({ field: 'items.scale_status' }),
+      ]),
+    }));
+    expect(res.json).toHaveBeenCalledWith({
+      message: 'Etsy order reopened for QC',
+      orderId: 'ETSY-1001',
+      scale_overall_status: 'Pending',
+    });
+  });
+
+  test('blocks reopen QC for shipped Etsy orders', async () => {
+    db.EtsyOrder.findOne.mockResolvedValue({
+      orderId: 'ETSY-1001',
+      status: 'Shipped',
+      scale_overall_status: 'Failed',
+      items: [{ transactionId: 't1', scale_status: 'Complete', fulfillment_file: { front: 'https://cdn/front.png' } }],
+    });
+
+    const req = {
+      params: { orderId: 'ETSY-1001' },
+      query: {},
+      body: {},
+      user: { _id: 'u1' },
+      ip: '127.0.0.1',
+      headers: { 'user-agent': 'jest' },
+    };
+    const res = makeRes();
+
+    await controller.reopenEtsyQc(req, res);
+
+    expect(res.status).toHaveBeenCalledWith(409);
+    expect(res.json).toHaveBeenCalledWith({
+      message: 'Cannot reopen QC for order status Shipped',
+      status: 'Shipped',
+    });
+  });
+});
+
+describe('getEtsyQCList filters', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
+
+  test('passes advanced QC filters into the aggregation pipeline', async () => {
+    db.EtsyOrder.aggregate
+      .mockResolvedValueOnce([{ total: 0 }])
+      .mockResolvedValueOnce([]);
+
+    const req = {
+      query: {
+        vendor: 'merchize',
+        failureReason: '403',
+        orderStatus: 'New',
+        scaleBy: '68b93ed3f02eed8dec002ee7',
+        qcBy: '68b93ed3f02eed8dec002ee8',
+        hasScaleFile: 'true',
+      },
+      user: { _id: 'u1', role: 'Admin' },
+    };
+    const res = makeRes();
+
+    await controller.getEtsyQCList(req, res);
+
+    const pipelineText = JSON.stringify(db.EtsyOrder.aggregate.mock.calls[0][0]);
+    expect(pipelineText).toContain('merchize');
+    expect(pipelineText).toContain('403');
+    expect(pipelineText).toContain('New');
+    expect(pipelineText).toContain('scaleId');
+    expect(pipelineText).toContain('csAssigneeId');
+    expect(pipelineText).toContain('allItemsHaveScaleFile');
+  });
+});
+
+describe('retrySendEtsyFulfillment', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
+
+  test('blocks retry vendor send for shipped Etsy orders', async () => {
+    db.EtsyOrder.findOne.mockResolvedValue({
+      orderId: 'ETSY-1001',
+      status: 'Shipped',
+      scale_overall_status: 'Failed',
+      items: [{ transactionId: 't1', scale_status: 'Complete', fulfillment_file: { front: 'https://cdn/front.png' } }],
+    });
+
+    const req = {
+      params: { orderId: 'ETSY-1001' },
+      query: { provider: 'lenful' },
+      body: {},
+      user: { _id: 'u1', role: 'Admin' },
+      ip: '127.0.0.1',
+      headers: { 'user-agent': 'jest' },
+    };
+    const res = makeRes();
+
+    await controller.retrySendEtsyFulfillment(req, res);
+
+    expect(res.status).toHaveBeenCalledWith(409);
+    expect(res.json).toHaveBeenCalledWith({
+      message: 'Cannot retry vendor send for order status Shipped',
+      status: 'Shipped',
     });
   });
 });
