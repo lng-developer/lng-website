@@ -1005,6 +1005,7 @@ const getListOrders = async (req, res) => {
             openCase,
             status,
             isNoCostCenter,
+            invalidAddress,
             sortBy = "saleDate",
             sortOrder = "desc",
         } = req.query;
@@ -1066,6 +1067,10 @@ const getListOrders = async (req, res) => {
                 },
                 { status: { $ne: "Cancelled" } },
             ];
+        }
+
+        if (toBooleanStrict(invalidAddress) === true) {
+            filter["address_validation.isValid"] = false;
         }
 
         // ===== Full-text search =====
