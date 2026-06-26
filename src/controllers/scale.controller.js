@@ -1076,6 +1076,7 @@ const getScaleList = async (req, res) => {
       scale_status,
       search,
       shopName,
+      sellerId,
       pngStatus,
       cs_unassigned = "",
       cs_assignee_id = "",
@@ -1135,6 +1136,9 @@ const getScaleList = async (req, res) => {
       initialMatch.csAssigneeId = new mongoose.Types.ObjectId(userId);
     } else if (isSellerOnly) {
       initialMatch.sellerId = new mongoose.Types.ObjectId(userId);
+    }
+    if (!isSellerOnly && sellerId && mongoose.Types.ObjectId.isValid(sellerId)) {
+      initialMatch.sellerId = new mongoose.Types.ObjectId(sellerId);
     }
 
     const activeScaleStatuses = ["Need Scale", "Pending", "Sent", "QC Rejected"];
@@ -2158,9 +2162,13 @@ async function getScaleStatistics(req, res) {
       to,
       search,
       shopName,
+      sellerId,
       breakdown,
       timeseries = "false",
       pngStatus, // NEW
+      cs_unassigned = "",
+      cs_assignee_id = "",
+      cs_assignment_status = "",
     } = req.query;
 
     const KNOWN = [
@@ -2205,6 +2213,22 @@ async function getScaleStatistics(req, res) {
       matchStage.csAssigneeId = new mongoose.Types.ObjectId(userId);
     } else if (isSellerOnly) {
       matchStage.sellerId = new mongoose.Types.ObjectId(userId);
+    }
+    if (!isSellerOnly && sellerId && mongoose.Types.ObjectId.isValid(sellerId)) {
+      matchStage.sellerId = new mongoose.Types.ObjectId(sellerId);
+    }
+    if (String(cs_unassigned || "").toLowerCase() === "true") {
+      matchStage.$or = [
+        { csAssigneeId: { $exists: false } },
+        { csAssigneeId: null },
+        { cs_assignment_status: "Unassigned" },
+      ];
+    }
+    if (cs_assignee_id && mongoose.Types.ObjectId.isValid(cs_assignee_id)) {
+      matchStage.csAssigneeId = new mongoose.Types.ObjectId(cs_assignee_id);
+    }
+    if (cs_assignment_status && String(cs_assignment_status).trim()) {
+      matchStage.cs_assignment_status = String(cs_assignment_status).trim();
     }
 
     // ===== Search =====

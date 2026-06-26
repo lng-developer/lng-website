@@ -67,6 +67,148 @@ const ETSY_LIST_SELECT_FIELDS = [
 const ETSY_TRACKING_STATUSES = ["New", "In progress", "Fulfilled", "Shipping", "Shipped", "Canceled", "Cancelled"];
 const isEtsyCanceledStatus = (status) => ["Canceled", "Cancelled"].includes(String(status || "").trim());
 
+const etsyShippingFilterValue = (value) => {
+    if (!value) return null;
+    return value === "Second Day" ? { $in: ["Second Day", "SecondDay"] } : value;
+};
+
+async function buildEtsyOrderFilter(query = {}, { includeTabFilters = true } = {}) {
+    const {
+        from,
+        to,
+        search,
+        userNull,
+        noPsd,
+        shippingType,
+        shipping_type,
+        shopName,
+        teamId,
+        vendorId,
+        vendor,
+        openCase,
+        status,
+        isNoCostCenter,
+        invalidAddress,
+        sumbittedoetsy,
+        submittedToEtsy,
+    } = query;
+
+    const filter = {};
+
+    if (includeTabFilters && status) filter.status = status;
+    const shippingValue = etsyShippingFilterValue(shippingType || shipping_type);
+    if (shippingValue) filter.shipping_type = shippingValue;
+
+    if (shopName && String(shopName).trim()) {
+        const shopNameRegex = new RegExp(escapeRegExp(String(shopName).trim()), "i");
+        const shops = await Store.find({
+            $or: [
+                { name: shopNameRegex },
+                { store: shopNameRegex },
+            ],
+        }).select("_id").lean();
+        filter.shopId = { $in: shops.map(s => s._id) };
+    }
+
+    if (teamId) {
+        const teamShops = await Store.find({ team: teamId }).select("_id").lean();
+        const teamShopIds = teamShops.map(s => s._id);
+        if (filter.shopId) {
+            const existing = filter.shopId.$in || [filter.shopId];
+            filter.shopId = { $in: existing.filter(id => teamShopIds.some(tid => String(tid) === String(id))) };
+        } else {
+            filter.shopId = { $in: teamShopIds };
+        }
+    }
+
+    const selectedVendorId = vendorId || vendor;
+    if (selectedVendorId) {
+        if (!mongoose.Types.ObjectId.isValid(selectedVendorId)) {
+            const error = new Error("Invalid vendorId");
+            error.statusCode = 400;
+            throw error;
+        }
+
+        const vendorProducts = await db.vendorProduct
+            .find({ vendor_id: new mongoose.Types.ObjectId(selectedVendorId) })
+            .select("_id")
+            .lean();
+        const vendorProductIds = vendorProducts.map(vp => vp._id).filter(Boolean);
+        filter["items.cost_breakdown.vendorProductId"] = {
+            $in: vendorProductIds.flatMap(id => [id, String(id)]),
+        };
+    }
+
+    if (userNull === "true") {
+        filter["seller.sellerId"] = { $in: [null, undefined] };
+    }
+
+    if (from || to) {
+        filter.saleDate = {};
+        if (from) filter.saleDate.$gte = new Date(from);
+        if (to) filter.saleDate.$lte = new Date(to);
+    }
+
+    if (search) {
+        const keyword = String(search).trim();
+        if (/^\d{5,}$/.test(keyword)) {
+            filter.orderId = keyword;
+        } else if (keyword) {
+            const regex = new RegExp(escapeRegExp(keyword), "i");
+            filter.$or = [
+                { orderId: regex },
+                { "buyer.fullName": regex },
+                { "buyer.userId": regex },
+                { "items.sku": regex },
+                { "items.itemName": regex },
+                { "items.transactionId": regex },
+                { "seller.sellerCode": regex },
+                { "shipping.city": regex },
+                { "shipping.state": regex },
+                { "shipping.country": regex },
+            ];
+        }
+    }
+
+    const submittedFilter = sumbittedoetsy ?? submittedToEtsy;
+    if (submittedFilter === "true" || submittedFilter === true) filter.sumbittedoetsy = true;
+    if (submittedFilter === "false" || submittedFilter === false) filter.sumbittedoetsy = false;
+
+    if (!includeTabFilters) return filter;
+
+    if (isNoCostCenter === "true") {
+        filter.$and = [
+            ...(filter.$and || []),
+            {
+                $or: [
+                    { base_cost: { $exists: false } },
+                    { base_cost: null },
+                    { base_cost: 0 },
+                ],
+            },
+            { status: { $ne: "Cancelled" } },
+        ];
+    }
+
+    if (toBooleanStrict(invalidAddress) === true) {
+        filter["address_validation.isValid"] = false;
+    }
+
+    if (toBooleanStrict(openCase) === true) {
+        filter.case = { $exists: true, $ne: [] };
+    }
+
+    if (toBooleanStrict(noPsd) === true) {
+        filter.$and = [
+            ...(filter.$and || []),
+            { "items.snapshotImage": { $in: [null, ""] } },
+            { status: { $ne: "Cancelled" } },
+        ];
+    }
+
+    return filter;
+}
+
 function computeEtsyOrderStatusFromItems(items = []) {
     const statuses = (items || []).map((item) => String(item?.tracking_info?.status || "New").trim());
     const active = statuses.filter((status) => !isEtsyCanceledStatus(status));
@@ -1002,7 +1144,7 @@ const importOrders = async (req, res) => {
         });
 
     } catch (error) {
-        return res.status(500).json({ error: error.message });
+        return res.status(error.statusCode || 500).json({ error: error.message });
     }
 };
 
@@ -1024,6 +1166,8 @@ const getListOrders = async (req, res) => {
             shippingType,
             shopName,
             teamId,
+            vendorId,
+            vendor,
             openCase,
             status,
             isNoCostCenter,
@@ -1032,91 +1176,7 @@ const getListOrders = async (req, res) => {
             sortOrder = "desc",
         } = req.query;
 
-        const filter = {};
-
-        // ===== Filters cơ bản =====
-        if (status) filter.status = status;
-        if (shippingType) filter.shipping_type = shippingType;
-
-        // ===== Shop name filter =====
-        if (shopName && String(shopName).trim()) {
-            const shopNameRegex = new RegExp(escapeRegExp(String(shopName).trim()), "i");
-            const shops = await Store.find({
-                $or: [
-                    { name: shopNameRegex },
-                    { store: shopNameRegex },
-                ],
-            }).select("_id").lean();
-            const shopIds = shops.map(s => s._id);
-            filter.shopId = { $in: shopIds };
-        }
-
-        // ===== Team filter =====
-        if (teamId) {
-            const teamShops = await Store.find({ team: teamId }).select("_id").lean();
-            const teamShopIds = teamShops.map(s => s._id);
-            if (filter.shopId) {
-                // Intersect with shopName filter nếu có
-                const existing = filter.shopId.$in || [filter.shopId];
-                filter.shopId = { $in: existing.filter(id => teamShopIds.some(tid => tid.equals(id))) };
-            } else {
-                filter.shopId = { $in: teamShopIds };
-            }
-        }
-
-        // ===== User null (orders chưa có seller) =====
-        if (userNull === "true") {
-            filter["seller.sellerId"] = { $in: [null, undefined] };
-        }
-
-        // ===== Date range (saleDate) =====
-        if (from || to) {
-            filter.saleDate = {};
-            if (from) filter.saleDate.$gte = new Date(from);
-            if (to) filter.saleDate.$lte = new Date(to);
-        }
-
-        // ===== isNoCostCenter: đơn chưa có base_cost =====
-        if (isNoCostCenter === "true") {
-            filter.$and = [
-                ...(filter.$and || []),
-                {
-                    $or: [
-                        { base_cost: { $exists: false } },
-                        { base_cost: null },
-                        { base_cost: 0 },
-                    ],
-                },
-                { status: { $ne: "Cancelled" } },
-            ];
-        }
-
-        if (toBooleanStrict(invalidAddress) === true) {
-            filter["address_validation.isValid"] = false;
-        }
-
-        // ===== Full-text search =====
-        if (search) {
-            const keyword = String(search).trim();
-            if (/^\d{5,}$/.test(keyword)) {
-                filter.orderId = keyword;
-            } else if (keyword) {
-                const regex = new RegExp(escapeRegExp(keyword), "i");
-                const searchOr = [
-                    { orderId: regex },
-                    { "buyer.fullName": regex },
-                    { "buyer.userId": regex },
-                    { "items.sku": regex },
-                    { "items.itemName": regex },
-                    { "items.transactionId": regex },
-                    { "seller.sellerCode": regex },
-                    { "shipping.city": regex },
-                    { "shipping.state": regex },
-                    { "shipping.country": regex },
-                ];
-                filter.$or = searchOr;
-            }
-        }
+        const filter = await buildEtsyOrderFilter(req.query);
 
         const pageNum = Math.max(1, parseInt(page));
         const limitNum = Math.min(200, parseInt(limit));
@@ -1254,7 +1314,7 @@ const getListOrders = async (req, res) => {
             currentPage: pageNum,
         });
     } catch (error) {
-        return res.status(500).json({ error: error.message });
+        return res.status(error.statusCode || 500).json({ error: error.message });
     }
 };
 
@@ -1951,7 +2011,7 @@ const getEtsyOrderStatistics = async (req, res) => {
         } = req.query;
 
         // ===== BUILD MATCH =====
-        const match = {};
+        const match = await buildEtsyOrderFilter(req.query, { includeTabFilters: false });
 
         if (shopId && mongoose.Types.ObjectId.isValid(shopId)) {
             match.shopId = new mongoose.Types.ObjectId(shopId);
@@ -1995,6 +2055,13 @@ const getEtsyOrderStatistics = async (req, res) => {
                 { status: { $ne: "Cancelled" } },
             ],
         };
+        const NO_PSD_MATCH = {
+            $and: [
+                { "items.snapshotImage": { $in: [null, ""] } },
+                { status: { $ne: "Cancelled" } },
+            ],
+        };
+        const OPEN_CASE_MATCH = { case: { $exists: true, $ne: [] } };
 
         const [stat] = await EtsyOrder.aggregate([
             { $match: match },
@@ -2006,10 +2073,12 @@ const getEtsyOrderStatistics = async (req, res) => {
                         { $count: "c" },
                     ],
                     noCostCenter: [{ $match: NO_COST_CENTER }, { $count: "c" }],
+                    noPsd: [{ $match: NO_PSD_MATCH }, { $count: "c" }],
                     fulfilled: [{ $match: { status: "Fulfilled" } }, { $count: "c" }],
                     shipped: [{ $match: { status: "Shipped" } }, { $count: "c" }],
                     cancelled: [{ $match: { status: "Cancelled" } }, { $count: "c" }],
                     refund: [{ $match: { status: "Refund" } }, { $count: "c" }],
+                    openCase: [{ $match: OPEN_CASE_MATCH }, { $count: "c" }],
                     invalidAddress: [
                         {
                             $match: {
@@ -2033,10 +2102,12 @@ const getEtsyOrderStatistics = async (req, res) => {
                     all: { $ifNull: [{ $arrayElemAt: ["$all.c", 0] }, 0] },
                     new: { $ifNull: [{ $arrayElemAt: ["$new.c", 0] }, 0] },
                     noCostCenter: { $ifNull: [{ $arrayElemAt: ["$noCostCenter.c", 0] }, 0] },
+                    noPsd: { $ifNull: [{ $arrayElemAt: ["$noPsd.c", 0] }, 0] },
                     fulfilled: { $ifNull: [{ $arrayElemAt: ["$fulfilled.c", 0] }, 0] },
                     shipped: { $ifNull: [{ $arrayElemAt: ["$shipped.c", 0] }, 0] },
                     cancelled: { $ifNull: [{ $arrayElemAt: ["$cancelled.c", 0] }, 0] },
                     refund: { $ifNull: [{ $arrayElemAt: ["$refund.c", 0] }, 0] },
+                    openCase: { $ifNull: [{ $arrayElemAt: ["$openCase.c", 0] }, 0] },
                     invalidAddress: { $ifNull: [{ $arrayElemAt: ["$invalidAddress.c", 0] }, 0] },
                 },
             },
@@ -2047,16 +2118,18 @@ const getEtsyOrderStatistics = async (req, res) => {
                 all: 0,
                 new: 0,
                 noCostCenter: 0,
+                noPsd: 0,
                 fulfilled: 0,
                 shipped: 0,
                 cancelled: 0,
                 refund: 0,
+                openCase: 0,
                 invalidAddress: 0,
             }
         );
     } catch (err) {
         console.error("❌ getEtsyOrderStatistics error:", err);
-        return res.status(500).json({ message: "Internal Server Error" });
+        return res.status(err.statusCode || 500).json({ message: err.statusCode ? err.message : "Internal Server Error" });
     }
 };
 
@@ -4190,18 +4263,106 @@ const buildEtsyScalePipeline = (req, activeStatuses, options = {}) => {
     ];
 
     if (broadSearchRegex) {
+        pipeline.push(
+            {
+                $addFields: {
+                    searchVendorProductObjectIds: {
+                        $filter: {
+                            input: {
+                                $map: {
+                                    input: { $ifNull: ["$items", []] },
+                                    as: "it",
+                                    in: {
+                                        $convert: {
+                                            input: "$$it.cost_breakdown.vendorProductId",
+                                            to: "objectId",
+                                            onError: null,
+                                            onNull: null,
+                                        },
+                                    },
+                                },
+                            },
+                            as: "id",
+                            cond: { $ne: ["$$id", null] },
+                        },
+                    },
+                },
+            },
+            {
+                $lookup: {
+                    from: "vendorproducts",
+                    localField: "searchVendorProductObjectIds",
+                    foreignField: "_id",
+                    as: "itemVendorProducts",
+                },
+            },
+            {
+                $lookup: {
+                    from: "vendors",
+                    localField: "itemVendorProducts.vendor_id",
+                    foreignField: "_id",
+                    as: "itemVendors",
+                },
+            }
+        );
         pipeline.push({
             $match: {
                 $or: [
                     { orderId: broadSearchRegex },
+                    { "shop.name": broadSearchRegex },
+                    { "shop.store": broadSearchRegex },
+                    { "status": broadSearchRegex },
+                    { "shipping_type": broadSearchRegex },
+                    { "scale_overall_status": broadSearchRegex },
                     { "items.sku": broadSearchRegex },
+                    { "items.orderItemId": broadSearchRegex },
                     { "items.transactionId": broadSearchRegex },
+                    { "items.listingId": broadSearchRegex },
+                    { "items.title": broadSearchRegex },
                     { "items.itemName": broadSearchRegex },
+                    { "items.variationsRaw": broadSearchRegex },
+                    { "items.customized_url": broadSearchRegex },
+                    { "items.asin": broadSearchRegex },
+                    { "items.cost_breakdown.sizeValue": broadSearchRegex },
+                    { "items.cost_breakdown.colorValue": broadSearchRegex },
+                    { "items.cost_breakdown.matchedSku": broadSearchRegex },
+                    { "items.tracking_info.fulfillment": broadSearchRegex },
+                    { "items.tracking_info.tracking": broadSearchRegex },
+                    { "items.tracking_info.status": broadSearchRegex },
+                    { "items.tracking_info.note": broadSearchRegex },
+                    { "items.qc_note": broadSearchRegex },
+                    { "items.cs_note": broadSearchRegex },
+                    { "items.customizations.buyerNote": broadSearchRegex },
+                    { "items.customizations.textFields.name": broadSearchRegex },
+                    { "items.customizations.textFields.value": broadSearchRegex },
+                    { "items.customFiles.fileName": broadSearchRegex },
+                    { "items.customFiles.etsyFileId": broadSearchRegex },
+                    { "items.customFiles.listingId": broadSearchRegex },
+                    { "items.customFiles.status": broadSearchRegex },
+                    { "items.customFiles.errorMessage": broadSearchRegex },
                     { "buyer.fullName": broadSearchRegex },
+                    { "buyer.firstName": broadSearchRegex },
+                    { "buyer.lastName": broadSearchRegex },
+                    { "buyer.userId": broadSearchRegex },
                     { "buyer.display": broadSearchRegex },
                     { "shipping.name": broadSearchRegex },
+                    { "shipping.address1": broadSearchRegex },
+                    { "shipping.address2": broadSearchRegex },
+                    { "shipping.city": broadSearchRegex },
+                    { "shipping.state": broadSearchRegex },
+                    { "shipping.zipcode": broadSearchRegex },
+                    { "shipping.country": broadSearchRegex },
+                    { "seller.sellerCode": broadSearchRegex },
                     { "sellerUser.full_name": broadSearchRegex },
                     { "sellerUser.email": broadSearchRegex },
+                    { "scaledBy.full_name": broadSearchRegex },
+                    { "scaledBy.email": broadSearchRegex },
+                    { "cs_assignee.full_name": broadSearchRegex },
+                    { "cs_assignee.email": broadSearchRegex },
+                    { "itemVendorProducts.product_name": broadSearchRegex },
+                    { "itemVendorProducts.product_id": broadSearchRegex },
+                    { "itemVendors.name": broadSearchRegex },
+                    { "itemVendors.fulfillment_type": broadSearchRegex },
                 ],
             },
         });
@@ -5708,4 +5869,5 @@ module.exports = {
     buildEtsyTrackingSummary,
     buildEtsyTrackingInfoResponse,
     _computeMissingEtsyBaseCosts: computeMissingEtsyBaseCosts,
+    _buildEtsyScalePipeline: buildEtsyScalePipeline,
 };

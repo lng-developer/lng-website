@@ -2,6 +2,7 @@ jest.mock("../../models", () => ({
   EtsyOrder: {
     countDocuments: jest.fn(),
     find: jest.fn(),
+    aggregate: jest.fn(),
   },
   vendorProduct: { find: jest.fn() },
   vendor: { find: jest.fn() },
@@ -29,6 +30,7 @@ jest.mock("../../service/etsyTrackingResponse.service", () => ({
 jest.mock("axios", () => ({}));
 
 const db = require("../../models");
+const mongoose = require("mongoose");
 const controller = require("../etsyOrder.controller");
 
 function makeRes() {
@@ -63,6 +65,7 @@ describe("getListOrders", () => {
   beforeEach(() => {
     jest.clearAllMocks();
     db.EtsyOrder.countDocuments.mockResolvedValue(0);
+    db.EtsyOrder.aggregate.mockResolvedValue([{ all: 0 }]);
     mockFindLean([]);
     db.vendorProduct.find.mockReturnValue({ lean: jest.fn().mockResolvedValue([]) });
     db.vendor.find.mockReturnValue({ lean: jest.fn().mockResolvedValue([]) });
@@ -116,5 +119,48 @@ describe("getListOrders", () => {
     expect(db.EtsyOrder.countDocuments).toHaveBeenCalledWith({ orderId: "4094616499" });
     expect(db.EtsyOrder.find).toHaveBeenCalledWith({ orderId: "4094616499" });
     expect(db.EtsyOrder.find.mock.results[0].value.select).toHaveBeenCalledWith(expect.stringContaining("vendor_submissions"));
+  });
+
+  test("filters orders by vendorId through mapped vendor products", async () => {
+    const vendorId = "507f1f77bcf86cd799439011";
+    const vendorProductId = new mongoose.Types.ObjectId("507f191e810c19729de860ea");
+    mockSelectLean(db.vendorProduct.find, [{ _id: vendorProductId }]);
+    const req = {
+      query: {
+        page: "1",
+        limit: "10",
+        vendorId,
+      },
+    };
+    const res = makeRes();
+
+    await controller.getListOrders(req, res);
+
+    const vendorProductQuery = db.vendorProduct.find.mock.calls[0][0];
+    expect(String(vendorProductQuery.vendor_id)).toBe(vendorId);
+
+    const orderFilter = db.EtsyOrder.countDocuments.mock.calls[0][0];
+    expect(orderFilter["items.cost_breakdown.vendorProductId"].$in.map(String)).toEqual(
+      expect.arrayContaining([String(vendorProductId)])
+    );
+  });
+
+  test("statistics applies vendorId to the base match", async () => {
+    const vendorId = "507f1f77bcf86cd799439011";
+    const vendorProductId = new mongoose.Types.ObjectId("507f191e810c19729de860ea");
+    mockSelectLean(db.vendorProduct.find, [{ _id: vendorProductId }]);
+    const req = {
+      query: {
+        vendorId,
+      },
+    };
+    const res = makeRes();
+
+    await controller.getEtsyOrderStatistics(req, res);
+
+    const aggregatePipeline = db.EtsyOrder.aggregate.mock.calls[0][0];
+    expect(aggregatePipeline[0].$match["items.cost_breakdown.vendorProductId"].$in.map(String)).toEqual(
+      expect.arrayContaining([String(vendorProductId)])
+    );
   });
 });

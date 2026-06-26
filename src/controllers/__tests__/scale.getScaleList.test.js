@@ -103,4 +103,28 @@ describe("getScaleList query shape", () => {
     const pipeline = db.orderCustomProduct.aggregate.mock.calls[0][0];
     expect(JSON.stringify(pipeline)).toContain("availablePsdListings");
   });
+
+  test("matches sellerId and CS unassigned filters early", async () => {
+    const res = makeRes();
+
+    await controller.getScaleList(
+      makeReq({
+        sellerId: "507f1f77bcf86cd799439012",
+        cs_unassigned: "true",
+      }),
+      res
+    );
+
+    const pipeline = db.orderCustomProduct.aggregate.mock.calls[0][0];
+    expect(pipeline[0].$match).toEqual(
+      expect.objectContaining({
+        sellerId: expect.any(Object),
+        $or: [
+          { csAssigneeId: { $exists: false } },
+          { csAssigneeId: null },
+          { cs_assignment_status: "Unassigned" },
+        ],
+      })
+    );
+  });
 });
