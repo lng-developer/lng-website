@@ -45,6 +45,24 @@ const toBooleanStrict = (value) => {
 };
 
 const escapeRegExp = (value = "") => String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+const ETSY_LIST_SELECT_FIELDS = [
+    "orderId",
+    "shopId",
+    "saleDate",
+    "createdAt",
+    "status",
+    "shipping_type",
+    "buyer",
+    "shipping",
+    "seller",
+    "items",
+    "base_cost",
+    "numberOfItems",
+    "case",
+    "address_validation",
+    "vendor_submissions",
+    "sumbittedoetsy",
+].join(" ");
 
 const ETSY_TRACKING_STATUSES = ["New", "In progress", "Fulfilled", "Shipping", "Shipped", "Canceled", "Cancelled"];
 const isEtsyCanceledStatus = (status) => ["Canceled", "Cancelled"].includes(String(status || "").trim());
@@ -1075,20 +1093,25 @@ const getListOrders = async (req, res) => {
 
         // ===== Full-text search =====
         if (search) {
-            const regex = new RegExp(search, "i");
-            const searchOr = [
-                { orderId: regex },
-                { "buyer.fullName": regex },
-                { "buyer.userId": regex },
-                { "items.sku": regex },
-                { "items.itemName": regex },
-                { "items.transactionId": regex },
-                { "seller.sellerCode": regex },
-                { "shipping.city": regex },
-                { "shipping.state": regex },
-                { "shipping.country": regex },
-            ];
-            filter.$or = searchOr;
+            const keyword = String(search).trim();
+            if (/^\d{5,}$/.test(keyword)) {
+                filter.orderId = keyword;
+            } else if (keyword) {
+                const regex = new RegExp(escapeRegExp(keyword), "i");
+                const searchOr = [
+                    { orderId: regex },
+                    { "buyer.fullName": regex },
+                    { "buyer.userId": regex },
+                    { "items.sku": regex },
+                    { "items.itemName": regex },
+                    { "items.transactionId": regex },
+                    { "seller.sellerCode": regex },
+                    { "shipping.city": regex },
+                    { "shipping.state": regex },
+                    { "shipping.country": regex },
+                ];
+                filter.$or = searchOr;
+            }
         }
 
         const pageNum = Math.max(1, parseInt(page));
@@ -1103,6 +1126,7 @@ const getListOrders = async (req, res) => {
         const [total, rawData] = await Promise.all([
             EtsyOrder.countDocuments(filter),
             EtsyOrder.find(filter)
+                .select(ETSY_LIST_SELECT_FIELDS)
                 .populate("shopId", "name store merchant")
                 .populate("seller.sellerId", "full_name email employee_id")
                 .populate("case", "name description")

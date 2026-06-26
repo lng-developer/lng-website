@@ -40,6 +40,7 @@ function makeRes() {
 function mockFindLean(rows = []) {
   const chain = {
     populate: jest.fn().mockReturnThis(),
+    select: jest.fn().mockReturnThis(),
     sort: jest.fn().mockReturnThis(),
     skip: jest.fn().mockReturnThis(),
     limit: jest.fn().mockReturnThis(),
@@ -91,11 +92,29 @@ describe("getListOrders", () => {
         "address_validation.isValid": false,
       })
     );
+    expect(db.EtsyOrder.find.mock.results[0].value.select).toHaveBeenCalledWith(expect.stringContaining("orderId"));
     expect(res.json).toHaveBeenCalledWith(
       expect.objectContaining({
         data: [],
         totalCount: 0,
       })
     );
+  });
+
+  test("uses exact orderId search path before broad regex search", async () => {
+    const req = {
+      query: {
+        page: "1",
+        limit: "10",
+        search: "4094616499",
+      },
+    };
+    const res = makeRes();
+
+    await controller.getListOrders(req, res);
+
+    expect(db.EtsyOrder.countDocuments).toHaveBeenCalledWith({ orderId: "4094616499" });
+    expect(db.EtsyOrder.find).toHaveBeenCalledWith({ orderId: "4094616499" });
+    expect(db.EtsyOrder.find.mock.results[0].value.select).toHaveBeenCalledWith(expect.stringContaining("vendor_submissions"));
   });
 });

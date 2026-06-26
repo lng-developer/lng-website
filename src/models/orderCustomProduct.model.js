@@ -360,5 +360,12 @@ orderCustomProductSchema.index({ orderId: 1, "items.orderItemId": 1 });
 
 // Tối ưu checkOrdersStatus: filter shopId + sort createdAt desc + limit
 orderCustomProductSchema.index({ shopId: 1, createdAt: -1 });
+orderCustomProductSchema.index({ purchase_date: -1 });
+orderCustomProductSchema.index({ status: 1, purchase_date: -1 });
+orderCustomProductSchema.index({ sellerId: 1, purchase_date: -1 });
+orderCustomProductSchema.index({ shopId: 1, purchase_date: -1 });
+orderCustomProductSchema.index({ base_cost: 1, status: 1, purchase_date: -1 });
+orderCustomProductSchema.index({ shipping_type: 1, purchase_date: -1 });
+orderCustomProductSchema.index({ "address_validation.isValid": 1, purchase_date: -1 });
 
 module.exports = mongoose.model("OrderCustomProduct", orderCustomProductSchema);

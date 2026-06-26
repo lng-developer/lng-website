@@ -71,6 +71,7 @@ async function getListingIdsNoPsd(ListingModel) {
 
 function buildFilters(params) {
   const {
+    status,
     statuses,
     search,
     openCase,
@@ -86,8 +87,9 @@ function buildFilters(params) {
 
   const filters = [];
 
-  if (statuses?.trim()) {
-    const statusArray = statuses.split(",").map(s => s.trim()).filter(Boolean);
+  const statusFilter = statuses || status;
+  if (statusFilter?.trim()) {
+    const statusArray = statusFilter.split(",").map(s => s.trim()).filter(Boolean);
     if (statusArray.length > 0) {
       filters.push({ status: { $in: statusArray } });
     }
@@ -259,8 +261,40 @@ async function getVendorProductIdsByVendorName(vendorName) {
   return vpIds || [];
 }
 
+function hasLookupDependentField(value) {
+  if (!value || typeof value !== "object") return false;
+
+  if (Array.isArray(value)) {
+    return value.some(hasLookupDependentField);
+  }
+
+  return Object.entries(value).some(([key, nested]) => {
+    if (!key.startsWith("$")) {
+      const root = key.split(".")[0];
+      if (["shop", "seller", "scaledBy"].includes(root)) return true;
+    }
+    return hasLookupDependentField(nested);
+  });
+}
+
+function partitionLookupFilters(filters = []) {
+  const preLookupFilters = [];
+  const postLookupFilters = [];
+
+  for (const filter of filters) {
+    if (hasLookupDependentField(filter)) {
+      postLookupFilters.push(filter);
+    } else {
+      preLookupFilters.push(filter);
+    }
+  }
+
+  return { preLookupFilters, postLookupFilters };
+}
+
 async function buildPipeline({ initialMatch, filters, userId, teamObjectId, shopName, roles }) {
   const pipeline = [];
+  const { preLookupFilters, postLookupFilters } = partitionLookupFilters(filters);
 
   let team = null;
   // Bỏ qua lọc theo team ngầm định nếu là Admin
@@ -275,6 +309,10 @@ async function buildPipeline({ initialMatch, filters, userId, teamObjectId, shop
 
   if (Object.keys(adjustedInitialMatch).length > 0) {
     pipeline.push({ $match: adjustedInitialMatch });
+  }
+
+  if (preLookupFilters.length > 0) {
+    pipeline.push({ $match: { $and: preLookupFilters } });
   }
 
   pipeline.push(
@@ -352,8 +390,8 @@ async function buildPipeline({ initialMatch, filters, userId, teamObjectId, shop
     }
   });
 
-  if (filters.length > 0) {
-    pipeline.push({ $match: { $and: filters } });
+  if (postLookupFilters.length > 0) {
+    pipeline.push({ $match: { $and: postLookupFilters } });
   }
 
   if (teamObjectId) {
@@ -363,7 +401,13 @@ async function buildPipeline({ initialMatch, filters, userId, teamObjectId, shop
   return pipeline;
 }
 
-async function executePipeline(pipeline, page, perPage) {
+function buildOrderSort(sortBy, sortOrder) {
+  const dir = String(sortOrder || "").toLowerCase() === "asc" ? 1 : -1;
+  if (sortBy === "status") return { status: dir, purchase_date: -1 };
+  return { purchase_date: -1 };
+}
+
+async function executePipeline(pipeline, page, perPage, sortOptions = {}) {
   const countPipeline = [...pipeline, { $count: "total" }];
   const countResult = await OrderCustomProduct.aggregate(countPipeline);
   const totalCount = countResult[0]?.total || 0;
@@ -373,15 +417,12 @@ async function executePipeline(pipeline, page, perPage) {
   const limitNum = isAll ? totalCount || 1 : parseInt(perPage) || 10;
   const skip = isAll ? 0 : (pageNum - 1) * limitNum;
 
-  pipeline.push({ $sort: { purchase_date: -1 } });
+  pipeline.push({ $sort: buildOrderSort(sortOptions.sortBy, sortOptions.sortOrder) });
   if (!isAll) {
     pipeline.push({ $skip: skip }, { $limit: limitNum });
   }
 
   const orders = await OrderCustomProduct.aggregate(pipeline);
-
-  console.log(totalCount)
-  console.log(limitNum)
   return { orders, totalCount, limitNum };
 }
 

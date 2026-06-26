@@ -1732,6 +1732,7 @@ const getFrontendOrders = async (req, res) => {
       perPage = 10,
       from,
       to,
+      status,
       statuses,
       isNoCostCenter,
       financialStatus,
@@ -1748,6 +1749,8 @@ const getFrontendOrders = async (req, res) => {
       invalidAddress,
       vendor,
       vendors,
+      sortBy,
+      sortOrder,
 
       // ✅ logs
       includeLogs = "true",
@@ -1776,6 +1779,7 @@ const getFrontendOrders = async (req, res) => {
 
     // ✅ IMPORTANT: listing là populate -> KHÔNG filter noPsd bằng items.listing.psd.status trong Mongo
     const filters = buildFilters({
+      status,
       statuses,
       search,
       openCase,
@@ -1892,7 +1896,8 @@ const getFrontendOrders = async (req, res) => {
     const { orders, totalCount, limitNum } = await executePipeline(
       pipeline,
       page,
-      perPage
+      perPage,
+      { sortBy, sortOrder }
     );
 
     const enrichedOrders = await enrichOrdersData(orders);
