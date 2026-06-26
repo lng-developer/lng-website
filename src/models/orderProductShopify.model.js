@@ -143,7 +143,6 @@ const orderProductShopifySchema = new mongoose.Schema(
 );
 
 orderProductShopifySchema.index({ purchaseDate: 1 });
-orderProductShopifySchema.index({ processStatus: 1 });
 orderProductShopifySchema.index({ financialStatus: 1 });
 orderProductShopifySchema.index({ fulfillmentStatus: 1 });
 

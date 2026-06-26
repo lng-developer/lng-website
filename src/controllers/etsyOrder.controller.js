@@ -992,6 +992,10 @@ const importOrders = async (req, res) => {
             fs.unlink(file.path, () => { });
         }
 
+        stats.missingBaseCostBackfill = await computeMissingEtsyBaseCosts({
+            limit: req.body?.missingBaseCostLimit,
+        });
+
         return res.json({
             message: "Etsy Order import completed (multi-shop + seller preserved)",
             stats
@@ -1800,6 +1804,41 @@ const computeBaseCostForEtsyOrder = async (req, res) => {
         return res.status(500).json({ message: "Compute failed for Etsy Order", error: err.message });
     }
 }
+
+async function computeMissingEtsyBaseCosts({ limit = 50, computeOne = calculateEtsyCost } = {}) {
+    const limitNum = Math.min(200, Math.max(1, Number(limit) || 50));
+    const orders = await EtsyOrder.find({
+        $or: [{ base_cost: { $exists: false } }, { base_cost: null }, { base_cost: 0 }],
+        status: { $nin: ["Cancelled", "Canceled"] },
+        items: { $exists: true, $ne: [] },
+    })
+        .sort({ createdAt: -1 })
+        .limit(limitNum);
+
+    const result = { attempted: orders.length, computed: 0, failed: 0, errors: [] };
+    for (const order of orders) {
+        try {
+            await computeOne(order);
+            result.computed += 1;
+        } catch (err) {
+            result.failed += 1;
+            result.errors.push({ orderId: order.orderId || null, error: err.message });
+        }
+    }
+    return result;
+}
+
+const computeMissingBaseCostsForEtsyOrders = async (req, res) => {
+    try {
+        const result = await computeMissingEtsyBaseCosts({ limit: req.body?.limit });
+        return res.json({
+            message: "Etsy missing base cost batch computed",
+            ...result,
+        });
+    } catch (err) {
+        return res.status(500).json({ message: "Etsy batch compute failed", error: err.message });
+    }
+};
 
 const resetBaseCostForEtsyOrder = async (req, res) => {
     try {
@@ -5640,6 +5679,7 @@ module.exports = {
     importOrders,
     getListOrders,
     computeBaseCostForEtsyOrder,
+    computeMissingBaseCostsForEtsyOrders,
     resetBaseCostForEtsyOrder,
     getEtsyOrderStatistics,
     createOrder,
@@ -5667,4 +5707,5 @@ module.exports = {
     testEtsySmartyAddressValidation,
     buildEtsyTrackingSummary,
     buildEtsyTrackingInfoResponse,
+    _computeMissingEtsyBaseCosts: computeMissingEtsyBaseCosts,
 };
