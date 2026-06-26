@@ -352,5 +352,11 @@ EtsyOrderSchema.index({ "seller.sellerId": 1, saleDate: -1 });
 EtsyOrderSchema.index({ base_cost: 1, status: 1, saleDate: -1 });
 EtsyOrderSchema.index({ shipping_type: 1, saleDate: -1 });
 EtsyOrderSchema.index({ "address_validation.isValid": 1, saleDate: -1 });
+EtsyOrderSchema.index({ scale_overall_status: 1, createdAt: -1 });
+EtsyOrderSchema.index({ csAssigneeId: 1, scale_overall_status: 1, createdAt: -1 });
+EtsyOrderSchema.index({ "seller.sellerId": 1, scale_overall_status: 1, createdAt: -1 });
+EtsyOrderSchema.index({ scaleId: 1, scale_overall_status: 1, createdAt: -1 });
+EtsyOrderSchema.index({ cs_assignment_status: 1, scale_overall_status: 1, createdAt: -1 });
+EtsyOrderSchema.index({ "items.scale_status": 1, scale_overall_status: 1, createdAt: -1 });
 
 module.exports = mongoose.model("EtsyOrder", EtsyOrderSchema);

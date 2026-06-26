@@ -365,6 +365,71 @@ describe('getEtsyQCList filters', () => {
     jest.clearAllMocks();
   });
 
+  test('matches Etsy QC status directly before lookup stages', async () => {
+    db.EtsyOrder.aggregate
+      .mockResolvedValueOnce([{ total: 0 }])
+      .mockResolvedValueOnce([]);
+
+    const req = {
+      query: { scale_status: 'Ready' },
+      user: { _id: 'u1', role: 'Admin' },
+    };
+    const res = makeRes();
+
+    await controller.getEtsyQCList(req, res);
+
+    const pipeline = db.EtsyOrder.aggregate.mock.calls[0][0];
+    expect(pipeline[0]).toEqual({
+      $match: expect.objectContaining({
+        scale_overall_status: { $in: ['Ready'] },
+      }),
+    });
+    expect(pipeline.findIndex((stage) => stage.$lookup)).toBeGreaterThan(0);
+  });
+
+  test('matches Etsy Pending item status early for scale list', async () => {
+    db.EtsyOrder.aggregate
+      .mockResolvedValueOnce([{ total: 0 }])
+      .mockResolvedValueOnce([]);
+
+    const req = {
+      query: { scale_status: 'Pending' },
+      user: { _id: 'u1', role: 'Admin' },
+    };
+    const res = makeRes();
+
+    await controller.getEtsyScaleList(req, res);
+
+    const pipeline = db.EtsyOrder.aggregate.mock.calls[0][0];
+    expect(pipeline[0]).toEqual({
+      $match: expect.objectContaining({
+        scale_overall_status: { $in: ['Pending'] },
+        'items.scale_status': 'Pending',
+      }),
+    });
+  });
+
+  test('uses exact Etsy orderId search before broad regex search', async () => {
+    db.EtsyOrder.aggregate
+      .mockResolvedValueOnce([{ total: 0 }])
+      .mockResolvedValueOnce([]);
+
+    const req = {
+      query: { search: '4094616499' },
+      user: { _id: 'u1', role: 'Admin' },
+    };
+    const res = makeRes();
+
+    await controller.getEtsyQCList(req, res);
+
+    const pipeline = db.EtsyOrder.aggregate.mock.calls[0][0];
+    const lookupIndex = pipeline.findIndex((stage) => stage.$lookup);
+    const exactSearchIndex = pipeline.findIndex((stage) => stage.$match?.orderId === '4094616499');
+
+    expect(exactSearchIndex).toBeGreaterThanOrEqual(0);
+    expect(exactSearchIndex).toBeLessThan(lookupIndex);
+  });
+
   test('passes advanced QC filters into the aggregation pipeline', async () => {
     db.EtsyOrder.aggregate
       .mockResolvedValueOnce([{ total: 0 }])

@@ -3382,6 +3382,12 @@ const canonScaleStatus = (value) => {
     return status;
 };
 
+const buildScaleOverallMatch = (statuses = []) => {
+    const values = [...new Set(statuses.filter(Boolean))];
+    if (values.includes("Need Scale")) values.push(null);
+    return { $in: values };
+};
+
 function computeEtsyOverallScaleStatus(items = []) {
     if (!Array.isArray(items) || items.length === 0) return "Need Scale";
     const statuses = items.map((item) => String(item?.scale_status || "Need Scale"));
@@ -4036,6 +4042,7 @@ const buildEtsyScalePipeline = (req, activeStatuses, options = {}) => {
     const restrictCsToAssigned = options.restrictCsToAssigned === true;
 
     const matchStage = {};
+    let onlyPending = false;
     if (orderStatus && String(orderStatus).trim() && !/^all$/i.test(String(orderStatus).trim())) {
         matchStage.status = String(orderStatus).trim();
     } else {
@@ -4050,6 +4057,47 @@ const buildEtsyScalePipeline = (req, activeStatuses, options = {}) => {
     }
     if (restrictCsToAssigned && isCS && mongoose.Types.ObjectId.isValid(userId)) {
         matchStage.csAssigneeId = new mongoose.Types.ObjectId(userId);
+    }
+    if (!isSellerOnly && sellerId && mongoose.Types.ObjectId.isValid(sellerId)) {
+        matchStage["seller.sellerId"] = new mongoose.Types.ObjectId(sellerId);
+    }
+    const qcAssigneeId = qcBy || cs_assignee_id;
+    if (qcAssigneeId && mongoose.Types.ObjectId.isValid(qcAssigneeId)) {
+        matchStage.csAssigneeId = new mongoose.Types.ObjectId(qcAssigneeId);
+    }
+    if (cs_assignment_status && String(cs_assignment_status).trim()) {
+        matchStage.cs_assignment_status = String(cs_assignment_status).trim();
+    }
+    if (String(cs_unassigned || "").toLowerCase() === "true") {
+        matchStage.$or = [
+            { csAssigneeId: { $exists: false } },
+            { csAssigneeId: null },
+            { cs_assignment_status: "Unassigned" },
+        ];
+    }
+    if (scale_status && String(scale_status).trim()) {
+        if (/^all$/i.test(String(scale_status).trim())) {
+            matchStage.scale_overall_status = buildScaleOverallMatch(activeStatuses);
+        } else {
+            const wanted = String(scale_status).split(",").map(canonScaleStatus).filter(Boolean);
+            const valid = wanted.filter((status) => ETSY_SCALE_KNOWN.includes(status));
+            matchStage.scale_overall_status = buildScaleOverallMatch(valid.length ? valid : ["__NO_MATCH__"]);
+            onlyPending = valid.length === 1 && valid[0] === "Pending";
+        }
+    } else {
+        matchStage.scale_overall_status = buildScaleOverallMatch(activeStatuses);
+    }
+    if (onlyPending) {
+        matchStage["items.scale_status"] = "Pending";
+    }
+    let broadSearchRegex = null;
+    if (search && search.trim()) {
+        const keyword = String(search).trim();
+        if (/^\d{5,}$/.test(keyword)) {
+            matchStage.orderId = keyword;
+        } else {
+            broadSearchRegex = new RegExp(escapeRegExp(keyword), "i");
+        }
     }
 
     const pipeline = [
@@ -4102,46 +4150,22 @@ const buildEtsyScalePipeline = (req, activeStatuses, options = {}) => {
             : []),
     ];
 
-    if (!isSellerOnly && sellerId && mongoose.Types.ObjectId.isValid(sellerId)) {
-        pipeline.push({ $match: { "sellerUser._id": new mongoose.Types.ObjectId(sellerId) } });
-    }
-
-    if (search && search.trim()) {
-        const keyword = new RegExp(search.trim(), "i");
+    if (broadSearchRegex) {
         pipeline.push({
             $match: {
                 $or: [
-                    { orderId: keyword },
-                    { "items.sku": keyword },
-                    { "items.transactionId": keyword },
-                    { "items.itemName": keyword },
-                    { "buyer.fullName": keyword },
-                    { "buyer.display": keyword },
-                    { "shipping.name": keyword },
-                    { "sellerUser.full_name": keyword },
-                    { "sellerUser.email": keyword },
+                    { orderId: broadSearchRegex },
+                    { "items.sku": broadSearchRegex },
+                    { "items.transactionId": broadSearchRegex },
+                    { "items.itemName": broadSearchRegex },
+                    { "buyer.fullName": broadSearchRegex },
+                    { "buyer.display": broadSearchRegex },
+                    { "shipping.name": broadSearchRegex },
+                    { "sellerUser.full_name": broadSearchRegex },
+                    { "sellerUser.email": broadSearchRegex },
                 ],
             },
         });
-    }
-
-    if (String(cs_unassigned || "").toLowerCase() === "true") {
-        pipeline.push({
-            $match: {
-                $or: [
-                    { csAssigneeId: { $exists: false } },
-                    { csAssigneeId: null },
-                    { cs_assignment_status: "Unassigned" },
-                ],
-            },
-        });
-    }
-    const qcAssigneeId = qcBy || cs_assignee_id;
-    if (qcAssigneeId && mongoose.Types.ObjectId.isValid(qcAssigneeId)) {
-        pipeline.push({ $match: { csAssigneeId: new mongoose.Types.ObjectId(qcAssigneeId) } });
-    }
-    if (cs_assignment_status && String(cs_assignment_status).trim()) {
-        pipeline.push({ $match: { cs_assignment_status: String(cs_assignment_status).trim() } });
     }
 
     if (vendor && String(vendor).trim()) {
@@ -4331,20 +4355,6 @@ const buildEtsyScalePipeline = (req, activeStatuses, options = {}) => {
     const hasScaleFileValue = String(hasScaleFile || "").trim().toLowerCase();
     if (["true", "false"].includes(hasScaleFileValue)) {
         pipeline.push({ $match: { allItemsHaveScaleFile: hasScaleFileValue === "true" } });
-    }
-
-    let onlyPending = false;
-    if (scale_status && String(scale_status).trim()) {
-        if (/^all$/i.test(String(scale_status).trim())) {
-            pipeline.push({ $match: { overall_status_bucket: { $in: activeStatuses } } });
-        } else {
-            const wanted = String(scale_status).split(",").map(canonScaleStatus).filter(Boolean);
-            const valid = wanted.filter((status) => ETSY_SCALE_KNOWN.includes(status));
-            pipeline.push({ $match: { overall_status_bucket: { $in: valid.length ? valid : ["__NO_MATCH__"] } } });
-            onlyPending = valid.length === 1 && valid[0] === "Pending";
-        }
-    } else {
-        pipeline.push({ $match: { overall_status_bucket: { $in: activeStatuses } } });
     }
 
     if (onlyPending) {

@@ -367,5 +367,10 @@ orderCustomProductSchema.index({ shopId: 1, purchase_date: -1 });
 orderCustomProductSchema.index({ base_cost: 1, status: 1, purchase_date: -1 });
 orderCustomProductSchema.index({ shipping_type: 1, purchase_date: -1 });
 orderCustomProductSchema.index({ "address_validation.isValid": 1, purchase_date: -1 });
+orderCustomProductSchema.index({ scale_overall_status: 1, createdAt: -1 });
+orderCustomProductSchema.index({ csAssigneeId: 1, scale_overall_status: 1, createdAt: -1 });
+orderCustomProductSchema.index({ sellerId: 1, scale_overall_status: 1, createdAt: -1 });
+orderCustomProductSchema.index({ cs_assignment_status: 1, scale_overall_status: 1, createdAt: -1 });
+orderCustomProductSchema.index({ "items.scale_status": 1, scale_overall_status: 1, createdAt: -1 });
 
 module.exports = mongoose.model("OrderCustomProduct", orderCustomProductSchema);

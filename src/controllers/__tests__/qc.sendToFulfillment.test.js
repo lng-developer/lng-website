@@ -3,7 +3,7 @@ jest.mock("axios", () => ({
 }));
 
 jest.mock("../../models", () => ({
-  orderCustomProduct: { find: jest.fn() },
+  orderCustomProduct: { find: jest.fn(), aggregate: jest.fn() },
   vendorProduct: {},
   listing: {},
 }));
@@ -224,6 +224,56 @@ describe("sendFailedOrdersToFulfillment", () => {
       message: "Failed to send orders to fulfillment",
       error: { message: "Fulfillment unavailable" },
     });
+  });
+});
+
+describe("getQCList query shape", () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    db.orderCustomProduct.aggregate
+      .mockResolvedValueOnce([{ total: 0 }])
+      .mockResolvedValueOnce([]);
+  });
+
+  test("matches sellerId before seller lookup", async () => {
+    const req = {
+      query: {
+        scale_status: "Ready",
+        sellerId: "507f1f77bcf86cd799439011",
+      },
+      user: { role: "Admin", userId: "507f1f77bcf86cd799439012" },
+    };
+    const res = makeRes();
+
+    await controller.getQCList(req, res);
+
+    const pipeline = db.orderCustomProduct.aggregate.mock.calls[0][0];
+    expect(pipeline[0]).toEqual({
+      $match: expect.objectContaining({
+        sellerId: expect.any(Object),
+        scale_overall_status: { $in: ["Ready"] },
+      }),
+    });
+  });
+
+  test("matches exact orderId search before seller lookup", async () => {
+    const req = {
+      query: {
+        scale_status: "Ready",
+        search: "114-9981851-1865055",
+      },
+      user: { role: "Admin", userId: "507f1f77bcf86cd799439012" },
+    };
+    const res = makeRes();
+
+    await controller.getQCList(req, res);
+
+    const pipeline = db.orderCustomProduct.aggregate.mock.calls[0][0];
+    const sellerLookupIndex = pipeline.findIndex((stage) => stage.$lookup?.as === "seller");
+    const exactSearchIndex = pipeline.findIndex((stage) => stage.$match?.orderId === "114-9981851-1865055");
+
+    expect(exactSearchIndex).toBeGreaterThanOrEqual(0);
+    expect(exactSearchIndex).toBeLessThan(sellerLookupIndex);
   });
 });
 

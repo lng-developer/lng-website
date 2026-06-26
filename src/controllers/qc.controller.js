@@ -74,6 +74,8 @@ const toIsoDateStringOrNull = (value) => {
 };
 
 const isCanceledStatus = (status) => /^(canceled|cancelled)$/i.test(String(status || "").trim());
+const escapeRegExp = (value = "") => String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+const isAmazonOrderId = (value = "") => /^\d{3}-\d{7}-\d{7}(?:-R\d+)?$/i.test(String(value).trim());
 
 const extractVersion3Data = (item) => {
   const surfaces = item.version3Data?.customizationInfo?.surfaces || [];
@@ -408,6 +410,9 @@ const getQCList = async (req, res) => {
       }
       matchStage.sellerId = new mongoose.Types.ObjectId(userId);
     }
+    if (!isSellerOnly && sellerId && mongoose.Types.ObjectId.isValid(sellerId)) {
+      matchStage.sellerId = new mongoose.Types.ObjectId(sellerId);
+    }
 
     // ---- Scale status filter (đã đồng bộ khái niệm "All" = ACTIVE) ----
     let needFilterPendingItems = false;
@@ -434,23 +439,32 @@ const getQCList = async (req, res) => {
     }
 
     // ---- Search OR ----
-    let searchOr = null;
+    let preLookupSearchOr = null;
+    let postLookupSearchOr = null;
     if (search && search.trim() !== "") {
-      const keyword = new RegExp(search.trim(), "i");
-      searchOr = [
-        { orderId: keyword },
-        { "items.sku": keyword },
-        { "items.orderItemId": keyword },
-        { "customer_infor.email": keyword },
-        { "customer_infor.name": keyword },
-        { "seller.full_name": keyword },
-        { "seller.email": keyword },
-      ];
+      const rawSearch = search.trim();
+      if (isAmazonOrderId(rawSearch)) {
+        matchStage.orderId = rawSearch;
+      } else {
+        const keyword = new RegExp(escapeRegExp(rawSearch), "i");
+        preLookupSearchOr = [
+          { orderId: keyword },
+          { "items.sku": keyword },
+          { "items.orderItemId": keyword },
+          { "customer_infor.email": keyword },
+          { "customer_infor.name": keyword },
+        ];
+        postLookupSearchOr = [
+          { "seller.full_name": keyword },
+          { "seller.email": keyword },
+        ];
+      }
     }
 
     // ---- Base pipeline (shop/seller lookup, case, search) ----
     const basePipeline = [
       { $match: matchStage },
+      ...(preLookupSearchOr ? [{ $match: { $or: preLookupSearchOr } }] : []),
       {
         $lookup: {
           from: "shops",
@@ -478,22 +492,8 @@ const getQCList = async (req, res) => {
             },
           ]
         : []),
-      {
-        $lookup: {
-          from: "cases",
-          localField: "case",
-          foreignField: "_id",
-          as: "case",
-        },
-      },
-      ...(searchOr ? [{ $match: { $or: searchOr } }] : []),
+      ...(postLookupSearchOr ? [{ $match: { $or: postLookupSearchOr } }] : []),
     ];
-
-    if (!isSellerOnly && sellerId && mongoose.Types.ObjectId.isValid(sellerId)) {
-      basePipeline.push({
-        $match: { "seller._id": new mongoose.Types.ObjectId(sellerId) },
-      });
-    }
 
     const pipeline = [...basePipeline];
 
@@ -513,19 +513,6 @@ const getQCList = async (req, res) => {
       pipeline.push({ $match: { $expr: { $gt: [{ $size: "$items" }, 0] } } });
     }
 
-    // Thêm thông tin người scale
-    pipeline.push(
-      {
-        $lookup: {
-          from: "users",
-          localField: "scaleId",
-          foreignField: "_id",
-          as: "scaledBy",
-        },
-      },
-      { $unwind: { path: "$scaledBy", preserveNullAndEmptyArrays: true } }
-    );
-
     // ---- Count ----
     const countPipeline = [...pipeline, { $count: "total" }];
     const countResult = await OrderCustomProduct.aggregate(countPipeline);
@@ -539,6 +526,25 @@ const getQCList = async (req, res) => {
 
     pipeline.push({ $sort: { createdAt: -1 } });
     if (!isAll) pipeline.push({ $skip: skip }, { $limit: limitNum });
+    pipeline.push(
+      {
+        $lookup: {
+          from: "cases",
+          localField: "case",
+          foreignField: "_id",
+          as: "case",
+        },
+      },
+      {
+        $lookup: {
+          from: "users",
+          localField: "scaleId",
+          foreignField: "_id",
+          as: "scaledBy",
+        },
+      },
+      { $unwind: { path: "$scaledBy", preserveNullAndEmptyArrays: true } }
+    );
 
     const orders = await OrderCustomProduct.aggregate(pipeline);
 

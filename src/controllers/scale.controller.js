@@ -1058,6 +1058,14 @@ function hasRole(userRole, target) {
     : norm(userRole) === wanted;
 }
 
+const escapeRegExp = (value = "") => String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+const isAmazonOrderId = (value = "") => /^\d{3}-\d{7}-\d{7}(?:-R\d+)?$/i.test(String(value).trim());
+const buildScaleOverallMatch = (statuses = []) => {
+  const values = [...new Set(statuses.filter(Boolean))];
+  if (values.includes("Need Scale")) values.push(null);
+  return { $in: values };
+};
+
 const getScaleList = async (req, res) => {
   try {
     const {
@@ -1129,9 +1137,69 @@ const getScaleList = async (req, res) => {
       initialMatch.sellerId = new mongoose.Types.ObjectId(userId);
     }
 
+    const activeScaleStatuses = ["Need Scale", "Pending", "Sent", "QC Rejected"];
+    let selectedScaleStatuses = activeScaleStatuses;
+    let onlyPending = false;
+    if (scale_status && String(scale_status).trim() !== "") {
+      if (/^all$/i.test(scale_status.trim())) {
+        selectedScaleStatuses = activeScaleStatuses;
+      } else {
+        const wanted = String(scale_status)
+          .split(",")
+          .map(canon)
+          .filter(Boolean);
+        const valid = wanted.filter((v) => KNOWN.includes(v));
+        selectedScaleStatuses = valid.length > 0 ? valid : ["__NO_MATCH__"];
+      }
+    }
+    initialMatch.scale_overall_status = buildScaleOverallMatch(selectedScaleStatuses);
+    onlyPending = selectedScaleStatuses.length === 1 && selectedScaleStatuses[0] === "Pending";
+    if (onlyPending) {
+      initialMatch["items.scale_status"] = "Pending";
+    }
+    const needsAvailablePsdFilter = selectedScaleStatuses.includes("Need Scale");
+
+    if (String(cs_unassigned || "").toLowerCase() === "true") {
+      initialMatch.$or = [
+        { csAssigneeId: { $exists: false } },
+        { csAssigneeId: null },
+        { cs_assignment_status: "Unassigned" },
+      ];
+    }
+    if (cs_assignee_id && mongoose.Types.ObjectId.isValid(cs_assignee_id)) {
+      initialMatch.csAssigneeId = new mongoose.Types.ObjectId(cs_assignee_id);
+    }
+    if (cs_assignment_status && String(cs_assignment_status).trim()) {
+      initialMatch.cs_assignment_status = String(cs_assignment_status).trim();
+    }
+
+    let preLookupSearchOr = null;
+    let postLookupSearchOr = null;
+    if (search && search.trim()) {
+      const rawSearch = search.trim();
+      if (isAmazonOrderId(rawSearch)) {
+        initialMatch.orderId = rawSearch;
+      } else {
+        const keyword = new RegExp(escapeRegExp(rawSearch), "i");
+        preLookupSearchOr = [
+          { orderId: keyword },
+          { "items.asin": keyword },
+          { "items.sku": keyword },
+          { "items.orderItemId": keyword },
+          { "customer_infor.email": keyword },
+          { "customer_infor.name": keyword },
+        ];
+        postLookupSearchOr = [
+          { "seller.full_name": keyword },
+          { "seller.email": keyword },
+        ];
+      }
+    }
+
     // ===== Base pipeline =====
     const pipeline = [
       { $match: initialMatch },
+      ...(preLookupSearchOr ? [{ $match: { $or: preLookupSearchOr } }] : []),
 
       // Join shop
       {
@@ -1177,62 +1245,7 @@ const getScaleList = async (req, res) => {
         ]
         : []),
 
-      // Filter search
-      ...(() => {
-        if (!search || !search.trim()) return [];
-        const keyword = new RegExp(search.trim(), "i");
-        return [
-          {
-            $match: {
-              $or: [
-                { orderId: keyword },
-                { "items.asin": keyword },
-                { "items.sku": keyword },
-                { "items.orderItemId": keyword },
-                { "customer_infor.email": keyword },
-                { "customer_infor.name": keyword },
-                { "seller.full_name": keyword },
-                { "seller.email": keyword },
-              ],
-            },
-          },
-        ];
-      })(),
-
-      // ===== CS assignment filters =====
-      ...(String(cs_unassigned || "").toLowerCase() === "true"
-        ? [
-          {
-            $match: {
-              $or: [
-                { csAssigneeId: { $exists: false } },
-                { csAssigneeId: null },
-                { cs_assignment_status: "Unassigned" },
-              ],
-            },
-          },
-        ]
-        : []),
-
-      ...(cs_assignee_id && mongoose.Types.ObjectId.isValid(cs_assignee_id)
-        ? [
-          {
-            $match: {
-              csAssigneeId: new mongoose.Types.ObjectId(cs_assignee_id),
-            },
-          },
-        ]
-        : []),
-
-      ...(cs_assignment_status && String(cs_assignment_status).trim()
-        ? [
-          {
-            $match: {
-              cs_assignment_status: String(cs_assignment_status).trim(),
-            },
-          },
-        ]
-        : []),
+      ...(postLookupSearchOr ? [{ $match: { $or: postLookupSearchOr } }] : []),
     ];
 
     // ===== pngStatus filter =====
@@ -1290,48 +1303,11 @@ const getScaleList = async (req, res) => {
       },
     });
 
-    // ===== Filter theo bucket =====
-    let onlyPending = false;
-    if (scale_status && String(scale_status).trim() !== "") {
-      if (/^all$/i.test(scale_status.trim())) {
-        pipeline.push({
-          $match: {
-            overall_status_bucket: {
-              $in: ["Need Scale", "Pending", "Sent", "QC Rejected"],
-            },
-          },
-        });
-      } else {
-        const wanted = String(scale_status)
-          .split(",")
-          .map(canon)
-          .filter(Boolean);
-        const valid = wanted.filter((v) => KNOWN.includes(v));
-
-        if (valid.length > 0) {
-          pipeline.push({
-            $match: { overall_status_bucket: { $in: valid } },
-          });
-          onlyPending = valid.length === 1 && valid[0] === "Pending";
-        } else {
-          pipeline.push({
-            $match: { overall_status_bucket: "__NO_MATCH__" },
-          });
-        }
-      }
-    } else {
-      pipeline.push({
-        $match: {
-          overall_status_bucket: {
-            $in: ["Need Scale", "Pending", "Sent", "QC Rejected"],
-          },
-        },
-      });
-    }
-
     if (onlyPending) {
       pipeline.push({ $match: { hasPendingItem: true } });
     }
+
+    if (needsAvailablePsdFilter) {
 
     /**
      * Need Scale chỉ hiện những Listing có psd.status = available
@@ -1402,8 +1378,9 @@ const getScaleList = async (req, res) => {
           },
         },
       },
-      { $unset: ["availablePsdListings", "availablePsdListingIds"] }
-    );
+        { $unset: ["availablePsdListings", "availablePsdListingIds"] }
+      );
+    }
 
     // ===== Join Case =====
     pipeline.push({
@@ -2169,7 +2146,7 @@ function extractRoles(userRole) {
   }
   return [];
 }
-function hasRole(userRole, roleName) {
+function hasNormalizedRole(userRole, roleName) {
   const want = String(roleName).trim().replace(/\s+/g, " ").toLowerCase();
   return extractRoles(userRole).includes(want);
 }
@@ -2199,11 +2176,11 @@ async function getScaleStatistics(req, res) {
     const userRole = req.user?.role; // string | array | {roles:[]}
     const userId = req.user?.userId || "";
 
-    const isAdmin = hasRole(userRole, "Admin");
-    const isSeller = hasRole(userRole, "Seller");
-    const isCS = hasRole(userRole, "Customer Service");
-    const isDesignLeader = hasRole(userRole, "Design Leader");
-    const isDesigner = hasRole(userRole, "Designer");
+    const isAdmin = hasNormalizedRole(userRole, "Admin");
+    const isSeller = hasNormalizedRole(userRole, "Seller");
+    const isCS = hasNormalizedRole(userRole, "Customer Service");
+    const isDesignLeader = hasNormalizedRole(userRole, "Design Leader");
+    const isDesigner = hasNormalizedRole(userRole, "Designer");
 
     if (!(isAdmin || isSeller || isCS || isDesignLeader || isDesigner)) {
       return res
@@ -2529,7 +2506,7 @@ async function getScaleStatisticsForDesign(req, res) {
     const isSeller = /^seller$/i.test(role);
     const isDesigner = /^designer$/i.test(role);
     const isDesignLeader = /^design\s*leader$/i.test(role);
-    const isCS = hasRole(role, "Customer Service");
+    const isCS = hasNormalizedRole(role, "Customer Service");
 
     if (!isAdmin && !isSeller && !isDesigner && !isDesignLeader && !isCS) {
       return res

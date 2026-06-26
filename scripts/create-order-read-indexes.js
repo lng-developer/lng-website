@@ -15,6 +15,11 @@ const ORDER_INDEXES = [
   [{ base_cost: 1, status: 1, purchase_date: -1 }],
   [{ shipping_type: 1, purchase_date: -1 }],
   [{ "address_validation.isValid": 1, purchase_date: -1 }],
+  [{ scale_overall_status: 1, createdAt: -1 }],
+  [{ csAssigneeId: 1, scale_overall_status: 1, createdAt: -1 }],
+  [{ sellerId: 1, scale_overall_status: 1, createdAt: -1 }],
+  [{ cs_assignment_status: 1, scale_overall_status: 1, createdAt: -1 }],
+  [{ "items.scale_status": 1, scale_overall_status: 1, createdAt: -1 }],
 ];
 
 const ETSY_INDEXES = [
@@ -24,6 +29,12 @@ const ETSY_INDEXES = [
   [{ base_cost: 1, status: 1, saleDate: -1 }],
   [{ shipping_type: 1, saleDate: -1 }],
   [{ "address_validation.isValid": 1, saleDate: -1 }],
+  [{ scale_overall_status: 1, createdAt: -1 }],
+  [{ csAssigneeId: 1, scale_overall_status: 1, createdAt: -1 }],
+  [{ "seller.sellerId": 1, scale_overall_status: 1, createdAt: -1 }],
+  [{ scaleId: 1, scale_overall_status: 1, createdAt: -1 }],
+  [{ cs_assignment_status: 1, scale_overall_status: 1, createdAt: -1 }],
+  [{ "items.scale_status": 1, scale_overall_status: 1, createdAt: -1 }],
 ];
 
 async function createIndexes(collection, indexes) {
