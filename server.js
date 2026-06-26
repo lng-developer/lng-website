@@ -9,6 +9,7 @@ const connectDB = require("./src/config/db.config");
 const registerSocketHandlers = require("./src/socket/index");
 const presence = require("./src/lib/presence");
 const etsyVendorSyncScheduler = require("./src/service/etsyVendorSyncScheduler");
+const { startAutoScheduler } = require("./src/controllers/autoConfig.controller");
 
 // ===== App
 const app = express();
@@ -178,6 +179,7 @@ app.use((err, _req, res, _next) => {
 const PORT = process.env.PORT || 5000;
 connectDB().then(() => {
   etsyVendorSyncScheduler.start();
+  startAutoScheduler();
   httpServer.listen(PORT, "0.0.0.0", () => {
     console.log(`API running at http://localhost:${PORT}`);
   });

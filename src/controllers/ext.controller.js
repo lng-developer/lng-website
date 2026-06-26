@@ -57,6 +57,9 @@ const {
   ONOS_API_BASE_URL = "https://api-app.onospod.com/api/v1",
   ONOS_API_KEY = "",
   ONOS_ACCESS_TOKEN = "",
+  LENFUL_API_KEY = "",
+  LENFUL_ACCESS_TOKEN = "",
+  LENFUL_TOKEN = "",
 
   // Debug flag cho server (tuỳ set)
   VENDOR_SYNC_DEBUG = "0",
@@ -139,6 +142,12 @@ const httpOnos = axios.create({
   validateStatus: () => true,
 });
 
+const httpLenful = axios.create({
+  baseURL: "https://s-lencam.lenful.com",
+  timeout: 20000,
+  validateStatus: () => true,
+});
+
 // ====== HELPERS ======
 const norm = (s) => String(s || "").trim();
 const lower = (s) => norm(s).toLowerCase();
@@ -171,7 +180,8 @@ function normalizeVendorKey(nameOrType) {
   if (s.includes("ss88") || s.includes("mmoseller")) return "ss88";
   if (s.includes("luxurypro") || s.includes("luxury pro")) return "luxurypro";
   if (s.includes("onos")) return "onos";
-  if (["beeful", "merchfox", "merchize", "printway", "mangotee", "ss88", "luxurypro", "onos"].includes(s))
+  if (s.includes("lenful")) return "lenful";
+  if (["beeful", "merchfox", "merchize", "printway", "mangotee", "ss88", "luxurypro", "onos", "lenful"].includes(s))
     return s;
   return "";
 }
@@ -358,6 +368,7 @@ function getVendorFulfillmentName(vendorKey) {
       ss88: "SS88",
       luxurypro: "LuxuryPro",
       onos: "Onos",
+      lenful: "Lenful",
     }[vendorKey] || ""
   );
 }
@@ -371,6 +382,7 @@ async function fetchTrackingByVendorKey(vendorKey, orderId, doc) {
   if (vendorKey === "ss88") return fetchSS88(orderId);
   if (vendorKey === "luxurypro") return fetchLuxuryPro(orderId);
   if (vendorKey === "onos") return fetchOnos(orderId, doc);
+  if (vendorKey === "lenful") return fetchLenful(orderId, doc);
   throw new Error(`Unsupported vendor: ${vendorKey}`);
 }
 
@@ -791,6 +803,55 @@ async function fetchOnos(orderId, doc) {
   return { ...picked, raw };
 }
 
+function getLenfulExternalOrderId(doc = {}) {
+  return norm(doc?.vendor_submissions?.lenful?.external_id);
+}
+
+function pickLenfulTracking(raw, orderId, doc = {}) {
+  const rows = Array.isArray(raw?.data) ? raw.data : [];
+  const trimmedOrderId = norm(orderId);
+  const externalId = getLenfulExternalOrderId(doc);
+  const picked =
+    rows.find((row) => norm(row?.order_number) === trimmedOrderId) ||
+    rows.find((row) => externalId && norm(row?.order_short_id) === externalId);
+
+  if (!picked) {
+    throw new Error(`Lenful tracking not found for ${trimmedOrderId}`);
+  }
+
+  const tracking = norm(picked.number);
+  const carrier = norm(picked.company) || norm(picked.translation?.name);
+  return { tracking, carrier, shipped: Boolean(tracking), raw: picked };
+}
+
+async function fetchLenful(orderId, doc) {
+  const token = LENFUL_API_KEY || LENFUL_ACCESS_TOKEN || LENFUL_TOKEN;
+  if (!token) throw new Error("Lenful missing API key (LENFUL_API_KEY)");
+
+  const res = await httpLenful.get("/api/order/trackings", {
+    params: {
+      page: 1,
+      limit: 50,
+      keyword: orderId,
+      keyword_type: "order",
+      sort_by: "create_at_desc",
+    },
+    headers: {
+      Authorization: `Bearer ${token}`,
+      Accept: "application/json",
+    },
+  });
+
+  if (res.status === 401) {
+    throw new Error("Lenful unauthorized (401): check LENFUL_API_KEY");
+  }
+  if (res.status >= 400) {
+    throw new Error(`Lenful HTTP ${res.status}: ${res.data?.message || res.data?.error || "tracking failed"}`);
+  }
+
+  return pickLenfulTracking(res.data, orderId, doc);
+}
+
 function buildLuxuryProTrackingUrl(orderId) {
   const configured =
     LUXURYPRO_TRACKING_ENDPOINT ||
@@ -909,24 +970,7 @@ function applyToItemsOfVendor(
 
     const nextTI = {
       ...ti,
-      fulfillment:
-        vendorKey === "beeful"
-          ? "Beeful"
-          : vendorKey === "merchfox"
-            ? "MerchFox"
-            : vendorKey === "merchize"
-              ? "Merchize"
-              : vendorKey === "printway"
-                ? "Printway"
-                : vendorKey === "mangotee"
-                  ? "MangoTee"
-                  : vendorKey === "ss88"
-                    ? "SS88"
-                    : vendorKey === "luxurypro"
-                      ? "LuxuryPro"
-                      : vendorKey === "onos"
-                        ? "Onos"
-                    : norm(ti.fulfillment),
+      fulfillment: getVendorFulfillmentName(vendorKey) || norm(ti.fulfillment),
       tracking: tracking || prevTracking,
       status: shipped ? "Shipped" : thePrevStatus || "New",
       updated_at: new Date(),
@@ -1006,6 +1050,15 @@ function applyToItemsOfVendor(
       tracking_status: norm(raw?.detail?.data?.status || raw?.detail?.status || ""),
     };
     if (typeof doc.markModified === "function") doc.markModified("vendor_submissions");
+  } else if (vendorKey === "lenful") {
+    doc.vendor_submissions = doc.vendor_submissions || {};
+    doc.vendor_submissions.lenful = {
+      ...(doc.vendor_submissions.lenful || {}),
+      tracking_attempt_count: (doc.vendor_submissions.lenful?.tracking_attempt_count || 0) + 1,
+      tracking_last_response: raw,
+      tracking_status: norm(raw?.status || ""),
+    };
+    if (typeof doc.markModified === "function") doc.markModified("vendor_submissions");
   }
 
   return changed;
@@ -1027,7 +1080,7 @@ async function updateOrderByVendors(orderId, vpidToVendorPrefetched = null) {
 
   const groups = groupItemsByVendorWithMap(doc, vpidToVendor);
   const vendorKeys = Object.keys(groups).filter((k) =>
-    ["beeful", "merchfox", "merchize", "printway", "mangotee", "ss88", "luxurypro", "onos"].includes(k)
+    ["beeful", "merchfox", "merchize", "printway", "mangotee", "ss88", "luxurypro", "onos", "lenful"].includes(k)
   );
 
   if (vendorKeys.length === 0) {
@@ -1039,19 +1092,12 @@ async function updateOrderByVendors(orderId, vpidToVendorPrefetched = null) {
   let totalChanged = 0;
   for (const vk of vendorKeys) {
     try {
-      let res;
-      if (vk === "beeful") res = await fetchBeeful(orderId);
-      else if (vk === "merchfox") res = await fetchMerchFox(orderId);
-      else if (vk === "merchize") res = await fetchMerchize(orderId);
-      else if (vk === "printway") res = await fetchPrintway(orderId, doc);
-      else if (vk === "mangotee") res = await fetchMangoTee(orderId);
-      else if (vk === "ss88") res = await fetchSS88(orderId);
-      else if (vk === "luxurypro") res = await fetchLuxuryPro(orderId);
-      else if (vk === "onos") res = await fetchOnos(orderId, doc);
-      else continue;
+      const res = await fetchTrackingByVendorKey(vk, orderId, doc);
 
       totalChanged += applyToItemsOfVendor(doc, vk, res);
-    } catch (_) { }
+    } catch (e) {
+      if (vk === "lenful") throw e;
+    }
   }
 
   const allShipped = (doc.items || []).every(
@@ -1086,7 +1132,7 @@ async function runBatch({ max = 1100, dryRun = false } = {}) {
 
   const vpidToVendor = await buildVendorMapsFromVpidSet(vpidSet);
 
-  const knownKeys = new Set(["beeful", "merchfox", "merchize", "printway", "mangotee", "ss88", "luxurypro", "onos"]);
+  const knownKeys = new Set(["beeful", "merchfox", "merchize", "printway", "mangotee", "ss88", "luxurypro", "onos", "lenful"]);
   const filtered = candidates.filter((o) => {
     const groups = groupItemsByVendorWithMap(o, vpidToVendor);
     return Object.keys(groups).some((k) => knownKeys.has(k));
@@ -1208,7 +1254,7 @@ async function updateEtsyOrderByVendors(orderId, options = {}) {
     options.vpidToVendorPrefetched || (await buildVendorMapsFromVpidSet(vpidSet));
   doc.__vpidToVendor = vpidToVendor;
 
-  const knownKeys = new Set(["beeful", "merchfox", "merchize", "printway", "mangotee", "ss88", "luxurypro", "onos"]);
+  const knownKeys = new Set(["beeful", "merchfox", "merchize", "printway", "mangotee", "ss88", "luxurypro", "onos", "lenful"]);
   const groups = groupItemsByVendorWithMap(doc, vpidToVendor);
   const vendorKeys = Object.keys(groups).filter((k) => knownKeys.has(k));
 
@@ -1281,7 +1327,7 @@ async function runEtsyVendorBatch({ max = 1100, dryRun = false, shopId = null, s
   }
 
   const vpidToVendor = await buildVendorMapsFromVpidSet(vpidSet);
-  const knownKeys = new Set(["beeful", "merchfox", "merchize", "printway", "mangotee", "ss88", "luxurypro", "onos"]);
+  const knownKeys = new Set(["beeful", "merchfox", "merchize", "printway", "mangotee", "ss88", "luxurypro", "onos", "lenful"]);
   const filtered = candidates.filter((o) => {
     const groups = groupItemsByVendorWithMap(o, vpidToVendor);
     return Object.keys(groups).some((k) => knownKeys.has(k));
@@ -2247,5 +2293,6 @@ module.exports = {
   runBatch,
   runEtsyVendorBatch,
   pickOnosTracking,
+  pickLenfulTracking,
 };
 
