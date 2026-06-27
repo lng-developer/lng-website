@@ -18,6 +18,7 @@ const {
     buildEtsyTrackingInfoResponse,
     buildEtsyTrackingSummary,
 } = require("../service/etsyTrackingResponse.service");
+const logger = require("../helper/logger");
 
 const etsyFulfillmentUploadDir = path.join(process.cwd(), "tmp_uploads", "etsy_fulfillment");
 if (!fs.existsSync(etsyFulfillmentUploadDir)) fs.mkdirSync(etsyFulfillmentUploadDir, { recursive: true });
@@ -401,7 +402,8 @@ const buildSmartyDebugAddress = (address = {}) => ({
 });
 
 const logEtsySmartyAddressValidation = (message, details = {}) => {
-    console.warn("[ETSY_SMARTY_ADDRESS_VALIDATION]", {
+    logger.warn({
+        tag: "ETSY_SMARTY_ADDRESS_VALIDATION",
         message,
         ...details,
     });
@@ -781,7 +783,8 @@ const testEtsySmartyAddressValidation = async (req, res) => {
     };
 
     if (!env.hasAuthId || !env.hasAuthToken) {
-        console.warn("[ETSY_SMARTY_TEST]", {
+        logger.warn({
+            tag: "ETSY_SMARTY_TEST",
             message: "Missing Etsy Smarty credentials",
             ...requestContext,
         });
@@ -814,7 +817,8 @@ const testEtsySmartyAddressValidation = async (req, res) => {
     if (String(body.street2 || "").trim()) params.street2 = String(body.street2).trim();
     if (env.license) params.license = env.license;
 
-    console.log("[ETSY_SMARTY_TEST]", {
+    logger.debug({
+        tag: "ETSY_SMARTY_TEST",
         message: "Testing Etsy Smarty address validation",
         ...requestContext,
     });
@@ -835,7 +839,8 @@ const testEtsySmartyAddressValidation = async (req, res) => {
             ? null
             : data || { message: "Unexpected Smarty response status" };
 
-        console.log("[ETSY_SMARTY_TEST]", {
+        logger.debug({
+            tag: "ETSY_SMARTY_TEST",
             message: "Smarty test completed",
             ...requestContext,
             httpStatus: response.status,
@@ -857,7 +862,8 @@ const testEtsySmartyAddressValidation = async (req, res) => {
             smartyError,
         });
     } catch (err) {
-        console.warn("[ETSY_SMARTY_TEST]", {
+        logger.warn({
+            tag: "ETSY_SMARTY_TEST",
             message: "Smarty test request failed",
             ...requestContext,
             error: err.message,
@@ -900,7 +906,8 @@ const importOrders = async (req, res) => {
             ordersUpserted: 0,
             itemsProcessed: 0,
             itemsCreated: 0,
-            sellerLinked: 0
+            sellerLinked: 0,
+            ordersCostComputed: 0
         };
 
         for (const file of req.files) {
@@ -1015,6 +1022,14 @@ const importOrders = async (req, res) => {
                 for (const oid of affectedOrders) {
                     const order = await EtsyOrder.findOne({ orderId: oid, shopId });
                     await validateAddressIfNeeded(order, { force: shippingChangedOrderIds.has(String(oid)) });
+                    try {
+                        if (order && Array.isArray(order.items) && order.items.length > 0) {
+                            await calculateEtsyCost(order);
+                            stats.ordersCostComputed += 1;
+                        }
+                    } catch (err) {
+                        logger.error(`Auto-compute cost failed for Etsy order ${oid}: ${err.message}`);
+                    }
                 }
             }
 
@@ -1022,8 +1037,6 @@ const importOrders = async (req, res) => {
             if (type === "items") {
 
                 const affectedOrders = new Set();
-                let computedCount = 0;
-
                 // 🔥 Batch lookup: lấy tất cả SKU → tìm IMAGE1 từ etsylistings
                 const allSkus = rows
                     .map(r => r["SKU"])
@@ -1092,7 +1105,8 @@ const importOrders = async (req, res) => {
                             { $push: { items: itemDoc } }
                         );
                     } else {
-                        console.log("[ETSY_CUSTOM_DATA][CSV_IMPORT_PRESERVE_CUSTOM]", {
+                        logger.debug({
+                            tag: "ETSY_CUSTOM_DATA_CSV_IMPORT_PRESERVE_CUSTOM",
                             orderId,
                             transactionId: itemDoc.transactionId,
                         });
@@ -1121,14 +1135,13 @@ const importOrders = async (req, res) => {
                         // Tự động tính toán cost breakdown sau khi import
                         if (order && Array.isArray(order.items) && order.items.length > 0) {
                             await calculateEtsyCost(order);
-                            computedCount++;
+                            stats.ordersCostComputed += 1;
                         }
                     } catch (err) {
-                        console.error(`Auto-compute cost failed for Etsy order ${oid}:`, err.message);
+                        logger.error(`Auto-compute cost failed for Etsy order ${oid}: ${err.message}`);
                     }
                 }
 
-                stats.ordersCostComputed = computedCount;
             }
 
             fs.unlink(file.path, () => { });
@@ -1558,7 +1571,7 @@ async function calculateEtsyCost(order) {
                 candidateSetsPerItem.push(new Set(vId ? [vId] : []));
                 continue;
             }
-            console.warn(`[calculateEtsyCost] Manual VCC ${item.manual_vendor_cost_center_id} not found or has 0 cost. Falling back to auto.`);
+            logger.warn(`[calculateEtsyCost] Manual VCC ${item.manual_vendor_cost_center_id} not found or has 0 cost. Falling back to auto.`);
         }
 
         const labelValueMap = extractLabelValueMapFromEtsyItem(item);
@@ -1763,16 +1776,16 @@ async function calculateEtsyCost(order) {
         }
 
         if (itemBulkOps.length > 0) {
-            console.log(`[calculateEtsyCost] BulkWrite: ${itemBulkOps.length} ops for order._id=${order._id}`);
-            console.log(`[calculateEtsyCost] Sample filter:`, JSON.stringify(itemBulkOps[0].updateOne.filter));
+            logger.debug(`[calculateEtsyCost] BulkWrite: ${itemBulkOps.length} ops for order._id=${order._id}`);
+            logger.debug(`[calculateEtsyCost] Sample filter: ${JSON.stringify(itemBulkOps[0].updateOne.filter)}`);
             const bulkResult = await EtsyOrder.bulkWrite(itemBulkOps);
-            console.log(`[calculateEtsyCost] BulkWrite result:`, JSON.stringify({
+            logger.debug(`[calculateEtsyCost] BulkWrite result: ${JSON.stringify({
                 matchedCount: bulkResult.matchedCount,
                 modifiedCount: bulkResult.modifiedCount,
                 upsertedCount: bulkResult.upsertedCount
-            }));
+            })}`);
         } else {
-            console.log(`[calculateEtsyCost] NO bulkWrite ops - all items failed calculation`);
+            logger.debug(`[calculateEtsyCost] NO bulkWrite ops - all items failed calculation`);
         }
 
         order.base_cost = Number(total.toFixed(2));
@@ -2128,7 +2141,7 @@ const getEtsyOrderStatistics = async (req, res) => {
             }
         );
     } catch (err) {
-        console.error("❌ getEtsyOrderStatistics error:", err);
+        logger.error(`getEtsyOrderStatistics error: ${err.message}`);
         return res.status(err.statusCode || 500).json({ message: err.statusCode ? err.message : "Internal Server Error" });
     }
 };
@@ -2648,7 +2661,8 @@ const buildEtsyOrderPayload = (body) => {
         ? body.shipping_type
         : "Standard";
 
-    console.log("[ETSY_CUSTOM_DATA][IMPORT_PAYLOAD_SUMMARY]", {
+    logger.debug({
+        tag: "ETSY_CUSTOM_DATA_IMPORT_PAYLOAD_SUMMARY",
         orderId,
         shopId: String(shopIdRaw),
         ...customSummary,
@@ -2890,7 +2904,8 @@ const backfillExistingEtsyOrder = async (existing, payload) => {
         await existing.save();
     }
 
-    console.log("[ETSY_ORDER_BACKFILL]", {
+    logger.debug({
+        tag: "ETSY_ORDER_BACKFILL",
         shopId: String(payload.shopId),
         orderId: payload.orderId,
         existingItems: existingItemsCount,
@@ -2932,12 +2947,28 @@ const createOrder = async (req, res) => {
                 await fillSellerIfMissing(payload.orderId, payload.shopId, payload.seller.sellerCode);
             }
             await validateAddressIfNeeded(existing, { force: result.shippingAddressBackfilled });
-            console.log("[ETSY_CUSTOM_DATA][BACKFILL_SUMMARY]", {
+            let autoBaseCost = null;
+            if (Array.isArray(existing.items) && existing.items.length > 0) {
+                try {
+                    const computed = await calculateEtsyCost(existing);
+                    autoBaseCost = {
+                        ok: true,
+                        base_cost: existing.base_cost,
+                        preferred_vendor_id: computed.preferredVendorId || null,
+                    };
+                } catch (computeErr) {
+                    logger.error(`Auto-compute cost failed for Etsy order ${payload.orderId}: ${computeErr.message}`);
+                    autoBaseCost = { ok: false, error: computeErr.message };
+                }
+            }
+            logger.debug({
+                tag: "ETSY_CUSTOM_DATA_BACKFILL_SUMMARY",
                 orderId: payload.orderId,
                 shopId: String(payload.shopId),
                 customTextBackfilled: result.customTextBackfilled,
                 customFilesBackfilled: result.customFilesBackfilled,
                 customFilesMerged: result.customFilesMerged,
+                autoBaseCost,
                 customSummary: result.customSummary,
             });
             return res.status(200).json({
@@ -2954,6 +2985,7 @@ const createOrder = async (req, res) => {
                 customTextBackfilled: result.customTextBackfilled,
                 customFilesBackfilled: result.customFilesBackfilled,
                 customFilesMerged: result.customFilesMerged,
+                autoBaseCost,
                 customSummary: result.customSummary,
             });
         }
@@ -2963,23 +2995,40 @@ const createOrder = async (req, res) => {
         if (payload.seller?.sellerCode) {
             await fillSellerIfMissing(payload.orderId, payload.shopId, payload.seller.sellerCode);
         }
-        console.log("[ETSY_CUSTOM_DATA][CREATE_ORDER_SUMMARY]", {
+        let autoBaseCost = null;
+        if (Array.isArray(doc.items) && doc.items.length > 0) {
+            try {
+                const computed = await calculateEtsyCost(doc);
+                autoBaseCost = {
+                    ok: true,
+                    base_cost: doc.base_cost,
+                    preferred_vendor_id: computed.preferredVendorId || null,
+                };
+            } catch (computeErr) {
+                logger.error(`Auto-compute cost failed for Etsy order ${payload.orderId}: ${computeErr.message}`);
+                autoBaseCost = { ok: false, error: computeErr.message };
+            }
+        }
+        logger.debug({
+            tag: "ETSY_CUSTOM_DATA_CREATE_ORDER_SUMMARY",
             orderId: payload.orderId,
             shopId: String(payload.shopId),
             ...summarizeCustomData(payload.items || []),
+            autoBaseCost,
         });
         return res.status(201).json({
             ok: true,
             created: true,
             orderId: doc.orderId,
             shopId: String(doc.shopId),
+            autoBaseCost,
             customSummary: summarizeCustomData(doc.items || []),
         });
     } catch (err) {
         if (err?.status === 400) return res.status(400).json({ message: err.message });
         if (err?.code === 11000) return res.status(409).json({ message: "Duplicate orderId", keyValue: err.keyValue });
         if (err?.name === "ValidationError") return res.status(400).json({ message: err.message, errors: err.errors });
-        console.error("❌ createOrder error:", err);
+        logger.error(`createOrder error: ${err.message}`);
         return res.status(500).json({ message: "Internal Server Error", error: err.message });
     }
 };
@@ -3034,7 +3083,7 @@ const updateSumbittedoetsyStatus = async (req, res) => {
             updatedAt: updated.updatedAt,
         });
     } catch (err) {
-        console.error("updateSumbittedoetsyStatus error:", err);
+        logger.error(`updateSumbittedoetsyStatus error: ${err.message}`);
         return res.status(500).json({ ok: false, message: "Internal Server Error", error: err.message });
     }
 };
@@ -3277,7 +3326,7 @@ const updateEtsyOrderItemTracking = async (req, res) => {
             },
         });
     } catch (err) {
-        console.error("updateEtsyOrderItemTracking error:", err);
+        logger.error(`updateEtsyOrderItemTracking error: ${err.message}`);
         return res.status(500).json({ ok: false, message: "Internal Server Error", error: err.message });
     }
 };
@@ -3455,7 +3504,7 @@ const updateEtsyOrderTrackingForAllItems = async (req, res) => {
             },
         });
     } catch (err) {
-        console.error("updateEtsyOrderTrackingForAllItems error:", err);
+        logger.error(`updateEtsyOrderTrackingForAllItems error: ${err.message}`);
         return res.status(500).json({ message: "Update failed", error: err.message });
     }
 };
@@ -4696,7 +4745,7 @@ const getEtsyScaleList = async (req, res) => {
             currentPage: pageNum,
         });
     } catch (err) {
-        console.error("getEtsyScaleList error:", err);
+        logger.error(`getEtsyScaleList error: ${err.message}`);
         return res.status(500).json({ message: "Failed to retrieve Etsy scale list", error: err.message });
     }
 };
@@ -4724,7 +4773,7 @@ const getEtsyQCList = async (req, res) => {
             currentPage: pageNum,
         });
     } catch (err) {
-        console.error("getEtsyQCList error:", err);
+        logger.error(`getEtsyQCList error: ${err.message}`);
         return res.status(500).json({ message: "Failed to retrieve Etsy QC list", error: err.message });
     }
 };
@@ -4852,7 +4901,7 @@ const uploadEtsyFulfillmentFileForItem = [
                 order_scale_overall_status: order.scale_overall_status,
             });
         } catch (err) {
-            console.error("uploadEtsyFulfillmentFileForItem error:", err);
+            logger.error(`uploadEtsyFulfillmentFileForItem error: ${err.message}`);
             return res.status(500).json({ message: "Upload failed", error: err.message });
         } finally {
             for (const file of req.files || []) {

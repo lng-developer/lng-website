@@ -22,11 +22,11 @@ function loadEnv() {
   const fallbackPath = path.resolve(process.cwd(), ".env");
 
   if (fs.existsSync(envPath)) {
-    dotenv.config({ path: envPath });
+    dotenv.config({ path: envPath, quiet: true });
   } else if (envPath !== fallbackPath && fs.existsSync(fallbackPath)) {
-    dotenv.config({ path: fallbackPath });
+    dotenv.config({ path: fallbackPath, quiet: true });
   } else {
-    dotenv.config();
+    dotenv.config({ quiet: true });
   }
 
   loaded = true;

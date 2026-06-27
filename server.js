@@ -3,6 +3,7 @@ const express = require("express");
 const morgan = require("morgan");
 const cors = require("cors");
 require("./src/config/env.config")();
+require("./src/helper/consoleGuard").installConsoleGuard();
 
 const http = require("http");
 const connectDB = require("./src/config/db.config");
@@ -20,7 +21,9 @@ app.use(express.json({
     req.rawBody = Buffer.from(buf || "");
   },
 }));
-app.use(morgan("dev"));
+if (process.env.NODE_ENV !== "production" || process.env.LOG_HTTP_ACCESS === "true") {
+  app.use(morgan("dev"));
+}
 
 app.use(cors());
 
@@ -181,6 +184,6 @@ connectDB().then(() => {
   etsyVendorSyncScheduler.start();
   startAutoScheduler();
   httpServer.listen(PORT, "0.0.0.0", () => {
-    console.log(`API running at http://localhost:${PORT}`);
+    console.info(`API running at http://localhost:${PORT}`);
   });
 });
