@@ -1,5 +1,5 @@
 jest.mock('../../models', () => ({
-  EtsyOrder: { findOne: jest.fn(), aggregate: jest.fn() },
+  EtsyOrder: { findOne: jest.fn(), findOneAndUpdate: jest.fn(), findById: jest.fn(), updateOne: jest.fn(), aggregate: jest.fn() },
   vendorProduct: { find: jest.fn() },
   user: {},
   role: {},
@@ -19,6 +19,9 @@ jest.mock('../../service/fulfillment', () => ({
 jest.mock('../../service/orderHistoryLogger', () => ({
   logOrderHistory: jest.fn().mockResolvedValue(undefined),
 }));
+jest.mock('../../service/orderLifecycleLogger', () => ({
+  logOrderLifecycleEvent: jest.fn().mockResolvedValue(undefined),
+}));
 
 jest.mock('../../service/etsyTrackingResponse.service', () => ({
   buildEtsyTrackingInfoResponse: jest.fn(),
@@ -33,6 +36,7 @@ const axios = require('axios');
 const db = require('../../models');
 const FulfillmentService = require('../../service/fulfillment');
 const { logOrderHistory } = require('../../service/orderHistoryLogger');
+const { logOrderLifecycleEvent } = require('../../service/orderLifecycleLogger');
 const controller = require('../etsyOrder.controller');
 
 function makeRes() {
@@ -137,6 +141,18 @@ describe('resetBaseCostForEtsyOrder', () => {
           to: 'removed',
         }),
       ]),
+    }));
+    expect(logOrderLifecycleEvent).toHaveBeenCalledWith(expect.objectContaining({
+      platform: 'etsy',
+      orderId: 'ETSY-1001',
+      stage: 'RESET',
+      eventType: 'ORDER_RESET_COST',
+      status: 'success',
+      metadata: expect.objectContaining({
+        oldBaseCost: 18.75,
+        newBaseCost: 0,
+        removedCostBreakdownCount: 2,
+      }),
     }));
     expect(res.status).toHaveBeenCalledWith(200);
     expect(res.json).toHaveBeenCalledWith({
@@ -493,6 +509,48 @@ describe('retrySendEtsyFulfillment', () => {
   });
 });
 
+describe('updateEtsyOrderTrackingForAllItems lifecycle', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
+
+  test('logs ORDER_STATUS_CHANGED when tracking update ships the Etsy order', async () => {
+    const beforeDoc = { _id: 'etsy-oid-1', orderId: 'ETSY-TRACK-1', status: 'New' };
+    const updated = {
+      _id: 'etsy-oid-1',
+      orderId: 'ETSY-TRACK-1',
+      status: 'New',
+      scale_overall_status: 'Sent',
+      items: [
+        { transactionId: 't1', tracking_info: { status: 'Shipped', tracking: 'YT123' } },
+      ],
+    };
+    db.EtsyOrder.findOne.mockReturnValueOnce({ lean: jest.fn().mockResolvedValue(beforeDoc) });
+    db.EtsyOrder.findOneAndUpdate.mockResolvedValue(updated);
+    db.EtsyOrder.updateOne.mockResolvedValue({ modifiedCount: 1 });
+
+    const req = {
+      params: { orderId: 'ETSY-TRACK-1' },
+      body: { tracking: 'YT123', fulfillment: 'Merchize' },
+      user: { _id: 'u1', email: 'cs@example.com' },
+      ip: '127.0.0.1',
+      headers: { 'user-agent': 'jest' },
+    };
+    const res = makeRes();
+
+    await controller.updateEtsyOrderTrackingForAllItems(req, res);
+
+    expect(logOrderLifecycleEvent).toHaveBeenCalledWith(expect.objectContaining({
+      platform: 'etsy',
+      orderId: 'ETSY-TRACK-1',
+      stage: 'ORDER_STATUS',
+      eventType: 'ORDER_STATUS_CHANGED',
+      status: 'success',
+      metadata: { fromStatus: 'New', toStatus: 'Shipped' },
+    }));
+  });
+});
+
 describe('confirmEtsyScaleForItem', () => {
   const originalEnv = { ...process.env };
 
@@ -564,6 +622,36 @@ describe('confirmEtsyScaleForItem', () => {
     expect(order.scale_overall_status).toBe('Sent');
     expect(order.status).toBe('Fulfilled');
     expect(FulfillmentService.send).not.toHaveBeenCalled();
+    expect(logOrderLifecycleEvent).toHaveBeenCalledWith(expect.objectContaining({
+      platform: 'etsy',
+      orderId: 'ETSY-1001',
+      stage: 'SCALE',
+      eventType: 'SCALE_ITEM_APPROVED',
+      status: 'success',
+    }));
+    expect(logOrderLifecycleEvent).toHaveBeenCalledWith(expect.objectContaining({
+      platform: 'etsy',
+      orderId: 'ETSY-1001',
+      stage: 'QC',
+      eventType: 'QC_APPROVED',
+      status: 'success',
+      metadata: { orderItemId: 't1', note: '' },
+    }));
+    expect(logOrderLifecycleEvent).toHaveBeenCalledWith(expect.objectContaining({
+      platform: 'etsy',
+      orderId: 'ETSY-1001',
+      stage: 'SCALE',
+      eventType: 'SCALE_ORDER_READY',
+      status: 'success',
+    }));
+    expect(logOrderLifecycleEvent).toHaveBeenCalledWith(expect.objectContaining({
+      platform: 'etsy',
+      orderId: 'ETSY-1001',
+      stage: 'VENDOR_PUSH',
+      eventType: 'VENDOR_PUSH_SUCCESS',
+      status: 'success',
+      metadata: expect.objectContaining({ provider: 'fulfillment-platform-v2' }),
+    }));
     expect(res.json).toHaveBeenCalledWith(expect.objectContaining({
       message: 'Approved and pushed Etsy order to Fulfillment Platform v2.',
       order_scale_overall_status: 'Sent',
@@ -613,6 +701,14 @@ describe('confirmEtsyScaleForItem', () => {
 
     expect(axios.post).not.toHaveBeenCalled();
     expect(FulfillmentService.send).toHaveBeenCalledWith(order, 'merchize');
+    expect(logOrderLifecycleEvent).toHaveBeenCalledWith(expect.objectContaining({
+      platform: 'etsy',
+      orderId: 'ETSY-2002',
+      stage: 'VENDOR_PUSH',
+      eventType: 'VENDOR_PUSH_SUCCESS',
+      status: 'success',
+      metadata: expect.objectContaining({ provider: 'merchize' }),
+    }));
     expect(res.json).toHaveBeenCalledWith(expect.objectContaining({
       message: 'Approved and Etsy order sent to merchize.',
       submission_vendor: 'merchize',

@@ -22,6 +22,8 @@ const Listing = db.listing;
 const PsdTask = db.PsdTask;
 const OrderHistory = db.OrderHistory;
 const { logOrderHistory } = require("../service/orderHistoryLogger");
+const { logOrderLifecycleEvent } = require("../service/orderLifecycleLogger");
+const { buildOrderLifecyclePayload } = require("../service/orderLifecycleContext");
 const {
   applyRulesToSku,
   buildRulesFromConfig,
@@ -2250,6 +2252,16 @@ const updateOrderStatus = async (req, res) => {
         userAgent: req.headers["user-agent"],
       },
     });
+    await logOrderLifecycleEvent(buildOrderLifecyclePayload({
+      order,
+      req,
+      fallbackPlatform: "amazon",
+      stage: "ORDER_STATUS",
+      eventType: "ORDER_STATUS_CHANGED",
+      status: "success",
+      message: `Order status changed from ${oldStatus} to ${status}`,
+      metadata: { fromStatus: oldStatus, toStatus: status },
+    }));
     // ==================
 
     return res.status(200).json({

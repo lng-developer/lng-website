@@ -36,14 +36,23 @@ jest.mock("../../service/fulfillment", () => ({
 jest.mock("../../service/orderHistoryLogger", () => ({
   logOrderHistory: jest.fn(),
 }));
+jest.mock("../../service/orderLifecycleLogger", () => ({
+  logOrderLifecycleEvent: jest.fn(),
+}));
 jest.mock("../../service/etsyTrackingResponse.service", () => ({
   buildEtsyTrackingInfoResponse: jest.fn(() => ({})),
   buildEtsyTrackingSummary: jest.fn(() => ({})),
+}));
+jest.mock("../../helper/logger", () => ({
+  debug: jest.fn(),
+  error: jest.fn(),
+  warn: jest.fn(),
 }));
 jest.mock("axios", () => ({}));
 
 const mongoose = require("mongoose");
 const db = require("../../models");
+const { logOrderLifecycleEvent } = require("../../service/orderLifecycleLogger");
 const controller = require("../etsyOrder.controller");
 
 function chainResolve(value, methods = ["select", "sort", "populate", "lean"]) {
@@ -152,6 +161,74 @@ describe("createOrder auto base cost", () => {
         base_cost: 2,
         preferred_vendor_id: null,
       }),
+    }));
+    expect(logOrderLifecycleEvent).toHaveBeenCalledWith(expect.objectContaining({
+      platform: "etsy",
+      orderId: "4099502738",
+      stage: "IMPORT",
+      eventType: "ORDER_IMPORTED",
+      status: "success",
+    }));
+    expect(logOrderLifecycleEvent).toHaveBeenCalledWith(expect.objectContaining({
+      platform: "etsy",
+      orderId: "4099502738",
+      stage: "AUTO_COST",
+      eventType: "AUTO_COST_SUCCESS",
+      status: "success",
+      metadata: expect.objectContaining({ base_cost: 2 }),
+    }));
+  });
+
+  test("logs auto cost failure without failing the order import", async () => {
+    const shopId = new mongoose.Types.ObjectId();
+    const orderDocId = new mongoose.Types.ObjectId();
+    const importedItem = {
+      _id: new mongoose.Types.ObjectId(),
+      transactionId: "5126472805",
+      sku: "J2522-NK-1106-5",
+      quantity: 1,
+      variations: { "Product Type": "Napkins" },
+    };
+    const createdOrder = {
+      _id: orderDocId,
+      orderId: "4099502739",
+      shopId,
+      items: [importedItem],
+      seller: { sellerCode: "J2522" },
+    };
+
+    db.EtsyOrder.findOne.mockResolvedValue(null);
+    db.EtsyOrder.create.mockResolvedValue(createdOrder);
+    db.EtsyOrder.updateOne.mockResolvedValue({ modifiedCount: 1 });
+    db.user.findOne.mockReturnValue(chainResolve(null, ["select", "lean"]));
+    db.configCostCenter.find.mockImplementation(() => {
+      throw new Error("config query failed");
+    });
+
+    const req = {
+      body: {
+        orderId: "4099502739",
+        shopId: String(shopId),
+        items: [importedItem],
+      },
+    };
+    const res = makeRes();
+
+    await controller.createOrder(req, res);
+
+    expect(res.status).toHaveBeenCalledWith(201);
+    expect(res.json).toHaveBeenCalledWith(expect.objectContaining({
+      ok: true,
+      created: true,
+      autoBaseCost: { ok: false, error: "config query failed" },
+    }));
+    expect(logOrderLifecycleEvent).toHaveBeenCalledWith(expect.objectContaining({
+      platform: "etsy",
+      orderId: "4099502739",
+      stage: "AUTO_COST",
+      eventType: "AUTO_COST_FAILED",
+      status: "failed",
+      reason: "config query failed",
     }));
   });
 });

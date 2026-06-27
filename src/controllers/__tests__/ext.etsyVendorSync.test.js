@@ -16,7 +16,12 @@ jest.mock("../../lib/taskEmitter", () => ({
   emitTaskToMachine: jest.fn(),
 }));
 
+jest.mock("../../service/orderLifecycleLogger", () => ({
+  logOrderLifecycleEvent: jest.fn().mockResolvedValue(undefined),
+}));
+
 const db = require("../../models");
+const { logOrderLifecycleEvent } = require("../../service/orderLifecycleLogger");
 const controller = require("../ext.controller");
 
 function mockOrderFindLean(rows) {
@@ -122,6 +127,14 @@ describe("ext Etsy vendor sync", () => {
 
     await controller.etsyVendorSyncOne(req, res);
 
+    expect(logOrderLifecycleEvent).toHaveBeenCalledWith(expect.objectContaining({
+      platform: "etsy",
+      orderId: "ETSY-MISSING",
+      stage: "TRACKING_PULL",
+      eventType: "TRACKING_PULL_FAILED",
+      status: "failed",
+      reason: "Etsy order not found in DB: ETSY-MISSING",
+    }));
     expect(db.EtsyOrder.findOne).toHaveBeenCalledWith({ orderId: "ETSY-MISSING" });
     expect(res.status).toHaveBeenCalledWith(500);
     expect(res.json).toHaveBeenCalledWith({
@@ -208,6 +221,14 @@ describe("ext Etsy vendor sync", () => {
       )
     ).rejects.toThrow("Lenful missing API key");
 
+    expect(logOrderLifecycleEvent).toHaveBeenCalledWith(expect.objectContaining({
+      platform: "amazon",
+      orderId: "111-9039002-8646662",
+      stage: "TRACKING_PULL",
+      eventType: "TRACKING_PULL_FAILED",
+      status: "failed",
+      reason: expect.stringContaining("Lenful missing API key"),
+    }));
     expect(save).not.toHaveBeenCalled();
   });
 

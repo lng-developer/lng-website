@@ -3,6 +3,8 @@ const axios = require("axios");
 const mongoose = require("mongoose");
 const db = require("../models");
 const { logOrderHistory } = require("../service/orderHistoryLogger");
+const { logOrderLifecycleEvent } = require("../service/orderLifecycleLogger");
+const { buildOrderLifecyclePayload } = require("../service/orderLifecycleContext");
 const OrderCustomProduct = db.orderCustomProduct;
 const VendorProduct = db.vendorProduct;
 const Listing = db.listing;
@@ -882,6 +884,16 @@ const updateQCNoteForItem = async (req, res) => {
 
     item.qc_note = qc_note;
     await order.save();
+    await logOrderLifecycleEvent(buildOrderLifecyclePayload({
+      order,
+      req,
+      fallbackPlatform: "amazon",
+      stage: "QC",
+      eventType: "QC_NOTE_UPDATED",
+      status: "success",
+      message: `QC note updated for item ${orderItemId}`,
+      metadata: { orderItemId, note: qc_note },
+    }));
 
     return res.json({
       message: "QC note updated.",
@@ -1091,18 +1103,33 @@ const sendFailedOrdersToFulfillment = async (req, res) => {
   }
 };
 
-const recordFulfillmentPlatformV2Failure = async (orders, fulfillment, sourceChannel = "AMAZON") => {
+const recordFulfillmentPlatformV2Failure = async (orders, fulfillment, sourceChannel = "AMAZON", req = null) => {
   await Promise.all(
     (orders || []).map(async (order) => {
       const prevSubmission = order.fulfillment_platform_v2_submission || {};
+      const attemptCount = (prevSubmission.attempt_count || 0) + 1;
       order.fulfillment_platform_v2_submission = {
         sent: false,
         sent_at: prevSubmission.sent_at || null,
-        attempt_count: (prevSubmission.attempt_count || 0) + 1,
+        attempt_count: attemptCount,
         last_response: fulfillment,
         sourceChannel,
       };
       await order.save();
+      await logOrderLifecycleEvent(buildOrderLifecyclePayload({
+        order,
+        req,
+        fallbackPlatform: "amazon",
+        stage: "VENDOR_PUSH",
+        eventType: "VENDOR_PUSH_FAILED",
+        status: "failed",
+        reason: "Failed to push orders to Fulfillment Platform",
+        metadata: {
+          provider: "fulfillment-platform-v2",
+          attemptCount,
+          sourceChannel,
+        },
+      }));
     })
   );
 };
@@ -1120,11 +1147,12 @@ const recordFulfillmentPlatformV2Success = async ({
       const prevOverallStatus = order.scale_overall_status;
       const prevOrderStatus = order.status;
       const prevSubmission = order.fulfillment_platform_v2_submission || {};
+      const attemptCount = (prevSubmission.attempt_count || 0) + 1;
 
       order.fulfillment_platform_v2_submission = {
         sent: true,
         sent_at: fulfilledAt,
-        attempt_count: (prevSubmission.attempt_count || 0) + 1,
+        attempt_count: attemptCount,
         last_response: fulfillment,
         sourceChannel,
       };
@@ -1172,6 +1200,21 @@ const recordFulfillmentPlatformV2Success = async ({
           userAgent: req.headers["user-agent"],
         },
       });
+      await logOrderLifecycleEvent(buildOrderLifecyclePayload({
+        order,
+        req,
+        fallbackPlatform: "amazon",
+        stage: "VENDOR_PUSH",
+        eventType: "VENDOR_PUSH_SUCCESS",
+        status: "success",
+        message: "Order pushed to Fulfillment Platform v2.",
+        metadata: {
+          provider: "fulfillment-platform-v2",
+          attemptCount,
+          alreadySent: false,
+          sourceChannel,
+        },
+      }));
     })
   );
 };
@@ -1293,7 +1336,7 @@ const pushPlatformOrders = async (req, res) => {
   } catch (err) {
     if (err.response) {
       const fulfillment = toSafeFulfillmentSummary(err.response.data, false);
-      await recordFulfillmentPlatformV2Failure(orders, fulfillment, "AMAZON");
+      await recordFulfillmentPlatformV2Failure(orders, fulfillment, "AMAZON", req);
 
       return res.status(err.response.status || 502).json({
         message: "Failed to push orders to Fulfillment Platform",
@@ -1310,7 +1353,7 @@ const pushPlatformOrders = async (req, res) => {
       },
       false
     );
-    await recordFulfillmentPlatformV2Failure(orders, fulfillment, "AMAZON");
+    await recordFulfillmentPlatformV2Failure(orders, fulfillment, "AMAZON", req);
 
     return res.status(502).json({
       message: "Failed to push orders to Fulfillment Platform",

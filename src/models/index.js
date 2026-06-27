@@ -37,6 +37,7 @@ const EtsyAdsDailySummary = require("./etsyAdsDailySummary.model")
 const EtsyMessageThread = require("./etsyMessageThread.model")
 const VendorWebhookLog = require("./vendorWebhookLog.model")
 const OrderProductShopify = require("./orderProductShopify.model")
+const OrderLifecycleEvent = require("./orderLifecycleEvent.model")
 
 // Cau hinh mongoose dang global
 mongoose.Promise = global.Promise;
@@ -82,6 +83,7 @@ db.EtsyAdsDailySummary = EtsyAdsDailySummary
 db.EtsyMessageThread = EtsyMessageThread
 db.VendorWebhookLog = VendorWebhookLog
 db.orderProductShopify = OrderProductShopify
+db.OrderLifecycleEvent = OrderLifecycleEvent
 db.connectDB = async () => {
   await mongoose
     .connect(process.env.MONGO_URI, {

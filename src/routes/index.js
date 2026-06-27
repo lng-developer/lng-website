@@ -36,6 +36,7 @@ const EtsyMessagesRoutes = require("./etsyMessages.routes");
 const devRoutes = require("./dev.routes");
 const vendorWebhookRoutes = require("./vendorWebhook.routes");
 const shopifyRoutes = require("./shopify.routes");
+const orderLifecycleRoutes = require("./orderLifecycle.routes");
 
 module.exports = {
   roleRoutes,
@@ -76,4 +77,5 @@ module.exports = {
   devRoutes,
   vendorWebhookRoutes,
   shopifyRoutes,
+  orderLifecycleRoutes,
 };

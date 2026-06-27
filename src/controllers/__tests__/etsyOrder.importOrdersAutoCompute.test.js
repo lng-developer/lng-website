@@ -34,6 +34,9 @@ jest.mock("../../service/fulfillment", () => ({
 jest.mock("../../service/orderHistoryLogger", () => ({
   logOrderHistory: jest.fn(),
 }));
+jest.mock("../../service/orderLifecycleLogger", () => ({
+  logOrderLifecycleEvent: jest.fn(),
+}));
 jest.mock("../../service/etsyTrackingResponse.service", () => ({
   buildEtsyTrackingInfoResponse: jest.fn(() => ({})),
   buildEtsyTrackingSummary: jest.fn(() => ({})),
@@ -45,6 +48,7 @@ const os = require("os");
 const path = require("path");
 const mongoose = require("mongoose");
 const db = require("../../models");
+const { logOrderLifecycleEvent } = require("../../service/orderLifecycleLogger");
 const controller = require("../etsyOrder.controller");
 
 function chainResolve(value, methods = ["select", "sort", "populate", "lean"]) {
@@ -152,6 +156,21 @@ describe("importOrders auto base cost", () => {
     );
     expect(res.json).toHaveBeenCalledWith(expect.objectContaining({
       stats: expect.objectContaining({ ordersCostComputed: 1 }),
+    }));
+    expect(logOrderLifecycleEvent).toHaveBeenCalledWith(expect.objectContaining({
+      platform: "etsy",
+      orderId: "4099502738",
+      stage: "IMPORT",
+      eventType: "ORDER_FILE_IMPORTED",
+      status: "success",
+    }));
+    expect(logOrderLifecycleEvent).toHaveBeenCalledWith(expect.objectContaining({
+      platform: "etsy",
+      orderId: "4099502738",
+      stage: "AUTO_COST",
+      eventType: "AUTO_COST_SUCCESS",
+      status: "success",
+      metadata: expect.objectContaining({ base_cost: 2 }),
     }));
   });
 });

@@ -3,7 +3,7 @@ jest.mock("axios", () => ({
 }));
 
 jest.mock("../../models", () => ({
-  orderCustomProduct: { find: jest.fn(), aggregate: jest.fn() },
+  orderCustomProduct: { find: jest.fn(), findOne: jest.fn(), aggregate: jest.fn() },
   vendorProduct: {},
   listing: {},
 }));
@@ -12,9 +12,14 @@ jest.mock("../../service/orderHistoryLogger", () => ({
   logOrderHistory: jest.fn().mockResolvedValue(undefined),
 }));
 
+jest.mock("../../service/orderLifecycleLogger", () => ({
+  logOrderLifecycleEvent: jest.fn().mockResolvedValue(undefined),
+}));
+
 const axios = require("axios");
 const db = require("../../models");
 const { logOrderHistory } = require("../../service/orderHistoryLogger");
+const { logOrderLifecycleEvent } = require("../../service/orderLifecycleLogger");
 const controller = require("../qc.controller");
 
 function makeRes() {
@@ -227,6 +232,42 @@ describe("sendFailedOrdersToFulfillment", () => {
   });
 });
 
+describe("updateQCNoteForItem lifecycle", () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
+
+  test("logs QC_NOTE_UPDATED when QC note changes", async () => {
+    const order = {
+      _id: "order-1",
+      orderId: "ORDER-1",
+      platform: "Amazon",
+      items: [{ orderItemId: "ITEM-1", qc_note: "" }],
+      save: jest.fn().mockResolvedValue(undefined),
+    };
+    db.orderCustomProduct.findOne.mockResolvedValue(order);
+
+    const req = {
+      params: { orderId: "ORDER-1", orderItemId: "ITEM-1" },
+      body: { qc_note: "Needs rework" },
+      user: { _id: "user-1", email: "qc@example.com", role: "Admin" },
+      headers: { "user-agent": "jest" },
+    };
+    const res = makeRes();
+
+    await controller.updateQCNoteForItem(req, res);
+
+    expect(logOrderLifecycleEvent).toHaveBeenCalledWith(expect.objectContaining({
+      platform: "amazon",
+      orderId: "ORDER-1",
+      stage: "QC",
+      eventType: "QC_NOTE_UPDATED",
+      status: "success",
+      metadata: { orderItemId: "ITEM-1", note: "Needs rework" },
+    }));
+  });
+});
+
 describe("getQCList query shape", () => {
   beforeEach(() => {
     jest.clearAllMocks();
@@ -408,6 +449,17 @@ describe("pushPlatformOrders", () => {
         ]),
       })
     );
+    expect(logOrderLifecycleEvent).toHaveBeenCalledWith(expect.objectContaining({
+      platform: "amazon",
+      orderId: "112-0745906-0345025-R1",
+      stage: "VENDOR_PUSH",
+      eventType: "VENDOR_PUSH_SUCCESS",
+      status: "success",
+      metadata: expect.objectContaining({
+        provider: "fulfillment-platform-v2",
+        attemptCount: 2,
+      }),
+    }));
     expect(res.json).toHaveBeenCalledWith({
       message: "Pushed orders to Fulfillment Platform v2",
       attemptedCount: 1,
@@ -470,6 +522,18 @@ describe("pushPlatformOrders", () => {
     expect(order.fulfillment_platform_v2_submission.sourceChannel).toBe("AMAZON");
     expect(save).toHaveBeenCalledTimes(1);
     expect(logOrderHistory).not.toHaveBeenCalled();
+    expect(logOrderLifecycleEvent).toHaveBeenCalledWith(expect.objectContaining({
+      platform: "amazon",
+      orderId: "ORDER-REJECTED",
+      stage: "VENDOR_PUSH",
+      eventType: "VENDOR_PUSH_FAILED",
+      status: "failed",
+      reason: "Failed to push orders to Fulfillment Platform",
+      metadata: expect.objectContaining({
+        provider: "fulfillment-platform-v2",
+        attemptCount: 3,
+      }),
+    }));
     expect(res.status).toHaveBeenCalledWith(409);
     expect(res.json).toHaveBeenCalledWith({
       message: "Failed to push orders to Fulfillment Platform",

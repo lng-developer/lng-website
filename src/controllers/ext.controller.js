@@ -9,6 +9,8 @@ const { emitTaskToMachine, buildTaskId } = require("../lib/taskEmitter");
 const {
   normalizeVendorTrackingPayload,
 } = require("../service/vendorTrackingNormalizer.service");
+const { logOrderLifecycleEvent } = require("../service/orderLifecycleLogger");
+const { buildOrderLifecyclePayload } = require("../service/orderLifecycleContext");
 
 const mongoose = require("mongoose");
 const axios = require("axios").default;
@@ -1096,6 +1098,16 @@ async function updateOrderByVendors(orderId, vpidToVendorPrefetched = null) {
 
       totalChanged += applyToItemsOfVendor(doc, vk, res);
     } catch (e) {
+      await logOrderLifecycleEvent(buildOrderLifecyclePayload({
+        order: doc,
+        fallbackPlatform: "amazon",
+        actorType: "system",
+        stage: "TRACKING_PULL",
+        eventType: "TRACKING_PULL_FAILED",
+        status: "failed",
+        reason: e.message,
+        metadata: { provider: vk },
+      }));
       if (vk === "lenful") throw e;
     }
   }
@@ -1110,6 +1122,15 @@ async function updateOrderByVendors(orderId, vpidToVendorPrefetched = null) {
   }
 
   await doc.save();
+  await logOrderLifecycleEvent(buildOrderLifecyclePayload({
+    order: doc,
+    fallbackPlatform: "amazon",
+    actorType: "system",
+    stage: "TRACKING_PULL",
+    eventType: totalChanged > 0 || orderStatusChanged ? "TRACKING_UPDATED" : "TRACKING_SKIPPED",
+    status: totalChanged > 0 || orderStatusChanged ? "success" : "info",
+    metadata: { updatedItems: totalChanged, orderStatusChanged },
+  }));
   return { updatedItems: totalChanged, orderStatusChanged };
 }
 
@@ -1239,9 +1260,17 @@ async function updateEtsyOrderByVendors(orderId, options = {}) {
 
   const doc = await EtsyOrder.findOne(query);
   if (!doc) {
-    throw new Error(
-      `Etsy order not found in DB: ${trimmedOrderId}${options.shopId ? ` shopId=${options.shopId}` : ""}`
-    );
+    const message = `Etsy order not found in DB: ${trimmedOrderId}${options.shopId ? ` shopId=${options.shopId}` : ""}`;
+    await logOrderLifecycleEvent(buildOrderLifecyclePayload({
+      order: { orderId: trimmedOrderId, shopId: options.shopId || null },
+      fallbackPlatform: "etsy",
+      actorType: "system",
+      stage: "TRACKING_PULL",
+      eventType: "TRACKING_PULL_FAILED",
+      status: "failed",
+      reason: message,
+    }));
+    throw new Error(message);
   }
 
   const vpidSet = new Set();
@@ -1298,6 +1327,25 @@ async function updateEtsyOrderByVendors(orderId, options = {}) {
   if (totalChanged > 0 || orderStatusChanged) {
     await doc.save();
   }
+  await logOrderLifecycleEvent(buildOrderLifecyclePayload({
+    order: doc,
+    fallbackPlatform: "etsy",
+    actorType: "system",
+    stage: "TRACKING_PULL",
+    eventType: totalChanged > 0 || orderStatusChanged ? "TRACKING_UPDATED" : "TRACKING_SKIPPED",
+    status: totalChanged > 0 || orderStatusChanged ? "success" : "info",
+    metadata: {
+      updatedItems: totalChanged,
+      orderStatusChanged,
+      vendorResults: vendorResults.map((result) => ({
+        vendorKey: result.vendorKey,
+        ok: result.ok,
+        changed: result.changed || 0,
+        shipped: !!result.shipped,
+        message: result.message || "",
+      })),
+    },
+  }));
   return {
     updatedItems: totalChanged,
     orderStatusChanged,

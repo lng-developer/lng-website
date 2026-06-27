@@ -17,6 +17,8 @@ const Shop = db.shop;
 const Role = db.role;
 const upload = multer({ storage: multer.memoryStorage() });
 const { logOrderHistory } = require("../service/orderHistoryLogger");
+const { logOrderLifecycleEvent } = require("../service/orderLifecycleLogger");
+const { buildOrderLifecyclePayload } = require("../service/orderLifecycleContext");
 
 // ============ Helpers (giữ nguyên) ============
 function uploadStreamToCloudinary(buffer, opts = {}) {
@@ -676,6 +678,33 @@ const confirmScaleForItem = async (req, res) => {
           userAgent: req.headers["user-agent"],
         },
       });
+      await logOrderLifecycleEvent(buildOrderLifecyclePayload({
+        order,
+        req,
+        fallbackPlatform: "amazon",
+        stage: "SCALE",
+        eventType: "SCALE_ITEM_REJECTED",
+        status: "success",
+        message: `Scale rejected item ${orderItemId}`,
+        metadata: {
+          orderItemId,
+          note: note || "",
+          fromScaleStatus: before.item_scale_status,
+          toScaleStatus: item.scale_status,
+          fromOverallStatus: before.order_scale_overall_status,
+          toOverallStatus: order.scale_overall_status,
+        },
+      }));
+      await logOrderLifecycleEvent(buildOrderLifecyclePayload({
+        order,
+        req,
+        fallbackPlatform: "amazon",
+        stage: "QC",
+        eventType: "QC_REJECTED",
+        status: "success",
+        message: `QC rejected item ${orderItemId}`,
+        metadata: { orderItemId, note: note || "" },
+      }));
       // ===========================
 
       return res.json({
@@ -748,6 +777,33 @@ const confirmScaleForItem = async (req, res) => {
         userAgent: req.headers["user-agent"],
       },
     });
+    await logOrderLifecycleEvent(buildOrderLifecyclePayload({
+      order,
+      req,
+      fallbackPlatform: "amazon",
+      stage: "SCALE",
+      eventType: "SCALE_ITEM_APPROVED",
+      status: "success",
+      message: `Approved item ${orderItemId}`,
+      metadata: {
+        orderItemId,
+        note: note || "",
+        fromScaleStatus: before.item_scale_status,
+        toScaleStatus: item.scale_status,
+        fromOverallStatus: before.order_scale_overall_status,
+        toOverallStatus: order.scale_overall_status,
+      },
+    }));
+    await logOrderLifecycleEvent(buildOrderLifecyclePayload({
+      order,
+      req,
+      fallbackPlatform: "amazon",
+      stage: "QC",
+      eventType: "QC_APPROVED",
+      status: "success",
+      message: `QC approved item ${orderItemId}`,
+      metadata: { orderItemId, note: note || "" },
+    }));
 
     // === If order becomes READY ===
     if (order.scale_overall_status === "Ready") {
@@ -769,6 +825,20 @@ const confirmScaleForItem = async (req, res) => {
           userAgent: req.headers["user-agent"],
         },
       });
+      await logOrderLifecycleEvent(buildOrderLifecyclePayload({
+        order,
+        req,
+        fallbackPlatform: "amazon",
+        stage: "SCALE",
+        eventType: "SCALE_ORDER_READY",
+        status: "success",
+        message: "All items approved. Order is Ready.",
+        metadata: {
+          orderItemId,
+          fromOverallStatus: before.order_scale_overall_status,
+          toOverallStatus: "Ready",
+        },
+      }));
 
       // Points
       const asin = item.asin;
@@ -855,6 +925,21 @@ const confirmScaleForItem = async (req, res) => {
             userAgent: req.headers["user-agent"],
           },
         });
+        await logOrderLifecycleEvent(buildOrderLifecyclePayload({
+          order,
+          req,
+          fallbackPlatform: "amazon",
+          stage: "VENDOR_PUSH",
+          eventType: result.alreadySent ? "VENDOR_PUSH_SKIPPED" : "VENDOR_PUSH_SUCCESS",
+          status: result.alreadySent ? "info" : "success",
+          message: result.alreadySent
+            ? `Order already sent to ${result.vendorKey}.`
+            : `Order sent to ${result.vendorKey}.`,
+          metadata: {
+            provider: result.vendorKey,
+            alreadySent: !!result.alreadySent,
+          },
+        }));
 
         return res.json({
           message: result.alreadySent
@@ -911,6 +996,19 @@ const confirmScaleForItem = async (req, res) => {
             userAgent: req.headers["user-agent"],
           },
         });
+        await logOrderLifecycleEvent(buildOrderLifecyclePayload({
+          order,
+          req,
+          fallbackPlatform: "amazon",
+          stage: "VENDOR_PUSH",
+          eventType: "VENDOR_PUSH_FAILED",
+          status: "failed",
+          reason: e.message,
+          metadata: {
+            provider: providerKey,
+            attemptCount: rec.attempt_count,
+          },
+        }));
 
         return res.status(502).json({
           message: `Approved but sending order to ${providerKey} failed. Overall status set to Failed.`,
@@ -1027,6 +1125,21 @@ const retrySendFulfillment = async (req, res) => {
 
     // 5) Gửi lại
     const result = await FulfillmentService.send(order, providerKey);
+    await logOrderLifecycleEvent(buildOrderLifecyclePayload({
+      order,
+      req,
+      fallbackPlatform: "amazon",
+      stage: "VENDOR_PUSH",
+      eventType: result.alreadySent ? "VENDOR_PUSH_SKIPPED" : "VENDOR_PUSH_SUCCESS",
+      status: result.alreadySent ? "info" : "success",
+      message: result.alreadySent
+        ? `Order already sent to ${result.vendorKey}.`
+        : `Order sent to ${result.vendorKey}.`,
+      metadata: {
+        provider: result.vendorKey,
+        alreadySent: !!result.alreadySent,
+      },
+    }));
     return res.json({
       message: result.alreadySent
         ? `Order already sent to ${result.vendorKey}.`

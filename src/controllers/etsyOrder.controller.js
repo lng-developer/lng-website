@@ -14,6 +14,8 @@ const multer = require("multer");
 const { uploadBufferToR2, uploadFilePathToR2 } = require("../service/cloudflareR2/r2.service");
 const FulfillmentService = require("../service/fulfillment");
 const { logOrderHistory } = require("../service/orderHistoryLogger");
+const { logOrderLifecycleEvent } = require("../service/orderLifecycleLogger");
+const { buildOrderLifecyclePayload } = require("../service/orderLifecycleContext");
 const {
     buildEtsyTrackingInfoResponse,
     buildEtsyTrackingSummary,
@@ -1022,13 +1024,50 @@ const importOrders = async (req, res) => {
                 for (const oid of affectedOrders) {
                     const order = await EtsyOrder.findOne({ orderId: oid, shopId });
                     await validateAddressIfNeeded(order, { force: shippingChangedOrderIds.has(String(oid)) });
+                    await logOrderLifecycleEvent({
+                        platform: "etsy",
+                        orderId: String(oid),
+                        orderObjectId: order?._id || null,
+                        shopId,
+                        stage: "IMPORT",
+                        eventType: "ORDER_FILE_IMPORTED",
+                        status: "success",
+                        actorType: "user",
+                        actorId: req.user?._id,
+                        actorName: req.user?.name || req.user?.email || "",
+                        metadata: { fileType: "orders" },
+                    });
                     try {
                         if (order && Array.isArray(order.items) && order.items.length > 0) {
                             await calculateEtsyCost(order);
                             stats.ordersCostComputed += 1;
+                            await logOrderLifecycleEvent({
+                                platform: "etsy",
+                                orderId: String(oid),
+                                orderObjectId: order._id,
+                                shopId,
+                                stage: "AUTO_COST",
+                                eventType: "AUTO_COST_SUCCESS",
+                                status: "success",
+                                actorType: "system",
+                                message: "Auto cost computed after Etsy order file import",
+                                metadata: { base_cost: order.base_cost, fileType: "orders" },
+                            });
                         }
                     } catch (err) {
                         logger.error(`Auto-compute cost failed for Etsy order ${oid}: ${err.message}`);
+                        await logOrderLifecycleEvent({
+                            platform: "etsy",
+                            orderId: String(oid),
+                            orderObjectId: order?._id || null,
+                            shopId,
+                            stage: "AUTO_COST",
+                            eventType: "AUTO_COST_FAILED",
+                            status: "failed",
+                            actorType: "system",
+                            reason: err.message,
+                            metadata: { fileType: "orders" },
+                        });
                     }
                 }
             }
@@ -1130,15 +1169,52 @@ const importOrders = async (req, res) => {
 
                     const order = await EtsyOrder.findOne({ orderId: oid, shopId });
                     await validateAddressIfNeeded(order);
+                    await logOrderLifecycleEvent({
+                        platform: "etsy",
+                        orderId: String(oid),
+                        orderObjectId: order?._id || null,
+                        shopId,
+                        stage: "IMPORT",
+                        eventType: "ORDER_FILE_IMPORTED",
+                        status: "success",
+                        actorType: "user",
+                        actorId: req.user?._id,
+                        actorName: req.user?.name || req.user?.email || "",
+                        metadata: { fileType: "items" },
+                    });
 
                     try {
                         // Tự động tính toán cost breakdown sau khi import
                         if (order && Array.isArray(order.items) && order.items.length > 0) {
                             await calculateEtsyCost(order);
                             stats.ordersCostComputed += 1;
+                            await logOrderLifecycleEvent({
+                                platform: "etsy",
+                                orderId: String(oid),
+                                orderObjectId: order._id,
+                                shopId,
+                                stage: "AUTO_COST",
+                                eventType: "AUTO_COST_SUCCESS",
+                                status: "success",
+                                actorType: "system",
+                                message: "Auto cost computed after Etsy item file import",
+                                metadata: { base_cost: order.base_cost, fileType: "items" },
+                            });
                         }
                     } catch (err) {
                         logger.error(`Auto-compute cost failed for Etsy order ${oid}: ${err.message}`);
+                        await logOrderLifecycleEvent({
+                            platform: "etsy",
+                            orderId: String(oid),
+                            orderObjectId: order?._id || null,
+                            shopId,
+                            stage: "AUTO_COST",
+                            eventType: "AUTO_COST_FAILED",
+                            status: "failed",
+                            actorType: "system",
+                            reason: err.message,
+                            metadata: { fileType: "items" },
+                        });
                     }
                 }
 
@@ -1994,6 +2070,23 @@ const resetBaseCostForEtsyOrder = async (req, res) => {
                 },
             });
         }
+        await logOrderLifecycleEvent({
+            platform: "etsy",
+            orderId,
+            orderObjectId: order._id,
+            shopId: order.shopId || null,
+            stage: "RESET",
+            eventType: "ORDER_RESET_COST",
+            status: "success",
+            actorType: "user",
+            actorId: req.user?._id,
+            actorName: req.user?.name || req.user?.email || "",
+            metadata: {
+                oldBaseCost,
+                newBaseCost: 0,
+                removedCostBreakdownCount: itemsWithCostBreakdown,
+            },
+        });
 
         return res.status(200).json({
             message: "Etsy order base cost reset successfully",
@@ -2956,11 +3049,52 @@ const createOrder = async (req, res) => {
                         base_cost: existing.base_cost,
                         preferred_vendor_id: computed.preferredVendorId || null,
                     };
+                    await logOrderLifecycleEvent({
+                        platform: "etsy",
+                        orderId: payload.orderId,
+                        orderObjectId: existing._id,
+                        shopId: payload.shopId,
+                        stage: "AUTO_COST",
+                        eventType: "AUTO_COST_SUCCESS",
+                        status: "success",
+                        actorType: "system",
+                        message: "Auto cost computed after Etsy order backfill",
+                        metadata: {
+                            base_cost: existing.base_cost,
+                            preferred_vendor_id: computed.preferredVendorId || null,
+                        },
+                    });
                 } catch (computeErr) {
                     logger.error(`Auto-compute cost failed for Etsy order ${payload.orderId}: ${computeErr.message}`);
                     autoBaseCost = { ok: false, error: computeErr.message };
+                    await logOrderLifecycleEvent({
+                        platform: "etsy",
+                        orderId: payload.orderId,
+                        orderObjectId: existing._id,
+                        shopId: payload.shopId,
+                        stage: "AUTO_COST",
+                        eventType: "AUTO_COST_FAILED",
+                        status: "failed",
+                        actorType: "system",
+                        reason: computeErr.message,
+                    });
                 }
             }
+            await logOrderLifecycleEvent({
+                platform: "etsy",
+                orderId: payload.orderId,
+                orderObjectId: existing._id,
+                shopId: payload.shopId,
+                stage: "IMPORT",
+                eventType: "ORDER_BACKFILLED",
+                status: "success",
+                actorType: "api",
+                metadata: {
+                    backfilled: result.backfilled,
+                    updatedItems: result.updatedItems,
+                    addedItems: result.addedItems,
+                },
+            });
             logger.debug({
                 tag: "ETSY_CUSTOM_DATA_BACKFILL_SUMMARY",
                 orderId: payload.orderId,
@@ -3004,11 +3138,48 @@ const createOrder = async (req, res) => {
                     base_cost: doc.base_cost,
                     preferred_vendor_id: computed.preferredVendorId || null,
                 };
+                await logOrderLifecycleEvent({
+                    platform: "etsy",
+                    orderId: payload.orderId,
+                    orderObjectId: doc._id,
+                    shopId: payload.shopId,
+                    stage: "AUTO_COST",
+                    eventType: "AUTO_COST_SUCCESS",
+                    status: "success",
+                    actorType: "system",
+                    message: "Auto cost computed after Etsy order import",
+                    metadata: {
+                        base_cost: doc.base_cost,
+                        preferred_vendor_id: computed.preferredVendorId || null,
+                    },
+                });
             } catch (computeErr) {
                 logger.error(`Auto-compute cost failed for Etsy order ${payload.orderId}: ${computeErr.message}`);
                 autoBaseCost = { ok: false, error: computeErr.message };
+                await logOrderLifecycleEvent({
+                    platform: "etsy",
+                    orderId: payload.orderId,
+                    orderObjectId: doc._id,
+                    shopId: payload.shopId,
+                    stage: "AUTO_COST",
+                    eventType: "AUTO_COST_FAILED",
+                    status: "failed",
+                    actorType: "system",
+                    reason: computeErr.message,
+                });
             }
         }
+        await logOrderLifecycleEvent({
+            platform: "etsy",
+            orderId: payload.orderId,
+            orderObjectId: doc._id,
+            shopId: payload.shopId,
+            stage: "IMPORT",
+            eventType: "ORDER_IMPORTED",
+            status: "success",
+            actorType: "api",
+            metadata: { itemCount: Array.isArray(doc.items) ? doc.items.length : 0 },
+        });
         logger.debug({
             tag: "ETSY_CUSTOM_DATA_CREATE_ORDER_SUMMARY",
             orderId: payload.orderId,
@@ -3481,6 +3652,16 @@ const updateEtsyOrderTrackingForAllItems = async (req, res) => {
                     userAgent: req.headers["user-agent"],
                 },
             });
+            await logOrderLifecycleEvent(buildOrderLifecyclePayload({
+                order: updated,
+                req,
+                fallbackPlatform: "etsy",
+                stage: "ORDER_STATUS",
+                eventType: "ORDER_STATUS_CHANGED",
+                status: "success",
+                message: `Etsy order status changed from ${oldOrderStatus} to ${newOrderStatus}`,
+                metadata: { fromStatus: oldOrderStatus, toStatus: newOrderStatus },
+            }));
         }
 
         const responseScaleOverall =
@@ -3776,18 +3957,33 @@ const serializeEtsyOrderForFulfillmentPlatform = (order) => ({
     sourceChannel: "ETSY",
 });
 
-const recordEtsyFulfillmentPlatformV2Failure = async (orders, fulfillment) => {
+const recordEtsyFulfillmentPlatformV2Failure = async (orders, fulfillment, req = null) => {
     await Promise.all(
         (orders || []).map(async (order) => {
             const prevSubmission = order.fulfillment_platform_v2_submission || {};
+            const attemptCount = (prevSubmission.attempt_count || 0) + 1;
             order.fulfillment_platform_v2_submission = {
                 sent: false,
                 sent_at: prevSubmission.sent_at || null,
-                attempt_count: (prevSubmission.attempt_count || 0) + 1,
+                attempt_count: attemptCount,
                 last_response: fulfillment,
                 sourceChannel: "ETSY",
             };
             await order.save();
+            await logOrderLifecycleEvent(buildOrderLifecyclePayload({
+                order,
+                req,
+                fallbackPlatform: "etsy",
+                stage: "VENDOR_PUSH",
+                eventType: "VENDOR_PUSH_FAILED",
+                status: "failed",
+                reason: "Failed to push Etsy orders to Fulfillment Platform",
+                metadata: {
+                    provider: "fulfillment-platform-v2",
+                    attemptCount,
+                    sourceChannel: "ETSY",
+                },
+            }));
         })
     );
 };
@@ -3800,11 +3996,12 @@ const recordEtsyFulfillmentPlatformV2Success = async ({ orders, fulfillment, req
             const prevOverallStatus = order.scale_overall_status;
             const prevOrderStatus = order.status;
             const prevSubmission = order.fulfillment_platform_v2_submission || {};
+            const attemptCount = (prevSubmission.attempt_count || 0) + 1;
 
             order.fulfillment_platform_v2_submission = {
                 sent: true,
                 sent_at: fulfilledAt,
-                attempt_count: (prevSubmission.attempt_count || 0) + 1,
+                attempt_count: attemptCount,
                 last_response: fulfillment,
                 sourceChannel: "ETSY",
             };
@@ -3846,6 +4043,21 @@ const recordEtsyFulfillmentPlatformV2Success = async ({ orders, fulfillment, req
                     userAgent: req.headers["user-agent"],
                 },
             });
+            await logOrderLifecycleEvent(buildOrderLifecyclePayload({
+                order,
+                req,
+                fallbackPlatform: "etsy",
+                stage: "VENDOR_PUSH",
+                eventType: "VENDOR_PUSH_SUCCESS",
+                status: "success",
+                message: "Etsy order pushed to Fulfillment Platform v2.",
+                metadata: {
+                    provider: "fulfillment-platform-v2",
+                    attemptCount,
+                    alreadySent: false,
+                    sourceChannel: "ETSY",
+                },
+            }));
         })
     );
 };
@@ -3886,10 +4098,10 @@ const pushEtsyOrdersToFulfillmentPlatformV2 = async ({ orders, req }) => {
         throw err;
     }
 
-    console.info(
-        "[EtsyQC][pushPlatformOrders] payload preview",
-        buildFulfillmentPlatformPayloadPreview(payload)
-    );
+    logger.debug({
+        tag: "EtsyQC.pushPlatformOrders.preview",
+        payload: buildFulfillmentPlatformPayloadPreview(payload),
+    });
 
     try {
         const platformResponse = await axios.post(
@@ -3919,7 +4131,7 @@ const pushEtsyOrdersToFulfillmentPlatformV2 = async ({ orders, req }) => {
                 false
             );
 
-        await recordEtsyFulfillmentPlatformV2Failure(orders, fulfillment);
+        await recordEtsyFulfillmentPlatformV2Failure(orders, fulfillment, req);
 
         const wrapped = new Error("Failed to push Etsy orders to Fulfillment Platform");
         wrapped.status = err.response?.status || err.status || 502;
@@ -4109,6 +4321,21 @@ async function sendEtsyOrderToVendor({ order, provider, req, previousOverallStat
                 userAgent: req.headers["user-agent"],
             },
         });
+        await logOrderLifecycleEvent(buildOrderLifecyclePayload({
+            order,
+            req,
+            fallbackPlatform: "etsy",
+            stage: "VENDOR_PUSH",
+            eventType: result.alreadySent ? "VENDOR_PUSH_SKIPPED" : "VENDOR_PUSH_SUCCESS",
+            status: result.alreadySent ? "info" : "success",
+            message: result.alreadySent
+                ? `Etsy order already sent to ${result.vendorKey}.`
+                : `Etsy order sent to ${result.vendorKey}.`,
+            metadata: {
+                provider: result.vendorKey,
+                alreadySent: !!result.alreadySent,
+            },
+        }));
         return result;
     } catch (err) {
         const prev = order.vendor_submissions?.[providerKey] || {};
@@ -4150,6 +4377,19 @@ async function sendEtsyOrderToVendor({ order, provider, req, previousOverallStat
                 userAgent: req.headers["user-agent"],
             },
         });
+        await logOrderLifecycleEvent(buildOrderLifecyclePayload({
+            order,
+            req,
+            fallbackPlatform: "etsy",
+            stage: "VENDOR_PUSH",
+            eventType: "VENDOR_PUSH_FAILED",
+            status: "failed",
+            reason: err.message,
+            metadata: {
+                provider: providerKey,
+                attemptCount: rec.attempt_count,
+            },
+        }));
 
         err.status = err.status || 502;
         err.providerKey = providerKey;
@@ -4962,6 +5202,36 @@ const confirmEtsyScaleForItem = async (req, res) => {
                     userAgent: req.headers["user-agent"],
                 },
             });
+            await logOrderLifecycleEvent(buildOrderLifecyclePayload({
+                order,
+                req,
+                fallbackPlatform: "etsy",
+                stage: "SCALE",
+                eventType: "SCALE_ITEM_REJECTED",
+                status: "success",
+                message: `QC rejected Etsy item ${transactionId}`,
+                metadata: {
+                    orderItemId: transactionId,
+                    note: note ? String(note).slice(0, 120) : "",
+                    fromScaleStatus: before.item_scale_status,
+                    toScaleStatus: item.scale_status,
+                    fromOverallStatus: before.order_scale_overall_status,
+                    toOverallStatus: order.scale_overall_status,
+                },
+            }));
+            await logOrderLifecycleEvent(buildOrderLifecyclePayload({
+                order,
+                req,
+                fallbackPlatform: "etsy",
+                stage: "QC",
+                eventType: "QC_REJECTED",
+                status: "success",
+                message: `QC rejected Etsy item ${transactionId}`,
+                metadata: {
+                    orderItemId: transactionId,
+                    note: note ? String(note).slice(0, 120) : "",
+                },
+            }));
 
             return res.json({
                 message: "Etsy scale rejected. Item set to QC Rejected.",
@@ -4999,6 +5269,36 @@ const confirmEtsyScaleForItem = async (req, res) => {
                 userAgent: req.headers["user-agent"],
             },
         });
+        await logOrderLifecycleEvent(buildOrderLifecyclePayload({
+            order,
+            req,
+            fallbackPlatform: "etsy",
+            stage: "SCALE",
+            eventType: "SCALE_ITEM_APPROVED",
+            status: "success",
+            message: `Approved Etsy item ${transactionId}`,
+            metadata: {
+                orderItemId: transactionId,
+                note: note ? String(note).slice(0, 120) : "",
+                fromScaleStatus: before.item_scale_status,
+                toScaleStatus: item.scale_status,
+                fromOverallStatus: before.order_scale_overall_status,
+                toOverallStatus: order.scale_overall_status,
+            },
+        }));
+        await logOrderLifecycleEvent(buildOrderLifecyclePayload({
+            order,
+            req,
+            fallbackPlatform: "etsy",
+            stage: "QC",
+            eventType: "QC_APPROVED",
+            status: "success",
+            message: `QC approved Etsy item ${transactionId}`,
+            metadata: {
+                orderItemId: transactionId,
+                note: note ? String(note).slice(0, 120) : "",
+            },
+        }));
 
         if (order.scale_overall_status === "Ready") {
             await logOrderHistory({
@@ -5019,6 +5319,20 @@ const confirmEtsyScaleForItem = async (req, res) => {
                     userAgent: req.headers["user-agent"],
                 },
             });
+            await logOrderLifecycleEvent(buildOrderLifecyclePayload({
+                order,
+                req,
+                fallbackPlatform: "etsy",
+                stage: "SCALE",
+                eventType: "SCALE_ORDER_READY",
+                status: "success",
+                message: "All Etsy items approved. Order is Ready.",
+                metadata: {
+                    orderItemId: transactionId,
+                    fromOverallStatus: before.order_scale_overall_status,
+                    toOverallStatus: "Ready",
+                },
+            }));
 
             if (isEtsyAddressInvalid(order)) {
                 order.scale_overall_status = "Address Invalid";
