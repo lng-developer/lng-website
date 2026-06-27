@@ -145,6 +145,26 @@ describe("getListOrders", () => {
     );
   });
 
+  test("filters unchecked addresses when addressUnchecked=true", async () => {
+    const req = {
+      query: {
+        page: "1",
+        limit: "10",
+        addressUnchecked: "true",
+      },
+    };
+    const res = makeRes();
+
+    await controller.getListOrders(req, res);
+
+    const orderFilter = db.EtsyOrder.countDocuments.mock.calls[0][0];
+    expect(orderFilter).toEqual(expect.objectContaining({
+      "address_validation.isValid": null,
+      status: { $nin: ["Cancelled", "Canceled"] },
+    }));
+    expect(db.EtsyOrder.find).toHaveBeenCalledWith(orderFilter);
+  });
+
   test("statistics applies vendorId to the base match", async () => {
     const vendorId = "507f1f77bcf86cd799439011";
     const vendorProductId = new mongoose.Types.ObjectId("507f191e810c19729de860ea");
@@ -162,5 +182,15 @@ describe("getListOrders", () => {
     expect(aggregatePipeline[0].$match["items.cost_breakdown.vendorProductId"].$in.map(String)).toEqual(
       expect.arrayContaining([String(vendorProductId)])
     );
+  });
+
+  test("statistics includes addressUnchecked facet", async () => {
+    const res = makeRes();
+
+    await controller.getEtsyOrderStatistics({ query: {} }, res);
+
+    const facet = db.EtsyOrder.aggregate.mock.calls[0][0][1].$facet;
+    expect(facet.addressUnchecked).toEqual(expect.any(Array));
+    expect(JSON.stringify(facet.addressUnchecked)).toContain("address_validation.isValid");
   });
 });

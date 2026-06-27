@@ -375,6 +375,16 @@ function getVendorFulfillmentName(vendorKey) {
   );
 }
 
+function isNonCriticalTrackingPullError(err) {
+  const message = lower(err?.message);
+  return (
+    message.includes(" empty") ||
+    message.includes("empty ") ||
+    message.includes("not found") ||
+    message.includes("no data")
+  );
+}
+
 async function fetchTrackingByVendorKey(vendorKey, orderId, doc) {
   if (vendorKey === "beeful") return fetchBeeful(orderId);
   if (vendorKey === "merchfox") return fetchMerchFox(orderId);
@@ -1098,16 +1108,18 @@ async function updateOrderByVendors(orderId, vpidToVendorPrefetched = null) {
 
       totalChanged += applyToItemsOfVendor(doc, vk, res);
     } catch (e) {
-      await logOrderLifecycleEvent(buildOrderLifecyclePayload({
-        order: doc,
-        fallbackPlatform: "amazon",
-        actorType: "system",
-        stage: "TRACKING_PULL",
-        eventType: "TRACKING_PULL_FAILED",
-        status: "failed",
-        reason: e.message,
-        metadata: { provider: vk },
-      }));
+      if (!isNonCriticalTrackingPullError(e)) {
+        await logOrderLifecycleEvent(buildOrderLifecyclePayload({
+          order: doc,
+          fallbackPlatform: "amazon",
+          actorType: "system",
+          stage: "TRACKING_PULL",
+          eventType: "TRACKING_PULL_FAILED",
+          status: "failed",
+          reason: e.message,
+          metadata: { provider: vk },
+        }));
+      }
       if (vk === "lenful") throw e;
     }
   }

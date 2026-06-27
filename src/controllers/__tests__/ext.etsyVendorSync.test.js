@@ -16,6 +16,17 @@ jest.mock("../../lib/taskEmitter", () => ({
   emitTaskToMachine: jest.fn(),
 }));
 
+const mockAxiosClients = [];
+jest.mock("axios", () => ({
+  default: {
+    create: jest.fn(() => {
+      const client = { get: jest.fn(), request: jest.fn() };
+      mockAxiosClients.push(client);
+      return client;
+    }),
+  },
+}));
+
 jest.mock("../../service/orderLifecycleLogger", () => ({
   logOrderLifecycleEvent: jest.fn().mockResolvedValue(undefined),
 }));
@@ -230,6 +241,35 @@ describe("ext Etsy vendor sync", () => {
       reason: expect.stringContaining("Lenful missing API key"),
     }));
     expect(save).not.toHaveBeenCalled();
+  });
+
+  test("custom-product non-critical empty tracking only logs skipped", async () => {
+    const save = jest.fn().mockResolvedValue(undefined);
+    db.orderCustomProduct.findOne.mockResolvedValue({
+      orderId: "111-9039002-8646662",
+      status: "Fulfilled",
+      items: [
+        {
+          cost_breakdown: { vendorProductId: "vp-merchize" },
+          tracking_info: { status: "New", tracking: "" },
+        },
+      ],
+      save,
+    });
+    mockAxiosClients[2].get
+      .mockResolvedValueOnce({ status: 200, data: { success: true, data: [] } })
+      .mockResolvedValueOnce({ status: 200, data: { success: true, data: [] } });
+
+    const result = await controller.updateOrderByVendors(
+      "111-9039002-8646662",
+      new Map([["vp-merchize", { vendorKey: "merchize", vendorName: "Merchize" }]])
+    );
+
+    expect(result).toEqual({ updatedItems: 0, orderStatusChanged: false });
+    expect(logOrderLifecycleEvent.mock.calls.map(([payload]) => payload.eventType)).toEqual([
+      "TRACKING_SKIPPED",
+    ]);
+    expect(save).toHaveBeenCalledTimes(1);
   });
 
   test("parses Onos nested tracking object without stringifying it", () => {

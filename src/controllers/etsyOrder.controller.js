@@ -69,6 +69,10 @@ const ETSY_LIST_SELECT_FIELDS = [
 
 const ETSY_TRACKING_STATUSES = ["New", "In progress", "Fulfilled", "Shipping", "Shipped", "Canceled", "Cancelled"];
 const isEtsyCanceledStatus = (status) => ["Canceled", "Cancelled"].includes(String(status || "").trim());
+const ETSY_ADDRESS_UNCHECKED_MATCH = {
+    "address_validation.isValid": null,
+    status: { $nin: ["Cancelled", "Canceled"] },
+};
 
 const etsyShippingFilterValue = (value) => {
     if (!value) return null;
@@ -92,6 +96,7 @@ async function buildEtsyOrderFilter(query = {}, { includeTabFilters = true } = {
         status,
         isNoCostCenter,
         invalidAddress,
+        addressUnchecked,
         sumbittedoetsy,
         submittedToEtsy,
     } = query;
@@ -195,6 +200,10 @@ async function buildEtsyOrderFilter(query = {}, { includeTabFilters = true } = {
 
     if (toBooleanStrict(invalidAddress) === true) {
         filter["address_validation.isValid"] = false;
+    }
+
+    if (toBooleanStrict(addressUnchecked) === true) {
+        Object.assign(filter, ETSY_ADDRESS_UNCHECKED_MATCH);
     }
 
     if (toBooleanStrict(openCase) === true) {
@@ -1888,8 +1897,11 @@ async function calculateEtsyCost(order) {
 }
 
 const computeBaseCostForEtsyOrder = async (req, res) => {
+    let orderId = "";
+    let order = null;
     try {
-        const { orderId, orderData } = req.body;
+        ({ orderId } = req.body);
+        const { orderData } = req.body;
         const forceAddressValidation = toBooleanStrict(
             req.body?.forceAddressValidation ??
             req.body?.forceSmartyValidation ??
@@ -1898,7 +1910,7 @@ const computeBaseCostForEtsyOrder = async (req, res) => {
         if (!orderId) return res.status(400).json({ message: "Missing orderId" });
 
         // Sử dụng document gốc để có thể save() đoạn sau
-        let order = await EtsyOrder.findOne({ orderId });
+        order = await EtsyOrder.findOne({ orderId });
 
         // Nếu không tìm thấy Order nhưng có truyền JSON data -> Tạo order mới
         if (!order) {
@@ -1936,6 +1948,39 @@ const computeBaseCostForEtsyOrder = async (req, res) => {
         const shippingTypeForOrder = order.shipping_type || "Standard";
 
         const calculationData = await calculateEtsyCost(order);
+        const failedItems = calculationData.perItemResults.filter((item) => item.status !== "ok");
+        const lifecycleStatus =
+            failedItems.length > 0 || Number(order.base_cost || 0) <= 0
+                ? "failed"
+                : "success";
+        const firstFailureReason =
+            failedItems[0]?.reason ||
+            (Number(order.base_cost || 0) <= 0 ? "Computed base cost is 0" : "");
+
+        await logOrderLifecycleEvent(buildOrderLifecyclePayload({
+            order,
+            req,
+            fallbackPlatform: "etsy",
+            stage: "AUTO_COST",
+            eventType: lifecycleStatus === "success"
+                ? "AUTO_COST_RETEST_SUCCESS"
+                : "AUTO_COST_RETEST_FAILED",
+            status: lifecycleStatus,
+            message: "Etsy order base cost re-tested",
+            reason: firstFailureReason,
+            metadata: {
+                newBaseCost: order.base_cost,
+                itemCount: Array.isArray(order.items) ? order.items.length : 0,
+                failedItemCount: failedItems.length,
+                shippingGroupCount: calculationData.groupBreakdowns.length,
+                failedItems: failedItems.slice(0, 10).map((item) => ({
+                    transactionId: item.transactionId,
+                    sku: item.used_sku || item.sku || "",
+                    configCode: item.configCode || "",
+                    reason: item.reason || "",
+                })),
+            },
+        }));
 
         return res.json({
             platform: "etsy",
@@ -1950,6 +1995,19 @@ const computeBaseCostForEtsyOrder = async (req, res) => {
         });
 
     } catch (err) {
+        await logOrderLifecycleEvent(buildOrderLifecyclePayload({
+            order: order || { orderId, platform: "etsy" },
+            req,
+            fallbackPlatform: "etsy",
+            stage: "AUTO_COST",
+            eventType: "AUTO_COST_RETEST_FAILED",
+            status: "failed",
+            message: "Etsy order base cost re-test failed",
+            reason: err.message,
+            metadata: {
+                itemCount: Array.isArray(order?.items) ? order.items.length : 0,
+            },
+        }));
         return res.status(500).json({ message: "Compute failed for Etsy Order", error: err.message });
     }
 }
@@ -2185,6 +2243,7 @@ const getEtsyOrderStatistics = async (req, res) => {
                     cancelled: [{ $match: { status: "Cancelled" } }, { $count: "c" }],
                     refund: [{ $match: { status: "Refund" } }, { $count: "c" }],
                     openCase: [{ $match: OPEN_CASE_MATCH }, { $count: "c" }],
+                    addressUnchecked: [{ $match: ETSY_ADDRESS_UNCHECKED_MATCH }, { $count: "c" }],
                     invalidAddress: [
                         {
                             $match: {
@@ -2214,6 +2273,7 @@ const getEtsyOrderStatistics = async (req, res) => {
                     cancelled: { $ifNull: [{ $arrayElemAt: ["$cancelled.c", 0] }, 0] },
                     refund: { $ifNull: [{ $arrayElemAt: ["$refund.c", 0] }, 0] },
                     openCase: { $ifNull: [{ $arrayElemAt: ["$openCase.c", 0] }, 0] },
+                    addressUnchecked: { $ifNull: [{ $arrayElemAt: ["$addressUnchecked.c", 0] }, 0] },
                     invalidAddress: { $ifNull: [{ $arrayElemAt: ["$invalidAddress.c", 0] }, 0] },
                 },
             },
@@ -2230,6 +2290,7 @@ const getEtsyOrderStatistics = async (req, res) => {
                 cancelled: 0,
                 refund: 0,
                 openCase: 0,
+                addressUnchecked: 0,
                 invalidAddress: 0,
             }
         );

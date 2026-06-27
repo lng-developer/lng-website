@@ -24,6 +24,7 @@ const OrderHistory = db.OrderHistory;
 const { logOrderHistory } = require("../service/orderHistoryLogger");
 const { logOrderLifecycleEvent } = require("../service/orderLifecycleLogger");
 const { buildOrderLifecyclePayload } = require("../service/orderLifecycleContext");
+const logger = require("../helper/logger");
 const {
   applyRulesToSku,
   buildRulesFromConfig,
@@ -3532,11 +3533,13 @@ function buildBaseCostComputeChanges({
 
 // ================== COMPUTE BASE COST (FULL) ==================
 const computeBaseCostForOrder = async (req, res) => {
+  let orderId = "";
+  let order = null;
   try {
-    const { orderId } = req.body;
+    ({ orderId } = req.body);
     if (!orderId) return res.status(400).json({ message: "Missing orderId" });
 
-    const order = await OrderCustomProduct.findOne({ orderId }).lean(false);
+    order = await OrderCustomProduct.findOne({ orderId }).lean(false);
     if (!order) return res.status(404).json({ message: "Order not found" });
     if (!Array.isArray(order.items) || order.items.length === 0) {
       return res.status(400).json({ message: "Order has no items" });
@@ -3798,11 +3801,11 @@ const computeBaseCostForOrder = async (req, res) => {
         choosePreferredVendorIdStable(candidateSetsPerItem, vendorRank) || null;
     }
 
-    console.log(
-      "[BaseCost] candidates per item:",
-      candidateSetsPerItem.map((s) => [...s])
-    );
-    console.log("[BaseCost] preferredVendorId:", preferredVendorId);
+    logger.debug({
+      message: "[BaseCost] vendor candidates resolved",
+      candidateSetsPerItem: candidateSetsPerItem.map((s) => [...s]),
+      preferredVendorId,
+    });
 
     // ============== PASS 2: Chọn vendor_product & gom nhóm ship (vendor+profile) ==============
     const groups = new Map();
@@ -4331,6 +4334,42 @@ const computeBaseCostForOrder = async (req, res) => {
       });
     }
 
+    const failedItems = perItemResults.filter((item) => item.status !== "ok");
+    const lifecycleStatus =
+      failedItems.length > 0 || Number(order.base_cost || 0) <= 0
+        ? "failed"
+        : "success";
+    const firstFailureReason =
+      failedItems[0]?.reason ||
+      (Number(order.base_cost || 0) <= 0 ? "Computed base cost is 0" : "");
+
+    await logOrderLifecycleEvent(buildOrderLifecyclePayload({
+      order,
+      req,
+      fallbackPlatform: "amazon",
+      stage: "AUTO_COST",
+      eventType:
+        lifecycleStatus === "success"
+          ? "AUTO_COST_RETEST_SUCCESS"
+          : "AUTO_COST_RETEST_FAILED",
+      status: lifecycleStatus,
+      message: "Order base cost re-tested",
+      reason: firstFailureReason,
+      metadata: {
+        oldBaseCost,
+        newBaseCost: order.base_cost,
+        itemCount: Array.isArray(order.items) ? order.items.length : 0,
+        failedItemCount: failedItems.length,
+        shippingGroupCount: groupBreakdowns.length,
+        failedItems: failedItems.slice(0, 10).map((item) => ({
+          orderItemId: item.orderItemId,
+          sku: item.used_sku || item.sku || "",
+          configCode: item.configCode || "",
+          reason: item.reason || "",
+        })),
+      },
+    }));
+
     return res.json({
       message:
         "Computed base cost with vendor-preference & consolidated shipping (priority for Expedited, international otherwise)",
@@ -4341,6 +4380,19 @@ const computeBaseCostForOrder = async (req, res) => {
       detail: perItemResults,
     });
   } catch (err) {
+    await logOrderLifecycleEvent(buildOrderLifecyclePayload({
+      order: order || { orderId, platform: "amazon" },
+      req,
+      fallbackPlatform: "amazon",
+      stage: "AUTO_COST",
+      eventType: "AUTO_COST_RETEST_FAILED",
+      status: "failed",
+      message: "Order base cost re-test failed",
+      reason: err.message,
+      metadata: {
+        itemCount: Array.isArray(order?.items) ? order.items.length : 0,
+      },
+    }));
     return res
       .status(500)
       .json({ message: "Compute failed", error: err.message });
