@@ -231,4 +231,88 @@ describe("createOrder auto base cost", () => {
       reason: "config query failed",
     }));
   });
+
+  test("skips old existing Etsy order unless forceBackfill is set", async () => {
+    const shopId = new mongoose.Types.ObjectId();
+    const existing = {
+      _id: new mongoose.Types.ObjectId(),
+      orderId: "4095756706",
+      shopId,
+      createdAt: new Date(Date.now() - 6 * 24 * 60 * 60 * 1000),
+      items: [],
+    };
+    db.EtsyOrder.findOne.mockResolvedValue(existing);
+
+    const req = {
+      body: {
+        orderId: "4095756706",
+        shopId: String(shopId),
+        items: [{ transactionId: "tx-1", sku: "SKU-1", quantity: 1 }],
+      },
+    };
+    const res = makeRes();
+
+    await controller.createOrder(req, res);
+
+    expect(res.status).toHaveBeenCalledWith(200);
+    expect(res.json).toHaveBeenCalledWith(expect.objectContaining({
+      duplicated: true,
+      skipped: true,
+      reason: "existing_order_outside_backfill_window",
+      backfilled: false,
+      autoBaseCost: null,
+    }));
+    expect(logOrderLifecycleEvent).not.toHaveBeenCalled();
+    expect(db.EtsyOrder.updateOne).not.toHaveBeenCalled();
+  });
+
+  test("skips lifecycle and auto cost when existing Etsy order has no backfill changes", async () => {
+    const shopId = new mongoose.Types.ObjectId();
+    const existingItem = {
+      transactionId: "tx-1",
+      listingId: "listing-1",
+      sku: "SKU-1",
+      itemName: "Item",
+      quantity: 1,
+      variations: { Size: "S" },
+      customizations: { textFields: [] },
+      customFiles: [],
+    };
+    const existing = {
+      _id: new mongoose.Types.ObjectId(),
+      orderId: "4095756707",
+      shopId,
+      createdAt: new Date(),
+      items: [existingItem],
+      shipping: {},
+      seller: { sellerCode: "SKU" },
+      save: jest.fn(),
+      markModified: jest.fn(),
+    };
+    db.EtsyOrder.findOne.mockResolvedValue(existing);
+
+    const req = {
+      body: {
+        orderId: "4095756707",
+        shopId: String(shopId),
+        seller: { sellerCode: "SKU" },
+        items: [existingItem],
+      },
+    };
+    const res = makeRes();
+
+    await controller.createOrder(req, res);
+
+    expect(res.status).toHaveBeenCalledWith(200);
+    expect(res.json).toHaveBeenCalledWith(expect.objectContaining({
+      duplicated: true,
+      skipped: true,
+      reason: "existing_order_no_backfill_changes",
+      backfilled: false,
+      autoBaseCost: null,
+    }));
+    expect(existing.save).not.toHaveBeenCalled();
+    expect(logOrderLifecycleEvent).not.toHaveBeenCalled();
+    expect(db.EtsyOrder.bulkWrite).not.toHaveBeenCalled();
+  });
 });

@@ -2724,6 +2724,17 @@ const deriveSellerCodeFromItems = (items = []) => {
     return undefined;
 };
 
+const ETSY_ORDER_BACKFILL_WINDOW_DAYS = Number(process.env.ETSY_ORDER_BACKFILL_WINDOW_DAYS || 2);
+const isForceTrue = (value) => value === true || String(value || "").toLowerCase() === "true";
+const isExistingEtsyOrderTooOldForBackfill = (order) => {
+    const days = Number.isFinite(ETSY_ORDER_BACKFILL_WINDOW_DAYS) ? ETSY_ORDER_BACKFILL_WINDOW_DAYS : 2;
+    if (days <= 0) return false;
+    const baseDate = order?.createdAt || order?.created_at || order?.saleDate;
+    const createdAt = baseDate ? new Date(baseDate) : null;
+    if (!createdAt || !Number.isFinite(createdAt.getTime())) return false;
+    return createdAt.getTime() < Date.now() - days * 24 * 60 * 60 * 1000;
+};
+
 const normalizeItem = (raw, idx) => {
     const transactionId = String(raw?.transactionId ?? "").trim();
     if (!transactionId) {
@@ -3096,7 +3107,34 @@ const createOrder = async (req, res) => {
 
         const existing = await EtsyOrder.findOne({ orderId: payload.orderId, shopId: payload.shopId });
         if (existing) {
+            if (!isForceTrue(req.body?.forceBackfill) && isExistingEtsyOrderTooOldForBackfill(existing)) {
+                return res.status(200).json({
+                    ok: true,
+                    duplicated: true,
+                    skipped: true,
+                    reason: "existing_order_outside_backfill_window",
+                    orderId: payload.orderId,
+                    backfilled: false,
+                    autoBaseCost: null,
+                });
+            }
+
             const result = await backfillExistingEtsyOrder(existing, payload);
+            if (!result.backfilled) {
+                return res.status(200).json({
+                    ok: true,
+                    duplicated: true,
+                    skipped: true,
+                    reason: "existing_order_no_backfill_changes",
+                    orderId: payload.orderId,
+                    backfilled: false,
+                    updatedItems: 0,
+                    addedItems: 0,
+                    autoBaseCost: null,
+                    customSummary: result.customSummary,
+                });
+            }
+
             if (payload.seller?.sellerCode) {
                 await fillSellerIfMissing(payload.orderId, payload.shopId, payload.seller.sellerCode);
             }
