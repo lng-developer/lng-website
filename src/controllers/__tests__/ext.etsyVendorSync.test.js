@@ -243,7 +243,7 @@ describe("ext Etsy vendor sync", () => {
     expect(save).not.toHaveBeenCalled();
   });
 
-  test("custom-product non-critical empty tracking only logs skipped", async () => {
+  test("custom-product non-critical empty tracking does not log no-op lifecycle events", async () => {
     const save = jest.fn().mockResolvedValue(undefined);
     db.orderCustomProduct.findOne.mockResolvedValue({
       orderId: "111-9039002-8646662",
@@ -266,10 +266,8 @@ describe("ext Etsy vendor sync", () => {
     );
 
     expect(result).toEqual({ updatedItems: 0, orderStatusChanged: false });
-    expect(logOrderLifecycleEvent.mock.calls.map(([payload]) => payload.eventType)).toEqual([
-      "TRACKING_SKIPPED",
-    ]);
-    expect(save).toHaveBeenCalledTimes(1);
+    expect(logOrderLifecycleEvent).not.toHaveBeenCalled();
+    expect(save).not.toHaveBeenCalled();
   });
 
   test("parses Onos nested tracking object without stringifying it", () => {

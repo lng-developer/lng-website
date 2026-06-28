@@ -1133,16 +1133,18 @@ async function updateOrderByVendors(orderId, vpidToVendorPrefetched = null) {
     orderStatusChanged = true;
   }
 
-  await doc.save();
-  await logOrderLifecycleEvent(buildOrderLifecyclePayload({
-    order: doc,
-    fallbackPlatform: "amazon",
-    actorType: "system",
-    stage: "TRACKING_PULL",
-    eventType: totalChanged > 0 || orderStatusChanged ? "TRACKING_UPDATED" : "TRACKING_SKIPPED",
-    status: totalChanged > 0 || orderStatusChanged ? "success" : "info",
-    metadata: { updatedItems: totalChanged, orderStatusChanged },
-  }));
+  if (totalChanged > 0 || orderStatusChanged) {
+    await doc.save();
+    await logOrderLifecycleEvent(buildOrderLifecyclePayload({
+      order: doc,
+      fallbackPlatform: "amazon",
+      actorType: "system",
+      stage: "TRACKING_PULL",
+      eventType: "TRACKING_UPDATED",
+      status: "success",
+      metadata: { updatedItems: totalChanged, orderStatusChanged },
+    }));
+  }
   return { updatedItems: totalChanged, orderStatusChanged };
 }
 
@@ -1338,26 +1340,26 @@ async function updateEtsyOrderByVendors(orderId, options = {}) {
 
   if (totalChanged > 0 || orderStatusChanged) {
     await doc.save();
+    await logOrderLifecycleEvent(buildOrderLifecyclePayload({
+      order: doc,
+      fallbackPlatform: "etsy",
+      actorType: "system",
+      stage: "TRACKING_PULL",
+      eventType: "TRACKING_UPDATED",
+      status: "success",
+      metadata: {
+        updatedItems: totalChanged,
+        orderStatusChanged,
+        vendorResults: vendorResults.map((result) => ({
+          vendorKey: result.vendorKey,
+          ok: result.ok,
+          changed: result.changed || 0,
+          shipped: !!result.shipped,
+          message: result.message || "",
+        })),
+      },
+    }));
   }
-  await logOrderLifecycleEvent(buildOrderLifecyclePayload({
-    order: doc,
-    fallbackPlatform: "etsy",
-    actorType: "system",
-    stage: "TRACKING_PULL",
-    eventType: totalChanged > 0 || orderStatusChanged ? "TRACKING_UPDATED" : "TRACKING_SKIPPED",
-    status: totalChanged > 0 || orderStatusChanged ? "success" : "info",
-    metadata: {
-      updatedItems: totalChanged,
-      orderStatusChanged,
-      vendorResults: vendorResults.map((result) => ({
-        vendorKey: result.vendorKey,
-        ok: result.ok,
-        changed: result.changed || 0,
-        shipped: !!result.shipped,
-        message: result.message || "",
-      })),
-    },
-  }));
   return {
     updatedItems: totalChanged,
     orderStatusChanged,
