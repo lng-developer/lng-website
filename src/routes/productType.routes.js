@@ -12,6 +12,6 @@ router.put('/:groupId/items/:itemId', authenticateToken, c.updateItem);
 router.delete('/:groupId/items/:itemId', authenticateToken, c.deleteItem);
 
 // Reorder thủ công các item trong group
-router.put('/:groupId/reorder', c.reorderItems);
+router.put('/:groupId/reorder', authenticateToken, c.reorderItems);
 
 module.exports = router;

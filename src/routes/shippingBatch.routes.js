@@ -3,6 +3,7 @@ const router = express.Router();
 const multer = require("multer");
 const upload = multer({ storage: multer.memoryStorage() });
 const { shippingBatchController } = require("../controllers");
+const { authenticateToken } = require("../middlewares/auth.middleware");
 
 // ✅ Debug endpoint
 // const { debugSocketRooms } = require("../../debug-socket-rooms");
@@ -10,12 +11,14 @@ const { shippingBatchController } = require("../controllers");
 
 router.post(
   "/",
+  authenticateToken,
   upload.single("file"),
   shippingBatchController.createBatchFromFile
 );
 router.get("/", shippingBatchController.listShippingBatches);
 router.post(
   "/:batchId/update-from-system",
+  authenticateToken,
   shippingBatchController.createUpdateBatchFromSystem
 );
 router.get("/:batchId/download", shippingBatchController.downloadCompletedFile);
@@ -32,6 +35,7 @@ router.get("/:batchId/download", shippingBatchController.downloadCompletedFile);
 // ✅ Route mới: Export orders có tracking trực tiếp
 router.post(
   "/export-orders-with-tracking",
+  authenticateToken,
   shippingBatchController.exportOrdersWithTracking
 );
 
@@ -44,6 +48,7 @@ router.get(
 // ✅ Route mới: FE gửi task UPLOAD_TRACKING thủ công
 router.post(
   "/manual-upload-task",
+  authenticateToken,
   shippingBatchController.manualUploadTask
 );
 
@@ -56,6 +61,7 @@ router.get(
 // ✅ Route mới: FE tạo batch từ danh sách orders
 router.post(
   "/create-from-orders",
+  authenticateToken,
   shippingBatchController.createBatchFromOrders
 );
 

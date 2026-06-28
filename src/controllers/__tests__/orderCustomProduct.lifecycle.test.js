@@ -42,6 +42,7 @@ jest.mock("../../helper/orderHelper", () => ({
 }));
 
 const db = require("../../models");
+const { logOrderHistory } = require("../../service/orderHistoryLogger");
 const { logOrderLifecycleEvent } = require("../../service/orderLifecycleLogger");
 const controller = require("../orderCustomProduct.controller");
 
@@ -96,6 +97,54 @@ describe("order custom product lifecycle hooks", () => {
       actorName: "cs@example.com",
       metadata: { fromStatus: "New", toStatus: "Fulfilled" },
     }));
+  });
+
+  test("updateBaseCost logs user actor and old/new cost", async () => {
+    const order = {
+      _id: "order-object-id",
+      orderId: "111-2222222-3333333",
+      platform: "Amazon",
+      shopId: "shop-1",
+      base_cost: 10,
+      save: jest.fn().mockResolvedValue(undefined),
+    };
+    db.orderCustomProduct.findOne.mockResolvedValue(order);
+
+    const req = {
+      body: { orderId: order.orderId, base_cost: 12.5 },
+      user: { _id: "user-1", email: "cs@example.com" },
+      ip: "127.0.0.1",
+      headers: { "user-agent": "jest" },
+    };
+    const res = makeRes();
+
+    await controller.updateBaseCost(req, res);
+
+    expect(order.base_cost).toBe(12.5);
+    expect(logOrderHistory).toHaveBeenCalledWith(expect.objectContaining({
+      action: "UPDATE_BASE_COST",
+      description: "Order base cost manually updated",
+      user: req.user,
+      changes: [
+        {
+          field: "base_cost",
+          from: 10,
+          to: 12.5,
+        },
+      ],
+    }));
+    expect(logOrderLifecycleEvent).toHaveBeenCalledWith(expect.objectContaining({
+      platform: "amazon",
+      orderId: order.orderId,
+      stage: "BASE_COST",
+      eventType: "ORDER_BASE_COST_UPDATED",
+      status: "success",
+      actorType: "user",
+      actorId: "user-1",
+      actorName: "cs@example.com",
+      metadata: { oldBaseCost: 10, newBaseCost: 12.5 },
+    }));
+    expect(res.status).toHaveBeenCalledWith(200);
   });
 
   test("updateOrderStatus does not log lifecycle event on no-op status", async () => {

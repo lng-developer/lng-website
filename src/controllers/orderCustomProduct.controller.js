@@ -2518,8 +2518,44 @@ const updateBaseCost = async (req, res) => {
       return res.status(404).json({ message: "Order not found" });
     }
 
+    const oldBaseCost = Number(order.base_cost || 0);
     order.base_cost = base_cost;
     await order.save();
+
+    if (oldBaseCost !== Number(base_cost)) {
+      await logOrderHistory({
+        orderDoc: order,
+        action: "UPDATE_BASE_COST",
+        description: "Order base cost manually updated",
+        changes: [
+          {
+            field: "base_cost",
+            from: oldBaseCost,
+            to: base_cost,
+          },
+        ],
+        user: req.user,
+        context: {
+          source: "PORTAL",
+          ip: req.ip,
+          userAgent: req.headers["user-agent"],
+        },
+      });
+
+      await logOrderLifecycleEvent(buildOrderLifecyclePayload({
+        order,
+        req,
+        fallbackPlatform: "amazon",
+        stage: "BASE_COST",
+        eventType: "ORDER_BASE_COST_UPDATED",
+        status: "success",
+        message: "Order base cost manually updated",
+        metadata: {
+          oldBaseCost,
+          newBaseCost: base_cost,
+        },
+      }));
+    }
 
     res.status(200).json({
       message: "Order base cost updated successfully",

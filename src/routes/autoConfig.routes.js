@@ -2,12 +2,13 @@ const express = require("express");
 const router = express.Router();
 const { getAll, create, update, remove, runVendorSyncBatch } = require("../controllers/autoConfig.controller");
 const { vendorSyncBatch } = require("../controllers/ext.controller");
+const { authenticateToken } = require("../middlewares/auth.middleware");
 
 router.get("/", getAll);
-router.post("/", create);
-router.put("/:id", update);
-router.delete("/:id", remove);
-router.post("/run-vendor-sync", runVendorSyncBatch);
+router.post("/", authenticateToken, create);
+router.put("/:id", authenticateToken, update);
+router.delete("/:id", authenticateToken, remove);
+router.post("/run-vendor-sync", authenticateToken, runVendorSyncBatch);
 
 // Auto gọi vendorSyncBatch mỗi 2 tiếng
 setInterval(async () => {

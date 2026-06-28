@@ -96,6 +96,7 @@ router.get(
 
 router.put(
   "/orders/reset/bulk",
+  authenticateToken,
   scaleController.resetScaleForOrdersBulk
 );
 

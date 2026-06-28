@@ -51,8 +51,8 @@ const authenticateToken = async (req, res, next) => {
 
     const roleFromToken = decoded.role;
 
-    // ✅ Ưu tiên name; fallback sang fullName/username/email
-    const displayName = user.full_name
+    const displayName =
+      user.full_name || user.name || user.username || user.email || "";
 
     // Nhúng đủ cho code cũ và mới
     req.user = {

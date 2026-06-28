@@ -188,6 +188,91 @@ function normalizeVendorKey(nameOrType) {
   return "";
 }
 
+const TRACKING_VENDOR_KEYS = new Set([
+  "beeful",
+  "merchfox",
+  "merchize",
+  "printway",
+  "mangotee",
+  "ss88",
+  "luxurypro",
+  "onos",
+  "lenful",
+]);
+const TRACKING_VENDOR_SUBMISSION_KEYS = [
+  "grabink",
+  "beeful",
+  "merchfox",
+  "merchize",
+  "printway",
+  "mangotee",
+  "ss88",
+  "luxurypro",
+  "onos",
+  "lenful",
+];
+const DEFAULT_TRACKING_SENT_WITHIN_DAYS = 30;
+
+function toPlainObject(value) {
+  return value?.toObject?.() ? value.toObject() : value;
+}
+
+function isOnOrAfter(value, cutoff) {
+  if (!cutoff) return true;
+  const date = value instanceof Date ? value : new Date(value);
+  return Number.isFinite(date.getTime()) && date >= cutoff;
+}
+
+function getTrackingSentAfter({ sentAfter, sentWithinDays } = {}) {
+  const rawDate = norm(sentAfter || process.env.PULL_TRACKING_SENT_AFTER);
+  if (rawDate) {
+    const parsed = new Date(rawDate);
+    if (Number.isFinite(parsed.getTime())) return parsed;
+  }
+
+  const days = Number(sentWithinDays || process.env.PULL_TRACKING_SENT_WITHIN_DAYS || DEFAULT_TRACKING_SENT_WITHIN_DAYS);
+  return new Date(Date.now() - days * 24 * 60 * 60 * 1000);
+}
+
+function buildSentVendorSubmissionQuery(sentAfter) {
+  const sentAtFilter = sentAfter ? { $gte: sentAfter } : { $exists: true };
+  return {
+    $or: [
+      ...TRACKING_VENDOR_SUBMISSION_KEYS.map((key) => ({
+        [`vendor_submissions.${key}.sent`]: true,
+        [`vendor_submissions.${key}.sent_at`]: sentAtFilter,
+      })),
+      { "grabink_submission.sent": true, "grabink_submission.sent_at": sentAtFilter },
+    ],
+  };
+}
+
+function getSentTrackingVendorKeys(doc = {}, { sentAfter = null } = {}) {
+  const keys = new Set();
+  const submissions = toPlainObject(doc.vendor_submissions) || {};
+
+  for (const [rawKey, rawSubmission] of Object.entries(submissions)) {
+    const vendorKey = normalizeVendorKey(rawKey);
+    const submission = toPlainObject(rawSubmission) || {};
+    if (
+      TRACKING_VENDOR_KEYS.has(vendorKey) &&
+      submission.sent === true &&
+      isOnOrAfter(submission.sent_at, sentAfter)
+    ) {
+      keys.add(vendorKey);
+    }
+  }
+
+  if (
+    doc.grabink_submission?.sent === true &&
+    isOnOrAfter(doc.grabink_submission?.sent_at, sentAfter)
+  ) {
+    keys.add("beeful");
+  }
+
+  return [...keys];
+}
+
 const isObjectIdLike = (value) => /^[a-fA-F0-9]{24}$/.test(String(value || "").trim());
 const isForceTrue = (value) => value === true || String(value).toLowerCase() === "true";
 
@@ -381,6 +466,7 @@ function isNonCriticalTrackingPullError(err) {
     message.includes(" empty") ||
     message.includes("empty ") ||
     message.includes("not found") ||
+    message.includes("not_found") ||
     message.includes("no data")
   );
 }
@@ -966,11 +1052,16 @@ function applyToItemsOfVendor(
   { tracking, carrier, shipped, raw }
 ) {
   let changed = 0;
+  const sentVendorKeys = doc.__sentTrackingVendorKeys || [];
 
   doc.items = (doc.items || []).map((it) => {
     const vpid = it?.cost_breakdown?.vendorProductId;
     const cached = vpid ? doc.__vpidToVendor?.get(String(vpid)) : null;
-    const thisVendorKey = cached?.vendorKey || "";
+    const fulfillmentVendorKey = normalizeVendorKey(it?.tracking_info?.fulfillment);
+    const thisVendorKey =
+      sentVendorKeys.length === 1
+        ? sentVendorKeys[0]
+        : fulfillmentVendorKey || cached?.vendorKey || "";
 
     if (thisVendorKey !== vendorKey) {
       return it.toObject?.() ? it.toObject() : it;
@@ -1090,14 +1181,12 @@ async function updateOrderByVendors(orderId, vpidToVendorPrefetched = null) {
 
   doc.__vpidToVendor = vpidToVendor;
 
-  const groups = groupItemsByVendorWithMap(doc, vpidToVendor);
-  const vendorKeys = Object.keys(groups).filter((k) =>
-    ["beeful", "merchfox", "merchize", "printway", "mangotee", "ss88", "luxurypro", "onos", "lenful"].includes(k)
-  );
+  const vendorKeys = getSentTrackingVendorKeys(doc);
+  doc.__sentTrackingVendorKeys = vendorKeys;
 
   if (vendorKeys.length === 0) {
     throw new Error(
-      `No known vendor mapping from items.cost_breakdown.vendorProductId for ${orderId}`
+      `No sent vendor submission found for tracking pull: ${orderId}`
     );
   }
 
@@ -1148,10 +1237,11 @@ async function updateOrderByVendors(orderId, vpidToVendorPrefetched = null) {
   return { updatedItems: totalChanged, orderStatusChanged };
 }
 
-async function runBatch({ max = 1100, dryRun = false } = {}) {
+async function runBatch({ max = 1100, dryRun = false, sentAfter = null, sentWithinDays = null } = {}) {
+  const trackingSentAfter = getTrackingSentAfter({ sentAfter, sentWithinDays });
   const candidates = await OrderCustomProduct.find({
     status: "Fulfilled",
-    "items.cost_breakdown.vendorProductId": { $exists: true, $ne: null },
+    ...buildSentVendorSubmissionQuery(trackingSentAfter),
   })
     .sort({ createdAt: -1 })
     .limit(max)
@@ -1167,10 +1257,8 @@ async function runBatch({ max = 1100, dryRun = false } = {}) {
 
   const vpidToVendor = await buildVendorMapsFromVpidSet(vpidSet);
 
-  const knownKeys = new Set(["beeful", "merchfox", "merchize", "printway", "mangotee", "ss88", "luxurypro", "onos", "lenful"]);
   const filtered = candidates.filter((o) => {
-    const groups = groupItemsByVendorWithMap(o, vpidToVendor);
-    return Object.keys(groups).some((k) => knownKeys.has(k));
+    return getSentTrackingVendorKeys(o, { sentAfter: trackingSentAfter }).length > 0;
   });
 
   if (dryRun) {
@@ -1179,11 +1267,11 @@ async function runBatch({ max = 1100, dryRun = false } = {}) {
       mode: "dry-run",
       scanned: filtered.length,
       orderIds: filtered.map((o) => o.orderId),
+      sentAfter: trackingSentAfter.toISOString(),
       vendorsPerOrder: filtered.map((o) => {
-        const g = groupItemsByVendorWithMap(o, vpidToVendor);
         return {
           orderId: o.orderId,
-          vendorKeys: Object.keys(g).filter((k) => knownKeys.has(k)),
+          vendorKeys: getSentTrackingVendorKeys(o, { sentAfter: trackingSentAfter }),
         };
       }),
     };
@@ -1219,11 +1307,16 @@ function buildTrackingNote(prevNote, carrier) {
 function applyToEtsyItemsOfVendor(doc, vendorKey, { tracking, carrier, shipped, raw }) {
   let changed = 0;
   const fulfillment = getVendorFulfillmentName(vendorKey);
+  const sentVendorKeys = doc.__sentTrackingVendorKeys || [];
 
   doc.items = (doc.items || []).map((it) => {
     const vpid = it?.cost_breakdown?.vendorProductId;
     const cached = vpid ? doc.__vpidToVendor?.get(String(vpid)) : null;
-    const thisVendorKey = cached?.vendorKey || "";
+    const fulfillmentVendorKey = normalizeVendorKey(it?.tracking_info?.fulfillment);
+    const thisVendorKey =
+      sentVendorKeys.length === 1
+        ? sentVendorKeys[0]
+        : fulfillmentVendorKey || cached?.vendorKey || "";
 
     if (thisVendorKey !== vendorKey) {
       return it.toObject?.() ? it.toObject() : it;
@@ -1297,13 +1390,12 @@ async function updateEtsyOrderByVendors(orderId, options = {}) {
     options.vpidToVendorPrefetched || (await buildVendorMapsFromVpidSet(vpidSet));
   doc.__vpidToVendor = vpidToVendor;
 
-  const knownKeys = new Set(["beeful", "merchfox", "merchize", "printway", "mangotee", "ss88", "luxurypro", "onos", "lenful"]);
-  const groups = groupItemsByVendorWithMap(doc, vpidToVendor);
-  const vendorKeys = Object.keys(groups).filter((k) => knownKeys.has(k));
+  const vendorKeys = getSentTrackingVendorKeys(doc);
+  doc.__sentTrackingVendorKeys = vendorKeys;
 
   if (vendorKeys.length === 0) {
     throw new Error(
-      `No known vendor mapping from etsyorders.items.cost_breakdown.vendorProductId for ${trimmedOrderId}`
+      `No sent vendor submission found for Etsy tracking pull: ${trimmedOrderId}`
     );
   }
 
@@ -1368,9 +1460,10 @@ async function updateEtsyOrderByVendors(orderId, options = {}) {
   };
 }
 
-async function runEtsyVendorBatch({ max = 1100, dryRun = false, shopId = null, status = "Fulfilled" } = {}) {
+async function runEtsyVendorBatch({ max = 1100, dryRun = false, shopId = null, status = "Fulfilled", sentAfter = null, sentWithinDays = null } = {}) {
+  const trackingSentAfter = getTrackingSentAfter({ sentAfter, sentWithinDays });
   const query = {
-    "items.cost_breakdown.vendorProductId": { $exists: true, $ne: null },
+    ...buildSentVendorSubmissionQuery(trackingSentAfter),
   };
   if (status) query.status = status;
   if (shopId) query.shopId = shopId;
@@ -1389,10 +1482,8 @@ async function runEtsyVendorBatch({ max = 1100, dryRun = false, shopId = null, s
   }
 
   const vpidToVendor = await buildVendorMapsFromVpidSet(vpidSet);
-  const knownKeys = new Set(["beeful", "merchfox", "merchize", "printway", "mangotee", "ss88", "luxurypro", "onos", "lenful"]);
   const filtered = candidates.filter((o) => {
-    const groups = groupItemsByVendorWithMap(o, vpidToVendor);
-    return Object.keys(groups).some((k) => knownKeys.has(k));
+    return getSentTrackingVendorKeys(o, { sentAfter: trackingSentAfter }).length > 0;
   });
 
   if (dryRun) {
@@ -1401,12 +1492,12 @@ async function runEtsyVendorBatch({ max = 1100, dryRun = false, shopId = null, s
       mode: "dry-run",
       scanned: filtered.length,
       orderIds: filtered.map((o) => o.orderId),
+      sentAfter: trackingSentAfter.toISOString(),
       vendorsPerOrder: filtered.map((o) => {
-        const g = groupItemsByVendorWithMap(o, vpidToVendor);
         return {
           orderId: o.orderId,
           shopId: String(o.shopId || ""),
-          vendorKeys: Object.keys(g).filter((k) => knownKeys.has(k)),
+          vendorKeys: getSentTrackingVendorKeys(o, { sentAfter: trackingSentAfter }),
         };
       }),
     };
@@ -1496,10 +1587,12 @@ const vendorSyncList = async (req, res) => {
  */
 const vendorSyncBatch = async (req, res) => {
   try {
-    const { max = 1100, dryRun = false } = req.body || {};
+    const { max = 1100, dryRun = false, sentAfter = null, sentWithinDays = null } = req.body || {};
     const result = await runBatch({
       max: Number(max) || 100,
       dryRun: Boolean(dryRun),
+      sentAfter,
+      sentWithinDays,
     });
     return res.json({ ok: true, processedOrders: result.scanned, ...result });
   } catch (e) {
@@ -1569,12 +1662,14 @@ const etsyVendorSyncList = async (req, res) => {
  */
 const etsyVendorSyncBatch = async (req, res) => {
   try {
-    const { max = 1100, dryRun = false, shopId = null, status = "Fulfilled" } = req.body || {};
+    const { max = 1100, dryRun = false, shopId = null, status = "Fulfilled", sentAfter = null, sentWithinDays = null } = req.body || {};
     const result = await runEtsyVendorBatch({
       max: Number(max) || 100,
       dryRun: isForceTrue(dryRun),
       shopId,
       status,
+      sentAfter,
+      sentWithinDays,
     });
     return res.json({ ok: true, processedOrders: result.scanned, ...result });
   } catch (e) {

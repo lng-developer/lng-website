@@ -25,7 +25,7 @@ const storage = multer.diskStorage({
 
 const upload = multer({ storage });
 
-router.post('/import', upload.array('files', 2), etsyOrderController.importOrders);
+router.post('/import', authenticateToken, upload.array('files', 2), etsyOrderController.importOrders);
 router.get('/statistic', etsyOrderController.getEtsyOrderStatistics);
 router.get(
     '/scale/list',
@@ -69,7 +69,7 @@ router.post(
     authorizeRoles('Customer Service', "Admin", "Seller"),
     etsyOrderController.pushEtsyPlatformOrders
 );
-router.patch('/sumbittedoetsy', etsyOrderController.updateSumbittedoetsyStatus);
+router.patch('/sumbittedoetsy', authenticateToken, etsyOrderController.updateSumbittedoetsyStatus);
 router.put('/manual-mapping', authenticateToken, orderCustomProductController.applyManualVendorMapping);
 router.put('/reset-base-cost', authenticateToken, etsyOrderController.resetBaseCostForEtsyOrder);
 router.post('/compute-base-cost/batch', authenticateToken, etsyOrderController.computeMissingBaseCostsForEtsyOrders);
@@ -166,12 +166,12 @@ router.patch(
     authenticateToken,
     etsyOrderController.updateEtsyOrderItemQuantity
 );
-router.patch('/:orderId/tracking',  etsyOrderController.updateEtsyOrderTrackingForAllItems);
-router.put('/:orderId/tracking',  etsyOrderController.updateEtsyOrderTrackingForAllItems);
-router.patch('/:orderId/items/:transactionId/tracking', etsyOrderController.updateEtsyOrderItemTracking);
-router.put('/:orderId/items/:transactionId/tracking', etsyOrderController.updateEtsyOrderItemTracking);
+router.patch('/:orderId/tracking', authenticateToken, etsyOrderController.updateEtsyOrderTrackingForAllItems);
+router.put('/:orderId/tracking', authenticateToken, etsyOrderController.updateEtsyOrderTrackingForAllItems);
+router.patch('/:orderId/items/:transactionId/tracking', authenticateToken, etsyOrderController.updateEtsyOrderItemTracking);
+router.put('/:orderId/items/:transactionId/tracking', authenticateToken, etsyOrderController.updateEtsyOrderItemTracking);
 router.get('/', etsyOrderController.getListOrders);
 router.post('/', etsyOrderController.createOrder);
-router.post('/compute-base-cost', etsyOrderController.computeBaseCostForEtsyOrder);
+router.post('/compute-base-cost', authenticateToken, etsyOrderController.computeBaseCostForEtsyOrder);
 
 module.exports = router;

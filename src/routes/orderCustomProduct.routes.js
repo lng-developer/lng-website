@@ -42,13 +42,14 @@ router.get("/:id",
 
 router.post(
   "/update-from-xlsx",
+  authenticateToken,
   controller.upload.single("file"),
   controller.updateOrdersFromXlsx
 );
 
 router.post(
   "/cancel-from-excel",
- // authenticateToken,
+  authenticateToken,
   controller.upload.single("file"),
   controller.bulkCancelOrdersFromExcel
 );
@@ -90,7 +91,7 @@ router.put("/:orderId", authenticateToken, controller.updateScaleOrder);
 
 router.post("/:orderId/replace", authenticateToken, controller.createReplacementOrder);
 
-router.post("/:orderId/validate-address", controller.validateAddressByOrderId);
+router.post("/:orderId/validate-address", authenticateToken, controller.validateAddressByOrderId);
 router.put(
   "/:orderId/mark-address-valid",
   authenticateToken,
@@ -98,10 +99,10 @@ router.put(
 );
 
 // routes/order.routes.js
-router.post("/orders/address/validate-invalid", controller.validateInvalidAddressesBatch);
+router.post("/orders/address/validate-invalid", authenticateToken, controller.validateInvalidAddressesBatch);
 
 
-router.post("/update-tracking", controller.updateTrackingByOrderId);
+router.post("/update-tracking", authenticateToken, controller.updateTrackingByOrderId);
 
 router.patch(
   "/:orderId/items/:orderItemId/quantity",
