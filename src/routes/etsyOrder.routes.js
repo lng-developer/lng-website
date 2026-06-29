@@ -125,6 +125,12 @@ router.patch(
     authorizeRoles("Customer Service", "Admin", "Seller", "Design Leader"),
     etsyOrderController.reopenEtsyQc
 );
+router.post(
+    '/:orderId/replace',
+    authenticateToken,
+    authorizeRoles("Customer Service", "Admin", "Seller"),
+    etsyOrderController.createEtsyReplacementOrder
+);
 router.put(
     '/:orderId/items/:transactionId/cs-note',
     authenticateToken,

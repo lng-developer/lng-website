@@ -5792,6 +5792,253 @@ const removeCaseFromEtsyOrder = async (req, res) => {
     }
 };
 
+async function buildNextEtsyReplaceOrderId(baseOrderId) {
+    const base = String(baseOrderId || "").replace(/-R\d+$/i, "");
+    const regex = new RegExp(`^${escapeRegExp(base)}-R(\\d+)$`, "i");
+    const query = EtsyOrder.find(
+        { orderId: { $regex: new RegExp(`^${escapeRegExp(base)}-R\\d+$`, "i") } },
+        { orderId: 1 }
+    );
+    const exists = typeof query.lean === "function" ? await query.lean() : await query;
+
+    if (!exists || exists.length === 0) return `${base}-R1`;
+
+    let max = 0;
+    for (const doc of exists) {
+        const match = String(doc.orderId || "").match(regex);
+        if (match && match[1]) max = Math.max(max, Number(match[1]));
+    }
+    return `${base}-R${max + 1}`;
+}
+
+function toPlainEtsyOrder(order) {
+    if (!order) return null;
+    if (typeof order.toObject === "function") return order.toObject();
+    return JSON.parse(JSON.stringify(order));
+}
+
+function sanitizeEtsyItemForReplace(srcItem, { note = "", sourceOrderId = "" } = {}) {
+    const dst = JSON.parse(JSON.stringify(srcItem || {}));
+    const originalTransactionId = String(srcItem?.transactionId || "");
+    const originalOrderItemId = String(srcItem?.orderItemId || originalTransactionId || "");
+    const nextTransactionId = new mongoose.Types.ObjectId().toHexString();
+
+    dst.transactionId = nextTransactionId;
+    dst.orderItemId = nextTransactionId;
+    dst.fulfillment_file = {};
+    dst.tracking_info = {
+        fulfillment: "",
+        tracking: "",
+        status: "New",
+        note: "",
+        updated_at: new Date(),
+    };
+    dst.scale_status = "Need Scale";
+    dst.qc_note = "";
+    dst.cs_note = note ? String(note) : "";
+    dst.cost_breakdown = undefined;
+    dst.quantity = Number(srcItem?.quantity || 1);
+    dst.replace_meta = {
+        is_replacement_item: true,
+        source_order_id: sourceOrderId,
+        original_transaction_id: originalTransactionId,
+        original_order_item_id: originalOrderItemId,
+        created_at: new Date(),
+        reason: note || "",
+    };
+
+    if (Array.isArray(dst.customFiles)) {
+        dst.customFiles = dst.customFiles.map((file) => ({
+            ...file,
+            transactionId: nextTransactionId,
+        }));
+    }
+
+    return dst;
+}
+
+const createEtsyReplacementOrder = async (req, res) => {
+    try {
+        const { orderId } = req.params;
+        const {
+            transactionIds,
+            orderItemIds,
+            note = "",
+        } = req.body || {};
+        const replaceNote = typeof note === "string" ? note.trim() : String(note || "").trim();
+
+        const sourceDoc = await EtsyOrder.findOne({ orderId });
+        if (!sourceDoc) return res.status(404).json({ message: "Etsy order not found" });
+
+        const src = toPlainEtsyOrder(sourceDoc);
+        const sourceItems = Array.isArray(src.items) ? src.items : [];
+        if (sourceItems.length === 0) {
+            return res.status(400).json({ message: "Source order has no items" });
+        }
+
+        let selected = [];
+        if (sourceItems.length === 1) {
+            selected = [sourceItems[0]];
+        } else {
+            const requestedIds = Array.isArray(transactionIds) && transactionIds.length
+                ? transactionIds
+                : orderItemIds;
+            if (!Array.isArray(requestedIds) || requestedIds.length === 0) {
+                return res.status(400).json({
+                    message: "This Etsy order has multiple items. Please provide body.transactionIds as an array of transactionId to replace.",
+                    availableTransactionIds: sourceItems.map((item) => item.transactionId).filter(Boolean),
+                    availableOrderItemIds: sourceItems.map((item) => item.orderItemId || item.transactionId).filter(Boolean),
+                });
+            }
+
+            const requestedSet = new Set(requestedIds.map(String));
+            selected = sourceItems.filter((item) => (
+                requestedSet.has(String(item.transactionId || "")) ||
+                requestedSet.has(String(item.orderItemId || ""))
+            ));
+
+            if (selected.length === 0) {
+                return res.status(400).json({
+                    message: "No matching transactionIds found in source Etsy order",
+                    availableTransactionIds: sourceItems.map((item) => item.transactionId).filter(Boolean),
+                    availableOrderItemIds: sourceItems.map((item) => item.orderItemId || item.transactionId).filter(Boolean),
+                });
+            }
+        }
+
+        const newOrderId = await buildNextEtsyReplaceOrderId(src.orderId);
+        const newItems = selected.map((item) => sanitizeEtsyItemForReplace(item, {
+            note: replaceNote,
+            sourceOrderId: src.orderId,
+        }));
+
+        const now = new Date();
+        const payload = {
+            orderId: newOrderId,
+            shopId: src.shopId,
+            saleDate: now,
+            paidAt: now,
+            shippedAt: null,
+            status: "New",
+            orderType: src.orderType,
+            listingsType: src.listingsType,
+            paymentType: src.paymentType,
+            paymentMethod: src.paymentMethod,
+            currency: src.currency,
+            buyer: src.buyer || null,
+            seller: src.seller || null,
+            coupon: src.coupon || null,
+            shipping: src.shipping || null,
+            shipping_type: src.shipping_type || "Standard",
+            totals: src.totals || null,
+            base_cost: 0,
+            base_cost_computed_at: null,
+            base_cost_shipping_groups: [],
+            customer_infor: src.customer_infor || null,
+            scale_overall_status: "Need Scale",
+            scaleId: null,
+            csAssigneeId: null,
+            csAssignedBy: null,
+            csAssignedAt: null,
+            cs_assignment_status: "Unassigned",
+            grabink_submission: {
+                sent: false,
+                sent_at: null,
+                attempt_count: 0,
+                last_response: null,
+                external_id: null,
+            },
+            vendor_submissions: undefined,
+            fulfillment_platform_v2_submission: {
+                sent: false,
+                sent_at: null,
+                attempt_count: 0,
+                last_response: null,
+                sourceChannel: "ETSY",
+            },
+            fulfilled_at: null,
+            external_order_id: null,
+            forced_vendor_id: src.forced_vendor_id || null,
+            numberOfItems: newItems.reduce((sum, item) => sum + (Number(item.quantity) || 0), 0),
+            sumbittedoetsy: false,
+            case: [],
+            items: newItems,
+            address_validation: {
+                provider: "smarty",
+                scope: "etsy_us_street",
+                envSource: "ETSY_US_STREET_SMARTY_*",
+                status: "pending",
+                isValid: null,
+                checkedAt: null,
+                httpStatus: null,
+                errorCode: null,
+                errorMessage: null,
+                retryable: false,
+                accountIssue: false,
+                request: null,
+                smartyResponse: null,
+            },
+            replace_meta: {
+                is_replacement: true,
+                replace_of_order_id: src.orderId,
+                created_at: now,
+                reason: replaceNote || "",
+                source_transaction_ids: selected.map((item) => item.transactionId).filter(Boolean),
+                source_order_item_ids: selected.map((item) => item.orderItemId || item.transactionId).filter(Boolean),
+            },
+        };
+
+        const created = await EtsyOrder.create(payload);
+        await validateAddressIfNeeded(created, { force: true });
+        if (created.address_validation?.isValid === false) {
+            created.scale_overall_status = "Address Invalid";
+            await created.save();
+        }
+
+        await logOrderHistory({
+            orderDoc: created,
+            action: "CREATE_REPLACEMENT_ORDER",
+            description: `Created Etsy replacement order ${created.orderId} from ${src.orderId}`,
+            changes: [
+                {
+                    field: "replace_meta.replace_of_order_id",
+                    from: null,
+                    to: src.orderId,
+                },
+                {
+                    field: "items",
+                    from: sourceItems.length,
+                    to: newItems.length,
+                },
+            ],
+            user: req.user,
+            context: {
+                source: "PORTAL",
+                ip: req.ip,
+                userAgent: req.headers["user-agent"],
+            },
+        });
+
+        const replacementTransactionIds = newItems.map((item) => item.transactionId);
+        return res.json({
+            message: "Replacement order created",
+            source_order_id: src.orderId,
+            replacement_order_id: created.orderId,
+            items_copied: newItems.length,
+            selected_transaction_ids: replacementTransactionIds,
+            selected_order_item_ids: replacementTransactionIds,
+            address_validation: created.address_validation,
+            scale_overall_status: created.scale_overall_status,
+        });
+    } catch (err) {
+        console.error("createEtsyReplacementOrder error:", err);
+        return res.status(500).json({
+            message: "Failed to create replacement order",
+            error: err.message,
+        });
+    }
+};
+
 const resetEtsyScaleForOrdersBulk = async (req, res) => {
     try {
         const { orderIds = [], note = "" } = req.body || {};
@@ -6320,6 +6567,7 @@ module.exports = {
     reopenEtsyQc,
     pushEtsyPlatformOrders,
     resetEtsyScaleForOrdersBulk,
+    createEtsyReplacementOrder,
     updateEtsyOrderItemQuantity,
     openCaseInEtsyOrder,
     removeCaseFromEtsyOrder,
