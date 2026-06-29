@@ -2048,6 +2048,11 @@ const getOrderStatistics = async (req, res) => {
           all: 0,
           new: 0,
           noCostCenter: 0,
+          noCostCenterByStatus: {
+            new: 0,
+            fulfilled: 0,
+            shipped: 0,
+          },
           noPsd: 0,
           paymentPending: 0,
           fulfilled: 0,
@@ -2082,6 +2087,11 @@ const getOrderStatistics = async (req, res) => {
           all: 0,
           new: 0,
           noCostCenter: 0,
+          noCostCenterByStatus: {
+            new: 0,
+            fulfilled: 0,
+            shipped: 0,
+          },
           noPsd: 0,
           paymentPending: 0,
           fulfilled: 0,
@@ -2114,6 +2124,15 @@ const getOrderStatistics = async (req, res) => {
         { status: { $ne: "Cancelled" } },
       ],
     };
+    const NO_COST_CENTER_NEW = {
+      $and: [...NO_COST_CENTER.$and, { status: "New" }],
+    };
+    const NO_COST_CENTER_FULFILLED = {
+      $and: [...NO_COST_CENTER.$and, { status: "Fulfilled" }],
+    };
+    const NO_COST_CENTER_SHIPPED = {
+      $and: [...NO_COST_CENTER.$and, { status: "Shipped" }],
+    };
 
     // ✅ matcher cho facet "noPsd" (không phụ thuộc populate)
     const NO_PSD_MATCH =
@@ -2135,6 +2154,9 @@ const getOrderStatistics = async (req, res) => {
           all: [{ $count: "c" }],
           new: [{ $match: { status: "New" } }, { $count: "c" }],
           noCostCenter: [{ $match: NO_COST_CENTER }, { $count: "c" }],
+          noCostCenterNew: [{ $match: NO_COST_CENTER_NEW }, { $count: "c" }],
+          noCostCenterFulfilled: [{ $match: NO_COST_CENTER_FULFILLED }, { $count: "c" }],
+          noCostCenterShipped: [{ $match: NO_COST_CENTER_SHIPPED }, { $count: "c" }],
 
           // ✅ NEW: No PSD count
           noPsd: [{ $match: NO_PSD_MATCH }, { $count: "c" }],
@@ -2164,6 +2186,11 @@ const getOrderStatistics = async (req, res) => {
           noCostCenter: {
             $ifNull: [{ $arrayElemAt: ["$noCostCenter.c", 0] }, 0],
           },
+          noCostCenterByStatus: {
+            new: { $ifNull: [{ $arrayElemAt: ["$noCostCenterNew.c", 0] }, 0] },
+            fulfilled: { $ifNull: [{ $arrayElemAt: ["$noCostCenterFulfilled.c", 0] }, 0] },
+            shipped: { $ifNull: [{ $arrayElemAt: ["$noCostCenterShipped.c", 0] }, 0] },
+          },
           noPsd: { $ifNull: [{ $arrayElemAt: ["$noPsd.c", 0] }, 0] },
 
           paymentPending: {
@@ -2186,6 +2213,11 @@ const getOrderStatistics = async (req, res) => {
         all: 0,
         new: 0,
         noCostCenter: 0,
+        noCostCenterByStatus: {
+          new: 0,
+          fulfilled: 0,
+          shipped: 0,
+        },
         noPsd: 0,
         paymentPending: 0,
         fulfilled: 0,
