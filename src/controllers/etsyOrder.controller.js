@@ -5181,41 +5181,59 @@ const getEtsyQCStatistics = async (req, res) => {
 const uploadEtsyFulfillmentFileForItem = [
     etsyScaleUpload.array("files"),
     async (req, res) => {
+        const startedAt = Date.now();
+        let stage = "received";
+        const uploadedFiles = [];
+        const buildDiagnostics = (overrides = {}) => ({
+            orderId: String(req.params?.orderId || req.body?.orderId || ""),
+            transactionId: String(req.params?.transactionId || ""),
+            receivedFiles: req.files?.length || 0,
+            uploadedFiles: uploadedFiles.length,
+            totalBytes: (req.files || []).reduce((sum, file) => sum + (Number(file?.size) || 0), 0),
+            stage,
+            durationMs: Date.now() - startedAt,
+            ...overrides,
+        });
         try {
             const { transactionId } = req.params;
             const userId = req.user?.userId || req.user?.id || req.user?._id || null;
-            if (!req.files?.length) return res.status(400).json({ message: "Missing files" });
+            if (!req.files?.length) return res.status(400).json({ message: "Missing files", diagnostics: buildDiagnostics() });
 
             let positions = [];
             try {
+                stage = "parse_meta";
                 positions = JSON.parse(req.body?.meta || "[]");
             } catch {
-                return res.status(400).json({ message: "Invalid meta JSON" });
+                return res.status(400).json({ message: "Invalid meta JSON", diagnostics: buildDiagnostics() });
             }
             if (positions.length !== req.files.length) {
-                return res.status(400).json({ message: "Files count not match positions" });
+                return res.status(400).json({ message: "Files count not match positions", diagnostics: buildDiagnostics({ metaPositions: positions.length }) });
             }
 
+            stage = "find_order";
             const order = await EtsyOrder.findOne(buildEtsyOrderLookup(req));
-            if (!order) return res.status(404).json({ message: "Etsy order not found" });
+            if (!order) return res.status(404).json({ message: "Etsy order not found", diagnostics: buildDiagnostics() });
             const accessError = ensureSellerCanAccessEtsyOrder(req, order);
-            if (accessError) return res.status(accessError.startsWith("Invalid") ? 400 : 403).json({ message: accessError });
+            if (accessError) return res.status(accessError.startsWith("Invalid") ? 400 : 403).json({ message: accessError, diagnostics: buildDiagnostics() });
 
+            stage = "find_item";
             const item = (order.items || []).find((entry) => String(entry.transactionId) === String(transactionId));
-            if (!item) return res.status(404).json({ message: "Etsy order item not found" });
+            if (!item) return res.status(404).json({ message: "Etsy order item not found", diagnostics: buildDiagnostics() });
 
             if (!item.fulfillment_file || !(item.fulfillment_file instanceof Map)) {
                 item.fulfillment_file = new Map(Object.entries(toPlainFulfillmentFile(item.fulfillment_file)));
             }
 
+            stage = "upload_r2";
             for (let i = 0; i < req.files.length; i += 1) {
                 const file = req.files[i];
                 const pos = String(positions[i]?.position || "").trim().toLowerCase();
-                if (!pos) return res.status(400).json({ message: `Missing position for file index ${i}` });
+                if (!pos) return res.status(400).json({ message: `Missing position for file index ${i}`, diagnostics: buildDiagnostics({ fileIndex: i }) });
                 const ext = path.extname(file.originalname || "").toLowerCase() || ".png";
                 const safeOrderId = String(order.orderId).replace(/[^\w.-]+/g, "_");
                 const safeTx = String(transactionId).replace(/[^\w.-]+/g, "_");
                 const safePos = pos.replace(/[^\w.-]+/g, "_");
+                const fileStartedAt = Date.now();
                 const up = await uploadFilePathToR2({
                     filePath: file.path,
                     originalName: file.originalname,
@@ -5225,23 +5243,47 @@ const uploadEtsyFulfillmentFileForItem = [
                     key: `fulfillment_files/etsy-${safeOrderId}-${safeTx}-${safePos}${ext}`,
                 });
                 item.fulfillment_file.set(pos, up.url);
+                uploadedFiles.push({
+                    index: i,
+                    position: pos,
+                    originalName: file.originalname,
+                    mimeType: file.mimetype,
+                    size: file.size,
+                    provider: up.provider,
+                    bucket: up.bucket,
+                    folder: up.folder,
+                    key: up.key,
+                    url: up.url,
+                    durationMs: Date.now() - fileStartedAt,
+                });
             }
 
+            stage = "save_order";
             item.scale_status = "Pending";
             order.scale_overall_status = computeEtsyOverallScaleStatus(order.items);
             if (userId && mongoose.Types.ObjectId.isValid(userId)) order.scaleId = new mongoose.Types.ObjectId(userId);
             order.markModified("items");
             await order.save();
+            stage = "completed";
 
             return res.json({
                 message: "Uploaded Etsy fulfillment files successfully",
                 fulfillment_file: toPlainFulfillmentFile(item.fulfillment_file),
                 item_scale_status: item.scale_status,
                 order_scale_overall_status: order.scale_overall_status,
+                uploaded_files: uploadedFiles,
+                diagnostics: buildDiagnostics(),
             });
         } catch (err) {
             logger.error(`uploadEtsyFulfillmentFileForItem error: ${err.message}`);
-            return res.status(500).json({ message: "Upload failed", error: err.message });
+            return res.status(500).json({
+                message: "Upload failed",
+                error: err.message,
+                error_name: err.name,
+                error_code: err.code,
+                uploaded_files: uploadedFiles,
+                diagnostics: buildDiagnostics(),
+            });
         } finally {
             for (const file of req.files || []) {
                 if (file?.path) fs.unlink(file.path, () => { });

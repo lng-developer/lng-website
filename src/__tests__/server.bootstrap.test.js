@@ -7,6 +7,7 @@ describe("server bootstrap", () => {
     const express = require("express");
     const listen = jest.fn((_port, _host, cb) => cb && cb());
     const close = jest.fn();
+    const httpServer = { listen, close };
     const ioClose = jest.fn();
     const connectDB = jest.fn().mockResolvedValue();
     const etsyStart = jest.fn();
@@ -15,7 +16,7 @@ describe("server bootstrap", () => {
     jest.doMock("../../src/config/env.config", () => jest.fn());
     jest.doMock("../../src/config/db.config", () => connectDB);
     jest.doMock("http", () => ({
-      createServer: jest.fn(() => ({ listen, close })),
+      createServer: jest.fn(() => httpServer),
     }));
     jest.doMock("socket.io", () => ({
       Server: jest.fn(() => ({ close: ioClose })),
@@ -69,6 +70,7 @@ describe("server bootstrap", () => {
       "vendorWebhookRoutes",
       "devRoutes",
       "shopifyRoutes",
+      "orderLifecycleRoutes",
     ];
     jest.doMock("../../src/routes", () =>
       Object.fromEntries(routerNames.map((name) => [name, express.Router()]))
@@ -81,6 +83,7 @@ describe("server bootstrap", () => {
     expect(connectDB).toHaveBeenCalledTimes(1);
     expect(etsyStart).toHaveBeenCalledTimes(1);
     expect(startAutoScheduler).toHaveBeenCalledTimes(1);
+    expect(httpServer.requestTimeout).toBe(0);
     expect(listen).toHaveBeenCalledWith(5000, "0.0.0.0", expect.any(Function));
   });
 });
