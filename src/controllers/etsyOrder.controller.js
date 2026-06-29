@@ -94,6 +94,7 @@ async function buildEtsyOrderFilter(query = {}, { includeTabFilters = true } = {
         vendor,
         openCase,
         status,
+        statuses,
         isNoCostCenter,
         invalidAddress,
         addressUnchecked,
@@ -103,7 +104,12 @@ async function buildEtsyOrderFilter(query = {}, { includeTabFilters = true } = {
 
     const filter = {};
 
-    if (includeTabFilters && status) filter.status = status;
+    const statusFilter = statuses || status;
+    if (includeTabFilters && statusFilter) {
+        const statusArray = String(statusFilter).split(",").map(s => s.trim()).filter(Boolean);
+        if (statusArray.length === 1) filter.status = statusArray[0];
+        if (statusArray.length > 1) filter.status = { $in: statusArray };
+    }
     const shippingValue = etsyShippingFilterValue(shippingType || shipping_type);
     if (shippingValue) filter.shipping_type = shippingValue;
 
@@ -2219,6 +2225,18 @@ const getEtsyOrderStatistics = async (req, res) => {
                 { status: { $ne: "Cancelled" } },
             ],
         };
+        const NO_COST_CENTER_NEW = {
+            $and: [
+                ...NO_COST_CENTER.$and,
+                { $or: [{ status: "New" }, { status: "" }, { status: null }] },
+            ],
+        };
+        const NO_COST_CENTER_FULFILLED = {
+            $and: [...NO_COST_CENTER.$and, { status: "Fulfilled" }],
+        };
+        const NO_COST_CENTER_SHIPPED = {
+            $and: [...NO_COST_CENTER.$and, { status: "Shipped" }],
+        };
         const NO_PSD_MATCH = {
             $and: [
                 { "items.snapshotImage": { $in: [null, ""] } },
@@ -2237,6 +2255,9 @@ const getEtsyOrderStatistics = async (req, res) => {
                         { $count: "c" },
                     ],
                     noCostCenter: [{ $match: NO_COST_CENTER }, { $count: "c" }],
+                    noCostCenterNew: [{ $match: NO_COST_CENTER_NEW }, { $count: "c" }],
+                    noCostCenterFulfilled: [{ $match: NO_COST_CENTER_FULFILLED }, { $count: "c" }],
+                    noCostCenterShipped: [{ $match: NO_COST_CENTER_SHIPPED }, { $count: "c" }],
                     noPsd: [{ $match: NO_PSD_MATCH }, { $count: "c" }],
                     fulfilled: [{ $match: { status: "Fulfilled" } }, { $count: "c" }],
                     shipped: [{ $match: { status: "Shipped" } }, { $count: "c" }],
@@ -2267,6 +2288,11 @@ const getEtsyOrderStatistics = async (req, res) => {
                     all: { $ifNull: [{ $arrayElemAt: ["$all.c", 0] }, 0] },
                     new: { $ifNull: [{ $arrayElemAt: ["$new.c", 0] }, 0] },
                     noCostCenter: { $ifNull: [{ $arrayElemAt: ["$noCostCenter.c", 0] }, 0] },
+                    noCostCenterByStatus: {
+                        new: { $ifNull: [{ $arrayElemAt: ["$noCostCenterNew.c", 0] }, 0] },
+                        fulfilled: { $ifNull: [{ $arrayElemAt: ["$noCostCenterFulfilled.c", 0] }, 0] },
+                        shipped: { $ifNull: [{ $arrayElemAt: ["$noCostCenterShipped.c", 0] }, 0] },
+                    },
                     noPsd: { $ifNull: [{ $arrayElemAt: ["$noPsd.c", 0] }, 0] },
                     fulfilled: { $ifNull: [{ $arrayElemAt: ["$fulfilled.c", 0] }, 0] },
                     shipped: { $ifNull: [{ $arrayElemAt: ["$shipped.c", 0] }, 0] },
@@ -2284,6 +2310,11 @@ const getEtsyOrderStatistics = async (req, res) => {
                 all: 0,
                 new: 0,
                 noCostCenter: 0,
+                noCostCenterByStatus: {
+                    new: 0,
+                    fulfilled: 0,
+                    shipped: 0,
+                },
                 noPsd: 0,
                 fulfilled: 0,
                 shipped: 0,
