@@ -34,6 +34,7 @@ const orderHistorySchema = new mongoose.Schema(
                 "SCALE_REJECT_ITEM",
                 "SCALE_ORDER_READY",
                 "RESET_SCALE_BULK",
+                "CREATE_REPLACEMENT_ORDER",
                 "SEND_TO_VENDOR",
                 "SEND_TO_VENDOR_FAILED",
                 "SEND_TO_FULFILLMENT_PORTAL",
