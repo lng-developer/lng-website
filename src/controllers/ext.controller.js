@@ -551,6 +551,96 @@ function applyMangoTeeActualCost(doc, raw, targetIndexes = []) {
   );
 }
 
+function getMerchizeDetailRoot(raw = {}) {
+  return raw?.data && typeof raw.data === "object" ? raw.data : raw;
+}
+
+function parseMerchizeActualCost(raw = {}) {
+  const detail = getMerchizeDetailRoot(raw);
+  const total = toMoneyNumber(detail?.fulfillment_cost?.total);
+  if (total === null) return null;
+
+  return {
+    total: roundMoney(total),
+    shippingFee: roundMoney(toMoneyNumber(detail?.fulfillment_cost?.shipping_cost) || 0),
+    fulfillmentCost: roundMoney(toMoneyNumber(detail?.fulfillment_cost?.fulfillment_cost) || 0),
+    detail,
+    rawItems: Array.isArray(detail?.items) ? detail.items : [],
+    orderId: norm(detail?._id || detail?.code || detail?.external_number || raw?._id || raw?.code),
+  };
+}
+
+function findMerchizeRawItem(rawItems, item) {
+  if (!Array.isArray(rawItems) || rawItems.length === 0) return null;
+  const candidates = [
+    item?.cost_breakdown?.matchedSku,
+    item?.mapped_sku,
+    item?.sku,
+  ]
+    .map((value) => lower(value))
+    .filter(Boolean);
+
+  return rawItems.find((rawItem) => candidates.includes(lower(rawItem?.sku))) || null;
+}
+
+function applyMerchizeActualCost(doc, raw, targetIndexes = []) {
+  const cost = parseMerchizeActualCost(raw);
+  if (!cost) return false;
+
+  const previousBaseCost = toMoneyNumber(doc.base_cost) || 0;
+  const previousComputedAt = doc.base_cost_computed_at || null;
+  const previousGroups = JSON.stringify(doc.base_cost_shipping_groups || []);
+
+  doc.base_cost = cost.total;
+  doc.base_cost_computed_at = new Date();
+  doc.base_cost_shipping_groups = [
+    {
+      group_key: `merchize:${cost.orderId || norm(doc.orderId)}`,
+      total_qty: targetIndexes.reduce((sum, index) => {
+        const qty = toMoneyNumber(doc.items?.[index]?.quantity);
+        return sum + (qty || 0);
+      }, 0),
+      shipping_economy_once: cost.shippingFee,
+      shipping_additional_rate: 0,
+      shipping_additional_units: 0,
+      shipping_total_for_group: cost.shippingFee,
+    },
+  ];
+
+  const shippingPerItem = targetIndexes.length > 0 ? cost.shippingFee / targetIndexes.length : 0;
+  for (const index of targetIndexes) {
+    const item = doc.items?.[index];
+    if (!item) continue;
+
+    const rawItem = findMerchizeRawItem(cost.rawItems, item);
+    const quantity = toMoneyNumber(item.quantity) || toMoneyNumber(rawItem?.quantity) || 1;
+    const rawUnitCost = toMoneyNumber(rawItem?.base_cost);
+    const price = toMoneyNumber(rawItem?.price);
+    const fallbackUnitCost =
+      targetIndexes.length === 1 && cost.fulfillmentCost > 0 ? cost.fulfillmentCost / quantity : null;
+    const unitCost = rawUnitCost !== null ? rawUnitCost : price && price > 0 ? price : fallbackUnitCost;
+    if (unitCost === null) continue;
+
+    item.cost_breakdown = {
+      ...(item.cost_breakdown?.toObject?.() ? item.cost_breakdown.toObject() : item.cost_breakdown || {}),
+      base_cost_each: roundMoney(unitCost),
+      quantity,
+      base_cost_total_for_item_including_shipping: roundMoney(unitCost * quantity + shippingPerItem),
+    };
+  }
+
+  if (typeof doc.markModified === "function") {
+    doc.markModified("items");
+    doc.markModified("base_cost_shipping_groups");
+  }
+
+  return (
+    roundMoney(previousBaseCost) !== cost.total ||
+    !previousComputedAt ||
+    previousGroups !== JSON.stringify(doc.base_cost_shipping_groups || [])
+  );
+}
+
 const isObjectIdLike = (value) => /^[a-fA-F0-9]{24}$/.test(String(value || "").trim());
 const isForceTrue = (value) => value === true || String(value).toLowerCase() === "true";
 
@@ -866,17 +956,16 @@ async function fetchMerchize(orderId) {
   if (res.status >= 400)
     throw new Error(`Merchize HTTP ${res.status} (tracking)`);
 
-  if (
-    res.data?.success === true &&
-    Array.isArray(res.data.data) &&
-    res.data.data.length > 0
-  ) {
-    const obj = res.data.data[0];
-    const tracking = norm(obj?.tracking_number);
-    const carrier = norm(obj?.tracking_company);
-    const shipped = isValidTrackingNumber(tracking);
+  let trackingResult = null;
+  if (res.data?.success === true) {
+    const obj = Array.isArray(res.data.data) ? res.data.data[0] : res.data.data;
+    if (obj && typeof obj === "object") {
+      const tracking = norm(obj?.tracking_number);
+      const carrier = norm(obj?.tracking_company);
+      const shipped = isValidTrackingNumber(tracking);
 
-    return { tracking, carrier, shipped, raw: obj };
+      trackingResult = { tracking, carrier, shipped, raw: obj };
+    }
   }
 
   // 2) Fallback: order-detail
@@ -886,17 +975,26 @@ async function fetchMerchize(orderId) {
   if (res.status >= 400)
     throw new Error(`Merchize HTTP ${res.status} (detail)`);
 
-  if (
-    res.data?.success === true &&
-    Array.isArray(res.data.data) &&
-    res.data.data.length > 0
-  ) {
-    const obj = res.data.data[0];
+  if (res.data?.success === true) {
+    const obj = Array.isArray(res.data.data) ? res.data.data[0] : res.data.data;
+    if (!obj || typeof obj !== "object") {
+      throw new Error(`Merchize empty for ${orderId}`);
+    }
     const tracking = norm(obj?.tracking_number);
     const carrier = norm(obj?.tracking_company);
-    const shipped = isValidTrackingNumber(tracking);
+    const pickedTracking = trackingResult?.tracking || tracking;
+    const pickedCarrier = trackingResult?.carrier || carrier;
+    const shipped = Boolean(trackingResult?.shipped) || isValidTrackingNumber(pickedTracking);
 
-    return { tracking, carrier, shipped, raw: obj };
+    return {
+      tracking: pickedTracking,
+      carrier: pickedCarrier,
+      shipped,
+      raw: {
+        ...obj,
+        tracking_response: trackingResult?.raw || null,
+      },
+    };
   }
 
   throw new Error(`Merchize empty for ${orderId}`);
@@ -1407,6 +1505,9 @@ function applyToItemsOfVendor(
   if (vendorKey === "mangotee" && applyMangoTeeActualCost(doc, raw, targetIndexes)) {
     doc.__trackingPullCostChanged = true;
   }
+  if (vendorKey === "merchize" && applyMerchizeActualCost(doc, raw, targetIndexes)) {
+    doc.__trackingPullCostChanged = true;
+  }
 
   if (vendorKey === "beeful") {
     doc.beeful_submission = {
@@ -1667,6 +1768,9 @@ function applyToEtsyItemsOfVendor(doc, vendorKey, { tracking, carrier, shipped, 
     doc.__trackingPullCostChanged = true;
   }
   if (vendorKey === "mangotee" && applyMangoTeeActualCost(doc, raw, targetIndexes)) {
+    doc.__trackingPullCostChanged = true;
+  }
+  if (vendorKey === "merchize" && applyMerchizeActualCost(doc, raw, targetIndexes)) {
     doc.__trackingPullCostChanged = true;
   }
 
