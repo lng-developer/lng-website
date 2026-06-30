@@ -374,6 +374,98 @@ function applyGrabinkActualCost(doc, raw, targetIndexes = []) {
   );
 }
 
+function getLenfulToken() {
+  return process.env.LENFUL_API_KEY || process.env.LENFUL_ACCESS_TOKEN || process.env.LENFUL_TOKEN || "";
+}
+
+function getLenfulDetailRoot(raw = {}) {
+  const detail = raw?.detail || raw;
+  return detail?.data && typeof detail.data === "object" ? detail.data : detail;
+}
+
+function parseLenfulActualCost(raw = {}) {
+  const detail = getLenfulDetailRoot(raw);
+  const totalPrice = toMoneyNumber(detail?.total_price);
+  if (totalPrice === null) return null;
+
+  return {
+    total: roundMoney(totalPrice),
+    shippingFee: roundMoney(toMoneyNumber(detail?.shipping_method?.price) || 0),
+    detail,
+    rawItems: Array.isArray(detail?.line_items) ? detail.line_items : [],
+    orderId: norm(detail?.id || raw?.tracking?.order_id || raw?.order_id),
+  };
+}
+
+function findLenfulRawItem(rawItems, item) {
+  if (!Array.isArray(rawItems) || rawItems.length === 0) return null;
+  const candidates = [
+    item?.cost_breakdown?.matchedSku,
+    item?.mapped_sku,
+    item?.sku,
+  ]
+    .map((value) => lower(value))
+    .filter(Boolean);
+
+  return rawItems.find((rawItem) => candidates.includes(lower(rawItem?.variant?.sku || rawItem?.sku))) || null;
+}
+
+function applyLenfulActualCost(doc, raw, targetIndexes = []) {
+  const cost = parseLenfulActualCost(raw);
+  if (!cost) return false;
+
+  const previousBaseCost = toMoneyNumber(doc.base_cost) || 0;
+  const previousComputedAt = doc.base_cost_computed_at || null;
+  const previousGroups = JSON.stringify(doc.base_cost_shipping_groups || []);
+
+  doc.base_cost = cost.total;
+  doc.base_cost_computed_at = new Date();
+  doc.base_cost_shipping_groups = [
+    {
+      group_key: `lenful:${cost.orderId || norm(doc.orderId)}`,
+      total_qty: targetIndexes.reduce((sum, index) => {
+        const qty = toMoneyNumber(doc.items?.[index]?.quantity);
+        return sum + (qty || 0);
+      }, 0),
+      shipping_economy_once: cost.shippingFee,
+      shipping_additional_rate: 0,
+      shipping_additional_units: 0,
+      shipping_total_for_group: cost.shippingFee,
+    },
+  ];
+
+  const shippingPerItem = targetIndexes.length > 0 ? cost.shippingFee / targetIndexes.length : 0;
+  for (const index of targetIndexes) {
+    const item = doc.items?.[index];
+    if (!item) continue;
+
+    const rawItem = findLenfulRawItem(cost.rawItems, item);
+    const quantity = toMoneyNumber(item.quantity) || toMoneyNumber(rawItem?.quantity) || 1;
+    const lineTotal = toMoneyNumber(rawItem?.total);
+    const variantPrice = toMoneyNumber(rawItem?.variant?.price);
+    const unitCost = lineTotal !== null ? lineTotal / quantity : variantPrice;
+    if (unitCost === null) continue;
+
+    item.cost_breakdown = {
+      ...(item.cost_breakdown?.toObject?.() ? item.cost_breakdown.toObject() : item.cost_breakdown || {}),
+      base_cost_each: roundMoney(unitCost),
+      quantity,
+      base_cost_total_for_item_including_shipping: roundMoney(unitCost * quantity + shippingPerItem),
+    };
+  }
+
+  if (typeof doc.markModified === "function") {
+    doc.markModified("items");
+    doc.markModified("base_cost_shipping_groups");
+  }
+
+  return (
+    roundMoney(previousBaseCost) !== cost.total ||
+    !previousComputedAt ||
+    previousGroups !== JSON.stringify(doc.base_cost_shipping_groups || [])
+  );
+}
+
 const isObjectIdLike = (value) => /^[a-fA-F0-9]{24}$/.test(String(value || "").trim());
 const isForceTrue = (value) => value === true || String(value).toLowerCase() === "true";
 
@@ -1006,6 +1098,13 @@ function getLenfulExternalOrderId(doc = {}) {
   return norm(doc?.vendor_submissions?.lenful?.external_id);
 }
 
+function getLenfulDetailOrderId(doc = {}) {
+  return norm(
+    doc?.vendor_submissions?.lenful?.tracking_last_response?.order_id ||
+    doc?.vendor_submissions?.lenful?.order_id
+  );
+}
+
 function pickLenfulTracking(raw, orderId, doc = {}) {
   const rows = Array.isArray(raw?.data) ? raw.data : [];
   const trimmedOrderId = norm(orderId);
@@ -1024,8 +1123,12 @@ function pickLenfulTracking(raw, orderId, doc = {}) {
 }
 
 async function fetchLenful(orderId, doc) {
-  const token = LENFUL_API_KEY || LENFUL_ACCESS_TOKEN || LENFUL_TOKEN;
+  const token = getLenfulToken();
   if (!token) throw new Error("Lenful missing API key (LENFUL_API_KEY)");
+  const headers = {
+    Authorization: `Bearer ${token}`,
+    Accept: "application/json",
+  };
 
   const res = await httpLenful.get("/api/order/trackings", {
     params: {
@@ -1035,10 +1138,7 @@ async function fetchLenful(orderId, doc) {
       keyword_type: "order",
       sort_by: "create_at_desc",
     },
-    headers: {
-      Authorization: `Bearer ${token}`,
-      Accept: "application/json",
-    },
+    headers,
   });
 
   if (res.status === 401) {
@@ -1048,7 +1148,29 @@ async function fetchLenful(orderId, doc) {
     throw new Error(`Lenful HTTP ${res.status}: ${res.data?.message || res.data?.error || "tracking failed"}`);
   }
 
-  return pickLenfulTracking(res.data, orderId, doc);
+  const picked = pickLenfulTracking(res.data, orderId, doc);
+  const detailOrderId = norm(picked?.raw?.order_id) || getLenfulDetailOrderId(doc);
+  if (!detailOrderId) return picked;
+
+  const detailRes = await httpLenful.get(`/api/order/${encodeURIComponent(detailOrderId)}`, {
+    headers,
+  });
+  if (detailRes.status === 401) {
+    throw new Error("Lenful unauthorized (401): check LENFUL_API_KEY");
+  }
+  if (detailRes.status >= 400) {
+    throw new Error(`Lenful HTTP ${detailRes.status}: ${detailRes.data?.message || detailRes.data?.error || "order detail failed"}`);
+  }
+
+  return {
+    ...picked,
+    raw: {
+      tracking: picked.raw,
+      detail: detailRes.data,
+      order_id: detailOrderId,
+      status: picked.raw?.status,
+    },
+  };
 }
 
 function buildLuxuryProTrackingUrl(orderId) {
@@ -1194,6 +1316,9 @@ function applyToItemsOfVendor(
   if (vendorKey === "beeful" && applyGrabinkActualCost(doc, raw, targetIndexes)) {
     doc.__trackingPullCostChanged = true;
   }
+  if (vendorKey === "lenful" && applyLenfulActualCost(doc, raw, targetIndexes)) {
+    doc.__trackingPullCostChanged = true;
+  }
 
   if (vendorKey === "beeful") {
     doc.beeful_submission = {
@@ -1260,7 +1385,7 @@ function applyToItemsOfVendor(
       ...(doc.vendor_submissions.lenful || {}),
       tracking_attempt_count: (doc.vendor_submissions.lenful?.tracking_attempt_count || 0) + 1,
       tracking_last_response: raw,
-      tracking_status: norm(raw?.status || ""),
+      tracking_status: norm(raw?.tracking?.status || raw?.status || ""),
     };
     if (typeof doc.markModified === "function") doc.markModified("vendor_submissions");
   }
@@ -1448,6 +1573,9 @@ function applyToEtsyItemsOfVendor(doc, vendorKey, { tracking, carrier, shipped, 
   });
 
   if (vendorKey === "beeful" && applyGrabinkActualCost(doc, raw, targetIndexes)) {
+    doc.__trackingPullCostChanged = true;
+  }
+  if (vendorKey === "lenful" && applyLenfulActualCost(doc, raw, targetIndexes)) {
     doc.__trackingPullCostChanged = true;
   }
 
