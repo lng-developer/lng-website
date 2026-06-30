@@ -51,6 +51,20 @@ require("../config/env.config")();
 const ALLOWED = ["New", "Fulfilled", "Shipping", "Shipped", "Canceled", "Cancelled"];
 const isCanceledStatus = (s) => s === "Canceled" || s === "Cancelled";
 const norm = (s) => (ALLOWED.includes(s) ? s : "New");
+const IMPORT_SCALE_STATUS = "Need Scale";
+const ITEM_SCALE_STATUSES = new Set([IMPORT_SCALE_STATUS, "Pending", "Complete", "QC Rejected", "Cancelled"]);
+
+function normalizeImportedItemScaleStatuses(orderDoc) {
+  if (!orderDoc || !Array.isArray(orderDoc.items)) return false;
+  let changed = false;
+  for (const item of orderDoc.items) {
+    if (!ITEM_SCALE_STATUSES.has(item.scale_status)) {
+      item.scale_status = IMPORT_SCALE_STATUS;
+      changed = true;
+    }
+  }
+  return changed;
+}
 
 async function loadActiveSkuMappingConfigs() {
   const now = new Date();
@@ -1115,6 +1129,7 @@ const updateOrdersFromXlsx = async (req, res) => {
         customized_url: row.customized_url,
         quantity: Number(row.quantity_purchased || 1),
         asin: asin || null,
+        scale_status: IMPORT_SCALE_STATUS,
       };
 
       // ✅ Finance per row (item)
@@ -1165,6 +1180,9 @@ const updateOrdersFromXlsx = async (req, res) => {
       let skipProcessingZip = false;
 
       if (existing) {
+        if (normalizeImportedItemScaleStatuses(existing)) {
+          await existing.save();
+        }
         const exists = existing.items.some(
           (i) => i.orderItemId === itemData.orderItemId
         );
@@ -3612,6 +3630,7 @@ const computeBaseCostForOrder = async (req, res) => {
     if (!Array.isArray(order.items) || order.items.length === 0) {
       return res.status(400).json({ message: "Order has no items" });
     }
+    normalizeImportedItemScaleStatuses(order);
 
     const oldBaseCost = Number(order.base_cost || 0);
     const oldShippingGroups = Array.isArray(order.base_cost_shipping_groups)
@@ -4630,8 +4649,8 @@ const updateItemTracking = async (req, res) => {
         $set["items.$[].scale_status"] = "Complete";
         $set["scale_overall_status"] = "Sent";
       } else if (nextStatus === "Cancelled") {
-        // Scale item dùng "Failed" để bám bộ trạng thái sẵn có
-        $set["items.$[].scale_status"] = "Failed";
+        // Import/cancel reset keeps item scale_status inside the schema enum.
+        $set["items.$[].scale_status"] = IMPORT_SCALE_STATUS;
         $set["scale_overall_status"] = "Cancelled";
       }
       // (Các trạng thái khác nếu có, ta không ép scale_overall_status)
