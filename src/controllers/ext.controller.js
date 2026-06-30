@@ -154,6 +154,16 @@ const httpLenful = axios.create({
 const norm = (s) => String(s || "").trim();
 const lower = (s) => norm(s).toLowerCase();
 
+function toMoneyNumber(value) {
+  if (value === null || value === undefined || value === "") return null;
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
+}
+
+function roundMoney(value) {
+  return Number(Number(value || 0).toFixed(2));
+}
+
 function isValidTrackingNumber(s) {
   const t = norm(s);
   if (!t) return false;
@@ -271,6 +281,97 @@ function getSentTrackingVendorKeys(doc = {}, { sentAfter = null } = {}) {
   }
 
   return [...keys];
+}
+
+function getItemVendorKey(doc, item, sentVendorKeys = []) {
+  const vpid = item?.cost_breakdown?.vendorProductId;
+  const cached = vpid ? doc.__vpidToVendor?.get(String(vpid)) : null;
+  const fulfillmentVendorKey = normalizeVendorKey(item?.tracking_info?.fulfillment);
+  return sentVendorKeys.length === 1
+    ? sentVendorKeys[0]
+    : fulfillmentVendorKey || cached?.vendorKey || "";
+}
+
+function parseGrabinkActualCost(raw = {}) {
+  const itemCost = toMoneyNumber(raw?.cost);
+  const shippingFee = toMoneyNumber(raw?.chargeShippingFee);
+  if (itemCost === null && shippingFee === null) return null;
+
+  return {
+    itemCost: roundMoney(itemCost || 0),
+    shippingFee: roundMoney(shippingFee || 0),
+    total: roundMoney((itemCost || 0) + (shippingFee || 0)),
+    rawItems: Array.isArray(raw?.items) ? raw.items : [],
+  };
+}
+
+function findGrabinkRawItem(rawItems, item) {
+  if (!Array.isArray(rawItems) || rawItems.length === 0) return null;
+  const candidates = [
+    item?.cost_breakdown?.matchedSku,
+    item?.mapped_sku,
+    item?.sku,
+  ]
+    .map((value) => lower(value))
+    .filter(Boolean);
+
+  return rawItems.find((rawItem) => candidates.includes(lower(rawItem?.sku))) || null;
+}
+
+function applyGrabinkActualCost(doc, raw, targetIndexes = []) {
+  const cost = parseGrabinkActualCost(raw);
+  if (!cost) return false;
+
+  const previousBaseCost = toMoneyNumber(doc.base_cost) || 0;
+  const previousComputedAt = doc.base_cost_computed_at || null;
+  const previousGroups = JSON.stringify(doc.base_cost_shipping_groups || []);
+
+  doc.base_cost = cost.total;
+  doc.base_cost_computed_at = new Date();
+  doc.base_cost_shipping_groups = [
+    {
+      group_key: `grabink:${norm(raw?.code || doc.orderId)}`,
+      total_qty: targetIndexes.reduce((sum, index) => {
+        const qty = toMoneyNumber(doc.items?.[index]?.quantity);
+        return sum + (qty || 0);
+      }, 0),
+      shipping_economy_once: cost.shippingFee,
+      shipping_additional_rate: 0,
+      shipping_additional_units: 0,
+      shipping_total_for_group: cost.shippingFee,
+    },
+  ];
+
+  const shippingPerItem = targetIndexes.length > 0 ? cost.shippingFee / targetIndexes.length : 0;
+  for (const index of targetIndexes) {
+    const item = doc.items?.[index];
+    if (!item) continue;
+
+    const rawItem = findGrabinkRawItem(cost.rawItems, item);
+    const quantity = toMoneyNumber(item.quantity) || 1;
+    const rawUnitCost = toMoneyNumber(rawItem?.cost);
+    const fallbackUnitCost = targetIndexes.length === 1 ? cost.itemCost / quantity : null;
+    const unitCost = rawUnitCost !== null ? rawUnitCost : fallbackUnitCost;
+    if (unitCost === null) continue;
+
+    item.cost_breakdown = {
+      ...(item.cost_breakdown?.toObject?.() ? item.cost_breakdown.toObject() : item.cost_breakdown || {}),
+      base_cost_each: roundMoney(unitCost),
+      quantity,
+      base_cost_total_for_item_including_shipping: roundMoney(unitCost * quantity + shippingPerItem),
+    };
+  }
+
+  if (typeof doc.markModified === "function") {
+    doc.markModified("items");
+    doc.markModified("base_cost_shipping_groups");
+  }
+
+  return (
+    roundMoney(previousBaseCost) !== cost.total ||
+    !previousComputedAt ||
+    previousGroups !== JSON.stringify(doc.base_cost_shipping_groups || [])
+  );
 }
 
 const isObjectIdLike = (value) => /^[a-fA-F0-9]{24}$/.test(String(value || "").trim());
@@ -1053,19 +1154,15 @@ function applyToItemsOfVendor(
 ) {
   let changed = 0;
   const sentVendorKeys = doc.__sentTrackingVendorKeys || [];
+  const targetIndexes = [];
 
-  doc.items = (doc.items || []).map((it) => {
-    const vpid = it?.cost_breakdown?.vendorProductId;
-    const cached = vpid ? doc.__vpidToVendor?.get(String(vpid)) : null;
-    const fulfillmentVendorKey = normalizeVendorKey(it?.tracking_info?.fulfillment);
-    const thisVendorKey =
-      sentVendorKeys.length === 1
-        ? sentVendorKeys[0]
-        : fulfillmentVendorKey || cached?.vendorKey || "";
+  doc.items = (doc.items || []).map((it, index) => {
+    const thisVendorKey = getItemVendorKey(doc, it, sentVendorKeys);
 
     if (thisVendorKey !== vendorKey) {
       return it.toObject?.() ? it.toObject() : it;
     }
+    targetIndexes.push(index);
 
     const ti = it.tracking_info || {};
     const prevTracking = norm(ti.tracking);
@@ -1093,6 +1190,10 @@ function applyToItemsOfVendor(
 
     return { ...(it.toObject?.() ? it.toObject() : it), tracking_info: nextTI };
   });
+
+  if (vendorKey === "beeful" && applyGrabinkActualCost(doc, raw, targetIndexes)) {
+    doc.__trackingPullCostChanged = true;
+  }
 
   if (vendorKey === "beeful") {
     doc.beeful_submission = {
@@ -1222,7 +1323,7 @@ async function updateOrderByVendors(orderId, vpidToVendorPrefetched = null) {
     orderStatusChanged = true;
   }
 
-  if (totalChanged > 0 || orderStatusChanged) {
+  if (totalChanged > 0 || orderStatusChanged || doc.__trackingPullCostChanged) {
     await doc.save();
     await logOrderLifecycleEvent(buildOrderLifecyclePayload({
       order: doc,
@@ -1231,7 +1332,11 @@ async function updateOrderByVendors(orderId, vpidToVendorPrefetched = null) {
       stage: "TRACKING_PULL",
       eventType: "TRACKING_UPDATED",
       status: "success",
-      metadata: { updatedItems: totalChanged, orderStatusChanged },
+      metadata: {
+        updatedItems: totalChanged,
+        orderStatusChanged,
+        costChanged: !!doc.__trackingPullCostChanged,
+      },
     }));
   }
   return { updatedItems: totalChanged, orderStatusChanged };
@@ -1308,19 +1413,15 @@ function applyToEtsyItemsOfVendor(doc, vendorKey, { tracking, carrier, shipped, 
   let changed = 0;
   const fulfillment = getVendorFulfillmentName(vendorKey);
   const sentVendorKeys = doc.__sentTrackingVendorKeys || [];
+  const targetIndexes = [];
 
-  doc.items = (doc.items || []).map((it) => {
-    const vpid = it?.cost_breakdown?.vendorProductId;
-    const cached = vpid ? doc.__vpidToVendor?.get(String(vpid)) : null;
-    const fulfillmentVendorKey = normalizeVendorKey(it?.tracking_info?.fulfillment);
-    const thisVendorKey =
-      sentVendorKeys.length === 1
-        ? sentVendorKeys[0]
-        : fulfillmentVendorKey || cached?.vendorKey || "";
+  doc.items = (doc.items || []).map((it, index) => {
+    const thisVendorKey = getItemVendorKey(doc, it, sentVendorKeys);
 
     if (thisVendorKey !== vendorKey) {
       return it.toObject?.() ? it.toObject() : it;
     }
+    targetIndexes.push(index);
 
     const ti = it.tracking_info || {};
     const prevTracking = norm(ti.tracking);
@@ -1345,6 +1446,10 @@ function applyToEtsyItemsOfVendor(doc, vendorKey, { tracking, carrier, shipped, 
 
     return { ...(it.toObject?.() ? it.toObject() : it), tracking_info: nextTI };
   });
+
+  if (vendorKey === "beeful" && applyGrabinkActualCost(doc, raw, targetIndexes)) {
+    doc.__trackingPullCostChanged = true;
+  }
 
   if (vendorKey === "onos" && changed > 0) {
     doc.vendor_submissions = doc.vendor_submissions || {};
@@ -1430,7 +1535,7 @@ async function updateEtsyOrderByVendors(orderId, options = {}) {
     orderStatusChanged = true;
   }
 
-  if (totalChanged > 0 || orderStatusChanged) {
+  if (totalChanged > 0 || orderStatusChanged || doc.__trackingPullCostChanged) {
     await doc.save();
     await logOrderLifecycleEvent(buildOrderLifecyclePayload({
       order: doc,
@@ -1449,6 +1554,7 @@ async function updateEtsyOrderByVendors(orderId, options = {}) {
           shipped: !!result.shipped,
           message: result.message || "",
         })),
+        costChanged: !!doc.__trackingPullCostChanged,
       },
     }));
   }
