@@ -142,6 +142,37 @@ function mapShippingMethod(orderObj = {}) {
     return "standard";
 }
 
+function normalizePreferredCarrier(raw = "") {
+    const value = String(raw || "").toLowerCase().trim();
+    if (!value) return "";
+    if (value === "auto" || value === "usps") return value;
+    return "";
+}
+
+function isUSCountry(country = "") {
+    const value = String(country || "").toLowerCase().trim();
+    return value === "us" || value === "usa" || value === "united states" || value === "united states of america";
+}
+
+function resolvePreferredCarrier(orderObj = {}, payload = {}) {
+    const explicit = normalizePreferredCarrier(
+        orderObj.preferred_carrier ||
+        orderObj.preferredCarrier ||
+        orderObj.shipping_preferred_carrier ||
+        orderObj.shippingPreferredCarrier ||
+        process.env.MANGOTEE_PREFERRED_CARRIER ||
+        ""
+    );
+    if (explicit) return explicit;
+
+    const isRequired =
+        payload.shipping_method === "standard" &&
+        isUSCountry(payload.country) &&
+        !String(payload.label_url || "").trim();
+
+    return isRequired ? "auto" : "";
+}
+
 function buildPreviewFiles(item = {}) {
     // 1) nếu upstream có sẵn preview_files hợp lệ thì dùng luôn
     const preProvided = collectFromArray(item.preview_files);
@@ -198,8 +229,7 @@ function buildPayload(orderObj = {}) {
     const customer = orderObj.customer_infor || {};
     const items = Array.isArray(orderObj.items) ? orderObj.items : [];
     const { firstName, lastName } = splitName(customer.name || "");
-
-    return {
+    const payload = {
         order_id: orderObj.orderId|| orderObj.order_id || "",
         seller: orderObj.seller || orderObj.sellerCode || "",
         user_id: orderObj.user_id || orderObj.userId || "",
@@ -219,6 +249,13 @@ function buildPayload(orderObj = {}) {
         note: orderObj.note || orderObj.order_note || "",
         items: items.map((it) => buildMangoItem(it, orderObj)),
     };
+
+    const preferredCarrier = resolvePreferredCarrier(orderObj, payload);
+    if (preferredCarrier) {
+        payload.preferred_carrier = preferredCarrier;
+    }
+
+    return payload;
 }
 
 /* -------------------- Preflight validation (avoid 422) ------------------- */
@@ -239,6 +276,17 @@ function validatePayload(p) {
     need("state", p.state);
     need("zip", p.zip);
     need("country", p.country);
+
+    if (
+        p.shipping_method === "standard" &&
+        isUSCountry(p.country) &&
+        !String(p.label_url || "").trim()
+    ) {
+        need("preferred_carrier", p.preferred_carrier);
+        if (p.preferred_carrier && !["auto", "usps"].includes(String(p.preferred_carrier).toLowerCase())) {
+            errors.push('preferred_carrier must be "auto" or "usps"');
+        }
+    }
 
     if (!Array.isArray(p.items) || p.items.length === 0) {
         errors.push("Missing items[]");

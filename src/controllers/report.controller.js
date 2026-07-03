@@ -7,6 +7,8 @@ const ExcelJS = require("exceljs");
 const User = db.user;
 const Shop = db.shop;
 const Team = db.Team;
+const AMZ_REPORT_TIMEZONE = "America/New_York";
+const DAY_MS = 24 * 60 * 60 * 1000;
 
 // ép số an toàn
 const num = (v) => {
@@ -22,6 +24,200 @@ const norm = (row) =>
       typeof v === "string" ? v.trim() : v,
     ]),
   );
+
+const amzTimeZoneFormatter = new Intl.DateTimeFormat("en-US", {
+  timeZone: AMZ_REPORT_TIMEZONE,
+  year: "numeric",
+  month: "2-digit",
+  day: "2-digit",
+  hour: "2-digit",
+  minute: "2-digit",
+  second: "2-digit",
+  hourCycle: "h23",
+});
+
+function getAmzTimeZoneParts(date) {
+  const values = {};
+  for (const part of amzTimeZoneFormatter.formatToParts(date)) {
+    if (part.type !== "literal") values[part.type] = Number(part.value);
+  }
+  return {
+    year: values.year,
+    month: values.month,
+    day: values.day,
+    hour: values.hour || 0,
+    minute: values.minute || 0,
+    second: values.second || 0,
+  };
+}
+
+function amzLocalTimeToUtcDate(parts) {
+  const targetUtcMs = Date.UTC(
+    parts.year,
+    parts.month - 1,
+    parts.day,
+    parts.hour || 0,
+    parts.minute || 0,
+    parts.second || 0,
+    parts.millisecond || 0,
+  );
+  let utcMs = targetUtcMs;
+
+  for (let i = 0; i < 3; i++) {
+    const zoneParts = getAmzTimeZoneParts(new Date(utcMs));
+    const zoneAsUtcMs = Date.UTC(
+      zoneParts.year,
+      zoneParts.month - 1,
+      zoneParts.day,
+      zoneParts.hour,
+      zoneParts.minute,
+      zoneParts.second,
+      parts.millisecond || 0,
+    );
+    utcMs -= zoneAsUtcMs - targetUtcMs;
+  }
+
+  return new Date(utcMs);
+}
+
+function parseAmzReportDateParts(value) {
+  if (!value) return null;
+  const raw = String(value).trim();
+  const dateOnly = /^(\d{4})-(\d{2})-(\d{2})/.exec(raw);
+  if (dateOnly) {
+    const year = Number(dateOnly[1]);
+    const month = Number(dateOnly[2]);
+    const day = Number(dateOnly[3]);
+    const normalized = new Date(Date.UTC(year, month - 1, day));
+    if (
+      normalized.getUTCFullYear() !== year ||
+      normalized.getUTCMonth() + 1 !== month ||
+      normalized.getUTCDate() !== day
+    ) {
+      return null;
+    }
+    return {
+      year,
+      month,
+      day,
+    };
+  }
+
+  const date = new Date(raw);
+  if (Number.isNaN(date.getTime())) return null;
+  const parts = getAmzTimeZoneParts(date);
+  return { year: parts.year, month: parts.month, day: parts.day };
+}
+
+function getAmzReportDateRange(from, to) {
+  const fromParts = parseAmzReportDateParts(from);
+  const toParts = parseAmzReportDateParts(to);
+
+  return {
+    fromDate: fromParts
+      ? amzLocalTimeToUtcDate({
+          ...fromParts,
+          hour: 0,
+          minute: 0,
+          second: 0,
+          millisecond: 0,
+        })
+      : null,
+    toDate: toParts
+      ? amzLocalTimeToUtcDate({
+          ...toParts,
+          hour: 23,
+          minute: 59,
+          second: 59,
+          millisecond: 999,
+        })
+      : null,
+    fromParts,
+    toParts,
+  };
+}
+
+function makeAmzReportDayList(from, to) {
+  const fromParts = parseAmzReportDateParts(from);
+  const toParts = parseAmzReportDateParts(to);
+  if (!fromParts || !toParts) return [];
+
+  const days = [];
+  let cursor = Date.UTC(fromParts.year, fromParts.month - 1, fromParts.day);
+  const end = Date.UTC(toParts.year, toParts.month - 1, toParts.day);
+
+  while (cursor <= end) {
+    const d = new Date(cursor);
+    days.push(
+      amzLocalTimeToUtcDate({
+        year: d.getUTCFullYear(),
+        month: d.getUTCMonth() + 1,
+        day: d.getUTCDate(),
+        hour: 0,
+        minute: 0,
+        second: 0,
+        millisecond: 0,
+      }),
+    );
+    cursor += DAY_MS;
+  }
+
+  return days;
+}
+
+function makeAmzReportUtcCalendarDayList(from, to) {
+  const fromParts = parseAmzReportDateParts(from);
+  const toParts = parseAmzReportDateParts(to);
+  if (!fromParts || !toParts) return [];
+
+  const days = [];
+  let cursor = Date.UTC(fromParts.year, fromParts.month - 1, fromParts.day);
+  const end = Date.UTC(toParts.year, toParts.month - 1, toParts.day);
+
+  while (cursor <= end) {
+    days.push(new Date(cursor));
+    cursor += DAY_MS;
+  }
+
+  return days;
+}
+
+function adsSummaryDayToAmzReportDayStart(day) {
+  const d = new Date(day);
+  if (Number.isNaN(d.getTime())) return null;
+  return amzLocalTimeToUtcDate({
+    year: d.getUTCFullYear(),
+    month: d.getUTCMonth() + 1,
+    day: d.getUTCDate(),
+    hour: 0,
+    minute: 0,
+    second: 0,
+    millisecond: 0,
+  });
+}
+
+function toAmzReportDayStart(value) {
+  if (!value) return null;
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return null;
+  const parts = getAmzTimeZoneParts(date);
+  return amzLocalTimeToUtcDate({
+    year: parts.year,
+    month: parts.month,
+    day: parts.day,
+    hour: 0,
+    minute: 0,
+    second: 0,
+    millisecond: 0,
+  });
+}
+
+function formatAmzDateTime(value) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
+  const parts = getAmzTimeZoneParts(date);
+  return `${parts.year}-${pad2(parts.month)}-${pad2(parts.day)} ${pad2(parts.hour)}:${pad2(parts.minute)}:${pad2(parts.second)}`;
+}
 
 const importReportFromFile = async (req, res) => {
   try {
@@ -73,7 +269,7 @@ const importReportFromFile = async (req, res) => {
       const shippingTax = num(r["shipping-tax"]);
       const discount = num(r["item-promotion-discount"]);
 
-      const revenue = itemPrice + shippingPrice;
+      const revenue = itemPrice + shippingPrice + itemTax + shippingTax;
       const fee = 0.17 * (itemPrice + shippingPrice);
 
       const acc = bucket.get(orderId) || {
@@ -145,8 +341,6 @@ const importReportFromFile = async (req, res) => {
                           $add: [
                             { $ifNull: ["$base_cost", 0] },
                             aft.fee,
-                            aft.item_tax,
-                            aft.shipping_tax,
                             aft.item_promotion_discount,
                           ],
                         },
@@ -209,24 +403,12 @@ const importReportFromFile = async (req, res) => {
   }
 };
 
-// helpers
-function makeDayList(fromISO, toISO) {
-  const from = new Date(fromISO);
-  const to = new Date(toISO);
-  const at00 = (d) =>
-    new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()));
-  const days = [];
-  let d = at00(from);
-  const end = at00(to);
-  while (d <= end) {
-    days.push(new Date(d));
-    d = new Date(d.getTime() + 86400000); // +1 day
-  }
-  return days;
-}
 const iso = (d) => d.toISOString();
 const pad2 = (n) => String(n).padStart(2, "0");
-const labelDDMM = (d) => `${pad2(d.getUTCDate())}-${pad2(d.getUTCMonth() + 1)}`;
+const labelDDMM = (d) => {
+  const parts = getAmzTimeZoneParts(d);
+  return `${pad2(parts.day)}-${pad2(parts.month)}`;
+};
 
 /** role từ JWT có thể là string hoặc array */
 function hasRoleMatch(userRole, target) {
@@ -268,7 +450,7 @@ const getReportMatrix = async (req, res) => {
     if (!from || !to) {
       return res
         .status(400)
-        .json({ message: "from & to are required (ISO UTC)" });
+        .json({ message: `from & to are required (${AMZ_REPORT_TIMEZONE})` });
     }
 
     // ===== 0) Quyền hạn =====
@@ -295,10 +477,22 @@ const getReportMatrix = async (req, res) => {
     const OP_COST_EXCLUDE_USER_IDS = new Set();
 
     // ===== 1) chuẩn bị date list =====
-    const dayList = makeDayList(from, to);
+    const dayList = makeAmzReportDayList(from, to);
     const dayIndex = new Map(dayList.map((d, i) => [iso(d), i]));
-    const fromDate = new Date(from);
-    const toDate = new Date(to);
+    const { fromDate, toDate } = getAmzReportDateRange(from, to);
+
+    if (
+      !fromDate ||
+      !toDate ||
+      !dayList.length ||
+      Number.isNaN(fromDate.getTime()) ||
+      Number.isNaN(toDate.getTime()) ||
+      fromDate > toDate
+    ) {
+      return res
+        .status(400)
+        .json({ message: "from/to must be valid date values" });
+    }
 
     // ===== 2) Build match theo quyền & query =====
     const matchStage = {
@@ -488,7 +682,7 @@ const getReportMatrix = async (req, res) => {
             $dateTrunc: {
               date: "$purchase_date",
               unit: "day",
-              timezone: "UTC",
+              timezone: AMZ_REPORT_TIMEZONE,
             },
           },
         },
@@ -532,14 +726,22 @@ const getReportMatrix = async (req, res) => {
     ]);
 
     // ===== 4) Lấy dữ liệu ADS từ AdsDailySummary =====
+    const adsDayList = makeAmzReportUtcCalendarDayList(from, to);
     const adsDocs = await AdsDailySummary.find(
-      { day: { $gte: dayList[0], $lte: dayList[dayList.length - 1] } },
+      {
+        day: {
+          $gte: adsDayList[0],
+          $lte: adsDayList[adsDayList.length - 1],
+        },
+      },
       { day: 1, by_seller: 1 },
     ).lean();
 
     const adsMap = new Map(); // key = `${sellerId}|${iso(day)}`
     for (const doc of adsDocs) {
-      const dayIso = iso(doc.day);
+      const reportDay = adsSummaryDayToAmzReportDayStart(doc.day);
+      if (!reportDay) continue;
+      const dayIso = iso(reportDay);
       for (const row of doc.by_seller || []) {
         const sid = row?.seller?._id;
         if (!sid) continue;
@@ -635,14 +837,6 @@ const getReportMatrix = async (req, res) => {
     // ===== 6.5) Tính opCost theo start_seller / end_seller + loại trừ boss + inclusive start day =====
     const fixedOpCost = Number(OPCOST_PER_PERSON_PER_DAY || 0);
 
-    const toUtcDayStart = (dt) => {
-      if (!dt) return null;
-      const d = new Date(dt);
-      return new Date(
-        Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()),
-      );
-    };
-
     const sellerIdsForOp = Array.from(sellerNameToId.values())
       .filter((id) => mongoose.Types.ObjectId.isValid(id))
       .map((id) => String(id));
@@ -660,15 +854,15 @@ const getReportMatrix = async (req, res) => {
 
       for (const u of userDocs) {
         sellerWorkMap.set(String(u._id), {
-          startDay: toUtcDayStart(u.start_seller),
-          endDay: toUtcDayStart(u.end_seller),
+          startDay: toAmzReportDayStart(u.start_seller),
+          endDay: toAmzReportDayStart(u.end_seller),
         });
       }
     }
 
     const today = new Date();
     const effectiveNow = today < toDate ? today : toDate;
-    const effectiveEndDay = toUtcDayStart(effectiveNow);
+    const effectiveEndDay = toAmzReportDayStart(effectiveNow);
 
     for (const sellerName of Object.keys(result)) {
       const S = result[sellerName];
@@ -688,7 +882,7 @@ const getReportMatrix = async (req, res) => {
       const endInclusive = endDay || effectiveEndDay;
 
       for (let i = 0; i < dayList.length; i++) {
-        const d = toUtcDayStart(dayList[i]);
+        const d = toAmzReportDayStart(dayList[i]);
         const inRange =
           (!startDay || d >= startDay) && (!endInclusive || d <= endInclusive);
         S.opCost[i] = inRange ? +fixedOpCost.toFixed(2) : 0;
@@ -704,9 +898,7 @@ const getReportMatrix = async (req, res) => {
           (S.baseCost[i] +
             S.fee[i] +
             S.ads[i] +
-            S.shippingTax[i] +
-            Math.abs(S.itemPromotionDiscount[i]) +
-            S.itemTax[i]);
+            Math.abs(S.itemPromotionDiscount[i]));
 
         const p2 = p1 - (S.opCost[i] + S.refund[i]);
 
@@ -809,8 +1001,12 @@ const getOrderCostStatistics = async (req, res) => {
 
     // Date inclusive với purchase_date fallback createdAt
     if (from || to) {
-      const fromDate = from ? new Date(from) : null;
-      const toDate = to ? new Date(to) : null;
+      const { fromDate, toDate } = getAmzReportDateRange(from, to);
+      if ((from && !fromDate) || (to && !toDate)) {
+        return res
+          .status(400)
+          .json({ message: "from/to must be valid date values" });
+      }
       const dateExpr = { $ifNull: ["$purchase_date", "$createdAt"] };
       const bounds = [];
       if (fromDate) bounds.push({ $gte: [dateExpr, fromDate] });
@@ -961,7 +1157,7 @@ const getOrderCostStatistics = async (req, res) => {
               {
                 $subtract: [
                   "$_rev",
-                  { $add: ["$_base", "$_fee", "$_itax", "$_promo", "$_stax"] },
+                  { $add: ["$_base", "$_fee", { $abs: "$_promo" }] },
                 ],
               },
               2,
@@ -978,9 +1174,7 @@ const getOrderCostStatistics = async (req, res) => {
                       "$_fee",
                       "$_op",
                       "$_ref",
-                      "$_itax",
-                      "$_promo",
-                      "$_stax",
+                      { $abs: "$_promo" },
                     ],
                   },
                 ],
@@ -1155,13 +1349,18 @@ const exportOrdersCostExcel = async (req, res) => {
     if (!from || !to) {
       return res
         .status(400)
-        .json({ message: "from & to are required (ISO UTC)" });
+        .json({ message: `from & to are required (${AMZ_REPORT_TIMEZONE})` });
     }
 
-    const fromDate = new Date(from);
-    const toDate = new Date(to);
+    const { fromDate, toDate } = getAmzReportDateRange(from, to);
 
-    if (Number.isNaN(fromDate.getTime()) || Number.isNaN(toDate.getTime())) {
+    if (
+      !fromDate ||
+      !toDate ||
+      Number.isNaN(fromDate.getTime()) ||
+      Number.isNaN(toDate.getTime()) ||
+      fromDate > toDate
+    ) {
       return res
         .status(400)
         .json({ message: "from/to must be valid ISO date" });
@@ -1220,12 +1419,12 @@ const exportOrdersCostExcel = async (req, res) => {
       const cost = Number(o.base_cost) || 0;
 
       // Profit: revenue trừ tất cả phần còn lại
-      const profit = revenue - (tax + sTax + fee + refund + discount + cost);
+      const profit = revenue - (fee + refund + Math.abs(discount) + cost);
 
       ws.addRow({
         orderId: o.orderId || "",
         purchase_date: o.purchase_date
-          ? new Date(o.purchase_date).toISOString()
+          ? formatAmzDateTime(o.purchase_date)
           : "",
         shop: o.shopId?.name || "",
         seller: o.sellerId?.full_name || "",
@@ -1277,26 +1476,6 @@ const fmtDateKey = (d) => {
   return `${dd}-${mm}`;
 };
 
-const toUTCStartOfDay = (date) => {
-  const d = new Date(date);
-  return new Date(
-    Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate(), 0, 0, 0),
-  );
-};
-
-const buildDateRangeUTC = (from, to) => {
-  const start = toUTCStartOfDay(from);
-  const end = toUTCStartOfDay(to);
-
-  const dates = [];
-  let cur = new Date(start);
-  while (cur.getTime() <= end.getTime()) {
-    dates.push(new Date(cur));
-    cur = new Date(cur.getTime() + 24 * 60 * 60 * 1000);
-  }
-  return dates;
-};
-
 const getIdString = (x) => {
   if (!x) return "";
   if (typeof x === "string") return x;
@@ -1316,25 +1495,23 @@ const exportAmazonAdsSpendBySellerExcel = async (req, res) => {
     if (!from || !to) {
       return res
         .status(400)
-        .json({ message: "from & to are required (ISO UTC)" });
+        .json({ message: `from & to are required (${AMZ_REPORT_TIMEZONE})` });
     }
 
-    const fromDate = new Date(from);
-    const toDate = new Date(to);
-    if (Number.isNaN(fromDate.getTime()) || Number.isNaN(toDate.getTime())) {
+    const dateList = makeAmzReportUtcCalendarDayList(from, to);
+    if (!dateList.length) {
       return res
         .status(400)
         .json({ message: "from/to must be valid ISO date" });
     }
 
     // Tạo list ngày để render cột (giống UI)
-    const dateList = buildDateRangeUTC(fromDate, toDate);
     const dateKeys = dateList.map(fmtDateKey);
 
     // ===== 1) Load dữ liệu theo ngày từ DB =====
     // field 'day' trong ảnh #3 là Date (00:00:00Z)
     const docs = await AdsDailySummary.find({
-      day: { $gte: toUTCStartOfDay(fromDate), $lte: toUTCStartOfDay(toDate) },
+      day: { $gte: dateList[0], $lte: dateList[dateList.length - 1] },
     }).lean();
 
     // ===== 2) Collect sellerIds + shopIds để map name =====
@@ -1513,9 +1690,9 @@ const exportAmazonAdsSpendBySellerExcel = async (req, res) => {
     }
 
     // ===== 5) Response download =====
-    const fileName = `amazon_ads_spend_${toUTCStartOfDay(fromDate)
+    const fileName = `amazon_ads_spend_${dateList[0]
       .toISOString()
-      .slice(0, 10)}_to_${toUTCStartOfDay(toDate)
+      .slice(0, 10)}_to_${dateList[dateList.length - 1]
         .toISOString()
         .slice(0, 10)}.xlsx`;
 
