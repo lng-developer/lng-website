@@ -641,6 +641,85 @@ function applyMerchizeActualCost(doc, raw, targetIndexes = []) {
   );
 }
 
+function parseMerchFoxActualCost(raw = {}) {
+  const total = toMoneyNumber(raw?.total);
+  if (total === null) return null;
+
+  return {
+    total: roundMoney(total),
+    shippingFee: 0,
+    rawItems: Array.isArray(raw?.products) ? raw.products : [],
+    orderId: norm(raw?.mfid || raw?.mfif || raw?.orderid),
+  };
+}
+
+function findMerchFoxRawItem(rawItems, item) {
+  if (!Array.isArray(rawItems) || rawItems.length === 0) return null;
+  const candidates = [
+    item?.cost_breakdown?.matchedSku,
+    item?.mapped_sku,
+    item?.sku,
+  ]
+    .map((value) => lower(value))
+    .filter(Boolean);
+
+  return rawItems.find((rawItem) => candidates.includes(lower(rawItem?.sku?.sku || rawItem?.sku))) || null;
+}
+
+function applyMerchFoxActualCost(doc, raw, targetIndexes = []) {
+  const cost = parseMerchFoxActualCost(raw);
+  if (!cost) return false;
+
+  const previousBaseCost = toMoneyNumber(doc.base_cost) || 0;
+  const previousComputedAt = doc.base_cost_computed_at || null;
+  const previousGroups = JSON.stringify(doc.base_cost_shipping_groups || []);
+
+  doc.base_cost = cost.total;
+  doc.base_cost_computed_at = new Date();
+  doc.base_cost_shipping_groups = [
+    {
+      group_key: `merchfox:${cost.orderId || norm(doc.orderId)}`,
+      total_qty: targetIndexes.reduce((sum, index) => {
+        const qty = toMoneyNumber(doc.items?.[index]?.quantity);
+        return sum + (qty || 0);
+      }, 0),
+      shipping_economy_once: cost.shippingFee,
+      shipping_additional_rate: 0,
+      shipping_additional_units: 0,
+      shipping_total_for_group: cost.shippingFee,
+    },
+  ];
+
+  const shippingPerItem = targetIndexes.length > 0 ? cost.shippingFee / targetIndexes.length : 0;
+  for (const index of targetIndexes) {
+    const item = doc.items?.[index];
+    if (!item) continue;
+
+    const rawItem = findMerchFoxRawItem(cost.rawItems, item);
+    const quantity = toMoneyNumber(item.quantity) || toMoneyNumber(rawItem?.quantity) || 1;
+    const unitCost = toMoneyNumber(rawItem?.price);
+    if (unitCost === null) continue;
+
+    item.cost_breakdown = {
+      ...(item.cost_breakdown?.toObject?.() ? item.cost_breakdown.toObject() : item.cost_breakdown || {}),
+      base_cost_each: roundMoney(unitCost),
+      quantity,
+      base_cost_total_for_item_including_shipping: roundMoney(unitCost * quantity + shippingPerItem),
+    };
+  }
+
+  if (typeof doc.markModified === "function") {
+    doc.markModified("items");
+    doc.markModified("base_cost_shipping_groups");
+  }
+
+  return (
+    roundMoney(previousBaseCost) !== cost.total ||
+    !previousComputedAt ||
+    previousGroups !== JSON.stringify(doc.base_cost_shipping_groups || [])
+  );
+}
+
 const isObjectIdLike = (value) => /^[a-fA-F0-9]{24}$/.test(String(value || "").trim());
 const isForceTrue = (value) => value === true || String(value).toLowerCase() === "true";
 
@@ -1508,6 +1587,9 @@ function applyToItemsOfVendor(
   if (vendorKey === "merchize" && applyMerchizeActualCost(doc, raw, targetIndexes)) {
     doc.__trackingPullCostChanged = true;
   }
+  if (vendorKey === "merchfox" && applyMerchFoxActualCost(doc, raw, targetIndexes)) {
+    doc.__trackingPullCostChanged = true;
+  }
 
   if (vendorKey === "beeful") {
     doc.beeful_submission = {
@@ -1771,6 +1853,9 @@ function applyToEtsyItemsOfVendor(doc, vendorKey, { tracking, carrier, shipped, 
     doc.__trackingPullCostChanged = true;
   }
   if (vendorKey === "merchize" && applyMerchizeActualCost(doc, raw, targetIndexes)) {
+    doc.__trackingPullCostChanged = true;
+  }
+  if (vendorKey === "merchfox" && applyMerchFoxActualCost(doc, raw, targetIndexes)) {
     doc.__trackingPullCostChanged = true;
   }
 
