@@ -119,7 +119,8 @@ app.use("/api/r2-test", require("./src/routes/upload.router.R2"));
 // ===== HTTP server
 const httpServer = http.createServer(app);
 
-httpServer.requestTimeout = 300000; // 300s
+httpServer.requestTimeout = 0;
+httpServer.timeout = 0;
 httpServer.headersTimeout = 320000;
 
 // ===== Socket.IO (khởi tạo gọn)

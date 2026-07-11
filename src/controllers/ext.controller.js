@@ -154,6 +154,16 @@ const httpLenful = axios.create({
 const norm = (s) => String(s || "").trim();
 const lower = (s) => norm(s).toLowerCase();
 
+function toMoneyNumber(value) {
+  if (value === null || value === undefined || value === "") return null;
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
+}
+
+function roundMoney(value) {
+  return Number(Number(value || 0).toFixed(2));
+}
+
 function isValidTrackingNumber(s) {
   const t = norm(s);
   if (!t) return false;
@@ -271,6 +281,621 @@ function getSentTrackingVendorKeys(doc = {}, { sentAfter = null } = {}) {
   }
 
   return [...keys];
+}
+
+function getItemVendorKey(doc, item, sentVendorKeys = []) {
+  const vpid = item?.cost_breakdown?.vendorProductId;
+  const cached = vpid ? doc.__vpidToVendor?.get(String(vpid)) : null;
+  const fulfillmentVendorKey = normalizeVendorKey(item?.tracking_info?.fulfillment);
+  return sentVendorKeys.length === 1
+    ? sentVendorKeys[0]
+    : fulfillmentVendorKey || cached?.vendorKey || "";
+}
+
+function parseGrabinkActualCost(raw = {}) {
+  const itemCost = toMoneyNumber(raw?.cost);
+  const shippingFee = toMoneyNumber(raw?.chargeShippingFee);
+  if (itemCost === null && shippingFee === null) return null;
+
+  return {
+    itemCost: roundMoney(itemCost || 0),
+    shippingFee: roundMoney(shippingFee || 0),
+    total: roundMoney((itemCost || 0) + (shippingFee || 0)),
+    rawItems: Array.isArray(raw?.items) ? raw.items : [],
+  };
+}
+
+function findGrabinkRawItem(rawItems, item) {
+  if (!Array.isArray(rawItems) || rawItems.length === 0) return null;
+  const candidates = [
+    item?.cost_breakdown?.matchedSku,
+    item?.mapped_sku,
+    item?.sku,
+  ]
+    .map((value) => lower(value))
+    .filter(Boolean);
+
+  return rawItems.find((rawItem) => candidates.includes(lower(rawItem?.sku))) || null;
+}
+
+function applyGrabinkActualCost(doc, raw, targetIndexes = []) {
+  const cost = parseGrabinkActualCost(raw);
+  if (!cost) return false;
+
+  const previousBaseCost = toMoneyNumber(doc.base_cost) || 0;
+  const previousComputedAt = doc.base_cost_computed_at || null;
+  const previousGroups = JSON.stringify(doc.base_cost_shipping_groups || []);
+
+  doc.base_cost = cost.total;
+  doc.base_cost_computed_at = new Date();
+  doc.base_cost_shipping_groups = [
+    {
+      group_key: `grabink:${norm(raw?.code || doc.orderId)}`,
+      total_qty: targetIndexes.reduce((sum, index) => {
+        const qty = toMoneyNumber(doc.items?.[index]?.quantity);
+        return sum + (qty || 0);
+      }, 0),
+      shipping_economy_once: cost.shippingFee,
+      shipping_additional_rate: 0,
+      shipping_additional_units: 0,
+      shipping_total_for_group: cost.shippingFee,
+    },
+  ];
+
+  const shippingPerItem = targetIndexes.length > 0 ? cost.shippingFee / targetIndexes.length : 0;
+  for (const index of targetIndexes) {
+    const item = doc.items?.[index];
+    if (!item) continue;
+
+    const rawItem = findGrabinkRawItem(cost.rawItems, item);
+    const quantity = toMoneyNumber(item.quantity) || 1;
+    const rawUnitCost = toMoneyNumber(rawItem?.cost);
+    const fallbackUnitCost = targetIndexes.length === 1 ? cost.itemCost / quantity : null;
+    const unitCost = rawUnitCost !== null ? rawUnitCost : fallbackUnitCost;
+    if (unitCost === null) continue;
+
+    item.cost_breakdown = {
+      ...(item.cost_breakdown?.toObject?.() ? item.cost_breakdown.toObject() : item.cost_breakdown || {}),
+      base_cost_each: roundMoney(unitCost),
+      quantity,
+      base_cost_total_for_item_including_shipping: roundMoney(unitCost * quantity + shippingPerItem),
+    };
+  }
+
+  if (typeof doc.markModified === "function") {
+    doc.markModified("items");
+    doc.markModified("base_cost_shipping_groups");
+  }
+
+  return (
+    roundMoney(previousBaseCost) !== cost.total ||
+    !previousComputedAt ||
+    previousGroups !== JSON.stringify(doc.base_cost_shipping_groups || [])
+  );
+}
+
+function getLenfulToken() {
+  return process.env.LENFUL_API_KEY || process.env.LENFUL_ACCESS_TOKEN || process.env.LENFUL_TOKEN || "";
+}
+
+function getLenfulDetailRoot(raw = {}) {
+  const detail = raw?.detail || raw;
+  return detail?.data && typeof detail.data === "object" ? detail.data : detail;
+}
+
+function parseLenfulActualCost(raw = {}) {
+  const detail = getLenfulDetailRoot(raw);
+  const totalPrice = toMoneyNumber(detail?.total_price);
+  if (totalPrice === null) return null;
+
+  return {
+    total: roundMoney(totalPrice),
+    shippingFee: roundMoney(toMoneyNumber(detail?.shipping_method?.price) || 0),
+    detail,
+    rawItems: Array.isArray(detail?.line_items) ? detail.line_items : [],
+    orderId: norm(detail?.id || raw?.tracking?.order_id || raw?.order_id),
+  };
+}
+
+function findLenfulRawItem(rawItems, item) {
+  if (!Array.isArray(rawItems) || rawItems.length === 0) return null;
+  const candidates = [
+    item?.cost_breakdown?.matchedSku,
+    item?.mapped_sku,
+    item?.sku,
+  ]
+    .map((value) => lower(value))
+    .filter(Boolean);
+
+  return rawItems.find((rawItem) => candidates.includes(lower(rawItem?.variant?.sku || rawItem?.sku))) || null;
+}
+
+function applyLenfulActualCost(doc, raw, targetIndexes = []) {
+  const cost = parseLenfulActualCost(raw);
+  if (!cost) return false;
+
+  const previousBaseCost = toMoneyNumber(doc.base_cost) || 0;
+  const previousComputedAt = doc.base_cost_computed_at || null;
+  const previousGroups = JSON.stringify(doc.base_cost_shipping_groups || []);
+
+  doc.base_cost = cost.total;
+  doc.base_cost_computed_at = new Date();
+  doc.base_cost_shipping_groups = [
+    {
+      group_key: `lenful:${cost.orderId || norm(doc.orderId)}`,
+      total_qty: targetIndexes.reduce((sum, index) => {
+        const qty = toMoneyNumber(doc.items?.[index]?.quantity);
+        return sum + (qty || 0);
+      }, 0),
+      shipping_economy_once: cost.shippingFee,
+      shipping_additional_rate: 0,
+      shipping_additional_units: 0,
+      shipping_total_for_group: cost.shippingFee,
+    },
+  ];
+
+  const shippingPerItem = targetIndexes.length > 0 ? cost.shippingFee / targetIndexes.length : 0;
+  for (const index of targetIndexes) {
+    const item = doc.items?.[index];
+    if (!item) continue;
+
+    const rawItem = findLenfulRawItem(cost.rawItems, item);
+    const quantity = toMoneyNumber(item.quantity) || toMoneyNumber(rawItem?.quantity) || 1;
+    const lineTotal = toMoneyNumber(rawItem?.total);
+    const variantPrice = toMoneyNumber(rawItem?.variant?.price);
+    const unitCost = lineTotal !== null ? lineTotal / quantity : variantPrice;
+    if (unitCost === null) continue;
+
+    item.cost_breakdown = {
+      ...(item.cost_breakdown?.toObject?.() ? item.cost_breakdown.toObject() : item.cost_breakdown || {}),
+      base_cost_each: roundMoney(unitCost),
+      quantity,
+      base_cost_total_for_item_including_shipping: roundMoney(unitCost * quantity + shippingPerItem),
+    };
+  }
+
+  if (typeof doc.markModified === "function") {
+    doc.markModified("items");
+    doc.markModified("base_cost_shipping_groups");
+  }
+
+  return (
+    roundMoney(previousBaseCost) !== cost.total ||
+    !previousComputedAt ||
+    previousGroups !== JSON.stringify(doc.base_cost_shipping_groups || [])
+  );
+}
+
+function getMangoTeeDetailRoot(raw = {}) {
+  return raw?.data && typeof raw.data === "object" ? raw.data : raw;
+}
+
+function parseMangoTeeActualCost(raw = {}) {
+  const detail = getMangoTeeDetailRoot(raw);
+  const total = toMoneyNumber(detail?.total ?? detail?.Total);
+  if (total === null) return null;
+
+  return {
+    total: roundMoney(total),
+    shippingFee: roundMoney(toMoneyNumber(detail?.shipping_fee ?? detail?.shippingFee) || 0),
+    detail,
+    rawItems: Array.isArray(detail?.items) ? detail.items : [],
+    orderId: norm(detail?.id || detail?.order_id || raw?.id || raw?.order_id),
+  };
+}
+
+function findMangoTeeRawItem(rawItems, item) {
+  if (!Array.isArray(rawItems) || rawItems.length === 0) return null;
+  const candidates = [
+    item?.cost_breakdown?.matchedSku,
+    item?.mapped_sku,
+    item?.sku,
+  ]
+    .map((value) => lower(value))
+    .filter(Boolean);
+
+  return rawItems.find((rawItem) => candidates.includes(lower(rawItem?.sku))) || null;
+}
+
+function applyMangoTeeActualCost(doc, raw, targetIndexes = []) {
+  const cost = parseMangoTeeActualCost(raw);
+  if (!cost) return false;
+
+  const previousBaseCost = toMoneyNumber(doc.base_cost) || 0;
+  const previousComputedAt = doc.base_cost_computed_at || null;
+  const previousGroups = JSON.stringify(doc.base_cost_shipping_groups || []);
+
+  doc.base_cost = cost.total;
+  doc.base_cost_computed_at = new Date();
+  doc.base_cost_shipping_groups = [
+    {
+      group_key: `mangotee:${cost.orderId || norm(doc.orderId)}`,
+      total_qty: targetIndexes.reduce((sum, index) => {
+        const qty = toMoneyNumber(doc.items?.[index]?.quantity);
+        return sum + (qty || 0);
+      }, 0),
+      shipping_economy_once: cost.shippingFee,
+      shipping_additional_rate: 0,
+      shipping_additional_units: 0,
+      shipping_total_for_group: cost.shippingFee,
+    },
+  ];
+
+  const shippingPerItem = targetIndexes.length > 0 ? cost.shippingFee / targetIndexes.length : 0;
+  for (const index of targetIndexes) {
+    const item = doc.items?.[index];
+    if (!item) continue;
+
+    const rawItem = findMangoTeeRawItem(cost.rawItems, item);
+    const quantity = toMoneyNumber(item.quantity) || toMoneyNumber(rawItem?.quantity) || 1;
+    const unitCost = toMoneyNumber(rawItem?.base_cost);
+    if (unitCost === null) continue;
+
+    item.cost_breakdown = {
+      ...(item.cost_breakdown?.toObject?.() ? item.cost_breakdown.toObject() : item.cost_breakdown || {}),
+      base_cost_each: roundMoney(unitCost),
+      quantity,
+      base_cost_total_for_item_including_shipping: roundMoney(unitCost * quantity + shippingPerItem),
+    };
+  }
+
+  if (typeof doc.markModified === "function") {
+    doc.markModified("items");
+    doc.markModified("base_cost_shipping_groups");
+  }
+
+  return (
+    roundMoney(previousBaseCost) !== cost.total ||
+    !previousComputedAt ||
+    previousGroups !== JSON.stringify(doc.base_cost_shipping_groups || [])
+  );
+}
+
+function getMerchizeDetailRoot(raw = {}) {
+  return raw?.data && typeof raw.data === "object" ? raw.data : raw;
+}
+
+function parseMerchizeActualCost(raw = {}) {
+  const detail = getMerchizeDetailRoot(raw);
+  const total = toMoneyNumber(detail?.fulfillment_cost?.total);
+  if (total === null) return null;
+
+  return {
+    total: roundMoney(total),
+    shippingFee: roundMoney(toMoneyNumber(detail?.fulfillment_cost?.shipping_cost) || 0),
+    fulfillmentCost: roundMoney(toMoneyNumber(detail?.fulfillment_cost?.fulfillment_cost) || 0),
+    detail,
+    rawItems: Array.isArray(detail?.items) ? detail.items : [],
+    orderId: norm(detail?._id || detail?.code || detail?.external_number || raw?._id || raw?.code),
+  };
+}
+
+function findMerchizeRawItem(rawItems, item) {
+  if (!Array.isArray(rawItems) || rawItems.length === 0) return null;
+  const candidates = [
+    item?.cost_breakdown?.matchedSku,
+    item?.mapped_sku,
+    item?.sku,
+  ]
+    .map((value) => lower(value))
+    .filter(Boolean);
+
+  return rawItems.find((rawItem) => candidates.includes(lower(rawItem?.sku))) || null;
+}
+
+function applyMerchizeActualCost(doc, raw, targetIndexes = []) {
+  const cost = parseMerchizeActualCost(raw);
+  if (!cost) return false;
+
+  const previousBaseCost = toMoneyNumber(doc.base_cost) || 0;
+  const previousComputedAt = doc.base_cost_computed_at || null;
+  const previousGroups = JSON.stringify(doc.base_cost_shipping_groups || []);
+
+  doc.base_cost = cost.total;
+  doc.base_cost_computed_at = new Date();
+  doc.base_cost_shipping_groups = [
+    {
+      group_key: `merchize:${cost.orderId || norm(doc.orderId)}`,
+      total_qty: targetIndexes.reduce((sum, index) => {
+        const qty = toMoneyNumber(doc.items?.[index]?.quantity);
+        return sum + (qty || 0);
+      }, 0),
+      shipping_economy_once: cost.shippingFee,
+      shipping_additional_rate: 0,
+      shipping_additional_units: 0,
+      shipping_total_for_group: cost.shippingFee,
+    },
+  ];
+
+  const shippingPerItem = targetIndexes.length > 0 ? cost.shippingFee / targetIndexes.length : 0;
+  for (const index of targetIndexes) {
+    const item = doc.items?.[index];
+    if (!item) continue;
+
+    const rawItem = findMerchizeRawItem(cost.rawItems, item);
+    const quantity = toMoneyNumber(item.quantity) || toMoneyNumber(rawItem?.quantity) || 1;
+    const rawUnitCost = toMoneyNumber(rawItem?.base_cost);
+    const price = toMoneyNumber(rawItem?.price);
+    const fallbackUnitCost =
+      targetIndexes.length === 1 && cost.fulfillmentCost > 0 ? cost.fulfillmentCost / quantity : null;
+    const unitCost = rawUnitCost !== null ? rawUnitCost : price && price > 0 ? price : fallbackUnitCost;
+    if (unitCost === null) continue;
+
+    item.cost_breakdown = {
+      ...(item.cost_breakdown?.toObject?.() ? item.cost_breakdown.toObject() : item.cost_breakdown || {}),
+      base_cost_each: roundMoney(unitCost),
+      quantity,
+      base_cost_total_for_item_including_shipping: roundMoney(unitCost * quantity + shippingPerItem),
+    };
+  }
+
+  if (typeof doc.markModified === "function") {
+    doc.markModified("items");
+    doc.markModified("base_cost_shipping_groups");
+  }
+
+  return (
+    roundMoney(previousBaseCost) !== cost.total ||
+    !previousComputedAt ||
+    previousGroups !== JSON.stringify(doc.base_cost_shipping_groups || [])
+  );
+}
+
+function parseMerchFoxActualCost(raw = {}) {
+  const total = toMoneyNumber(raw?.total);
+  if (total === null) return null;
+
+  return {
+    total: roundMoney(total),
+    shippingFee: 0,
+    rawItems: Array.isArray(raw?.products) ? raw.products : [],
+    orderId: norm(raw?.mfid || raw?.mfif || raw?.orderid),
+  };
+}
+
+function findMerchFoxRawItem(rawItems, item) {
+  if (!Array.isArray(rawItems) || rawItems.length === 0) return null;
+  const candidates = [
+    item?.cost_breakdown?.matchedSku,
+    item?.mapped_sku,
+    item?.sku,
+  ]
+    .map((value) => lower(value))
+    .filter(Boolean);
+
+  return rawItems.find((rawItem) => candidates.includes(lower(rawItem?.sku?.sku || rawItem?.sku))) || null;
+}
+
+function applyMerchFoxActualCost(doc, raw, targetIndexes = []) {
+  const cost = parseMerchFoxActualCost(raw);
+  if (!cost) return false;
+
+  const previousBaseCost = toMoneyNumber(doc.base_cost) || 0;
+  const previousComputedAt = doc.base_cost_computed_at || null;
+  const previousGroups = JSON.stringify(doc.base_cost_shipping_groups || []);
+
+  doc.base_cost = cost.total;
+  doc.base_cost_computed_at = new Date();
+  doc.base_cost_shipping_groups = [
+    {
+      group_key: `merchfox:${cost.orderId || norm(doc.orderId)}`,
+      total_qty: targetIndexes.reduce((sum, index) => {
+        const qty = toMoneyNumber(doc.items?.[index]?.quantity);
+        return sum + (qty || 0);
+      }, 0),
+      shipping_economy_once: cost.shippingFee,
+      shipping_additional_rate: 0,
+      shipping_additional_units: 0,
+      shipping_total_for_group: cost.shippingFee,
+    },
+  ];
+
+  const shippingPerItem = targetIndexes.length > 0 ? cost.shippingFee / targetIndexes.length : 0;
+  for (const index of targetIndexes) {
+    const item = doc.items?.[index];
+    if (!item) continue;
+
+    const rawItem = findMerchFoxRawItem(cost.rawItems, item);
+    const quantity = toMoneyNumber(item.quantity) || toMoneyNumber(rawItem?.quantity) || 1;
+    const unitCost = toMoneyNumber(rawItem?.price);
+    if (unitCost === null) continue;
+
+    item.cost_breakdown = {
+      ...(item.cost_breakdown?.toObject?.() ? item.cost_breakdown.toObject() : item.cost_breakdown || {}),
+      base_cost_each: roundMoney(unitCost),
+      quantity,
+      base_cost_total_for_item_including_shipping: roundMoney(unitCost * quantity + shippingPerItem),
+    };
+  }
+
+  if (typeof doc.markModified === "function") {
+    doc.markModified("items");
+    doc.markModified("base_cost_shipping_groups");
+  }
+
+  return (
+    roundMoney(previousBaseCost) !== cost.total ||
+    !previousComputedAt ||
+    previousGroups !== JSON.stringify(doc.base_cost_shipping_groups || [])
+  );
+}
+
+function parsePrintwayActualCost(raw = {}) {
+  const total = toMoneyNumber(raw?.total_price);
+  if (total === null) return null;
+
+  return {
+    total: roundMoney(total),
+    shippingFee: roundMoney(toMoneyNumber(raw?.shipping_fee) || 0),
+    rawItems: Array.isArray(raw?.orderitems) ? raw.orderitems : [],
+    orderId: norm(raw?.pw_order_id || raw?.order_name),
+  };
+}
+
+function findPrintwayRawItem(rawItems, item) {
+  if (!Array.isArray(rawItems) || rawItems.length === 0) return null;
+  const candidates = [
+    item?.cost_breakdown?.matchedSku,
+    item?.mapped_sku,
+    item?.sku,
+  ]
+    .map((value) => lower(value))
+    .filter(Boolean);
+
+  return rawItems.find((rawItem) => candidates.includes(lower(rawItem?.item_sku || rawItem?.sku))) || null;
+}
+
+function applyPrintwayActualCost(doc, raw, targetIndexes = []) {
+  const cost = parsePrintwayActualCost(raw);
+  if (!cost) return false;
+
+  const previousBaseCost = toMoneyNumber(doc.base_cost) || 0;
+  const previousComputedAt = doc.base_cost_computed_at || null;
+  const previousGroups = JSON.stringify(doc.base_cost_shipping_groups || []);
+
+  doc.base_cost = cost.total;
+  doc.base_cost_computed_at = new Date();
+  doc.base_cost_shipping_groups = [
+    {
+      group_key: `printway:${cost.orderId || norm(doc.orderId)}`,
+      total_qty: targetIndexes.reduce((sum, index) => {
+        const qty = toMoneyNumber(doc.items?.[index]?.quantity);
+        return sum + (qty || 0);
+      }, 0),
+      shipping_economy_once: cost.shippingFee,
+      shipping_additional_rate: 0,
+      shipping_additional_units: 0,
+      shipping_total_for_group: cost.shippingFee,
+    },
+  ];
+
+  const shippingPerItem = targetIndexes.length > 0 ? cost.shippingFee / targetIndexes.length : 0;
+  for (const index of targetIndexes) {
+    const item = doc.items?.[index];
+    if (!item) continue;
+
+    const rawItem = findPrintwayRawItem(cost.rawItems, item);
+    const quantity = toMoneyNumber(item.quantity) || toMoneyNumber(rawItem?.quantity) || 1;
+    const unitCost = toMoneyNumber(rawItem?.base_cost);
+    const itemTotal = toMoneyNumber(rawItem?.item_price);
+    if (unitCost === null) continue;
+
+    item.cost_breakdown = {
+      ...(item.cost_breakdown?.toObject?.() ? item.cost_breakdown.toObject() : item.cost_breakdown || {}),
+      base_cost_each: roundMoney(unitCost),
+      quantity,
+      base_cost_total_for_item_including_shipping: roundMoney(itemTotal !== null ? itemTotal : unitCost * quantity + shippingPerItem),
+    };
+  }
+
+  if (typeof doc.markModified === "function") {
+    doc.markModified("items");
+    doc.markModified("base_cost_shipping_groups");
+  }
+
+  return (
+    roundMoney(previousBaseCost) !== cost.total ||
+    !previousComputedAt ||
+    previousGroups !== JSON.stringify(doc.base_cost_shipping_groups || [])
+  );
+}
+
+function getOnosDetailRoot(raw = {}) {
+  const detail = raw?.detail && typeof raw.detail === "object" ? raw.detail : raw;
+  return detail?.data && typeof detail.data === "object" ? detail.data : detail;
+}
+
+function parseOnosActualCost(raw = {}) {
+  const detail = getOnosDetailRoot(raw);
+  const total = toMoneyNumber(detail?.total);
+  if (total === null) return null;
+
+  return {
+    total: roundMoney(total),
+    shippingFee: roundMoney(toMoneyNumber(detail?.base_ship_total ?? detail?.ship_cost) || 0),
+    baseCost: roundMoney(toMoneyNumber(detail?.base_cost ?? detail?.fulfillment_cost ?? detail?.base_total) || 0),
+    rawItems: Array.isArray(detail?.items) ? detail.items : [],
+    orderId: norm(detail?.id || detail?.order_id),
+  };
+}
+
+function findOnosRawItem(rawItems, item) {
+  if (!Array.isArray(rawItems) || rawItems.length === 0) return null;
+  const candidates = [
+    item?.cost_breakdown?.matchedSku,
+    item?.mapped_sku,
+    item?.sku,
+  ]
+    .map((value) => lower(value))
+    .filter(Boolean);
+
+  return rawItems.find((rawItem) => candidates.includes(lower(rawItem?.sku || rawItem?.product_id))) || null;
+}
+
+function applyOnosActualCost(doc, raw, targetIndexes = []) {
+  const cost = parseOnosActualCost(raw);
+  if (!cost) return false;
+
+  const previousBaseCost = toMoneyNumber(doc.base_cost) || 0;
+  const previousComputedAt = doc.base_cost_computed_at || null;
+  const previousGroups = JSON.stringify(doc.base_cost_shipping_groups || []);
+
+  doc.base_cost = cost.total;
+  doc.base_cost_computed_at = new Date();
+  doc.base_cost_shipping_groups = [
+    {
+      group_key: `onos:${cost.orderId || norm(doc.orderId)}`,
+      total_qty: targetIndexes.reduce((sum, index) => {
+        const qty = toMoneyNumber(doc.items?.[index]?.quantity);
+        return sum + (qty || 0);
+      }, 0),
+      shipping_economy_once: cost.shippingFee,
+      shipping_additional_rate: 0,
+      shipping_additional_units: 0,
+      shipping_total_for_group: cost.shippingFee,
+    },
+  ];
+
+  const shippingPerItem = targetIndexes.length > 0 ? cost.shippingFee / targetIndexes.length : 0;
+  const totalTargetQuantity = targetIndexes.reduce((sum, index) => {
+    const qty = toMoneyNumber(doc.items?.[index]?.quantity);
+    return sum + (qty || 0);
+  }, 0);
+
+  for (const index of targetIndexes) {
+    const item = doc.items?.[index];
+    if (!item) continue;
+
+    const rawItem = findOnosRawItem(cost.rawItems, item);
+    const quantity = toMoneyNumber(item.quantity) || toMoneyNumber(rawItem?.quantity) || 1;
+    const unitCost =
+      toMoneyNumber(rawItem?.base_cost) ??
+      (cost.baseCost > 0 && totalTargetQuantity > 0 ? cost.baseCost / totalTargetQuantity : null);
+    if (unitCost === null) continue;
+
+    const itemTotal =
+      targetIndexes.length === 1
+        ? cost.total
+        : roundMoney(unitCost * quantity + shippingPerItem);
+
+    item.cost_breakdown = {
+      ...(item.cost_breakdown?.toObject?.() ? item.cost_breakdown.toObject() : item.cost_breakdown || {}),
+      base_cost_each: roundMoney(unitCost),
+      quantity,
+      base_cost_total_for_item_including_shipping: roundMoney(itemTotal),
+    };
+  }
+
+  if (typeof doc.markModified === "function") {
+    doc.markModified("items");
+    doc.markModified("base_cost_shipping_groups");
+  }
+
+  return (
+    roundMoney(previousBaseCost) !== cost.total ||
+    !previousComputedAt ||
+    previousGroups !== JSON.stringify(doc.base_cost_shipping_groups || [])
+  );
 }
 
 const isObjectIdLike = (value) => /^[a-fA-F0-9]{24}$/.test(String(value || "").trim());
@@ -588,17 +1213,16 @@ async function fetchMerchize(orderId) {
   if (res.status >= 400)
     throw new Error(`Merchize HTTP ${res.status} (tracking)`);
 
-  if (
-    res.data?.success === true &&
-    Array.isArray(res.data.data) &&
-    res.data.data.length > 0
-  ) {
-    const obj = res.data.data[0];
-    const tracking = norm(obj?.tracking_number);
-    const carrier = norm(obj?.tracking_company);
-    const shipped = isValidTrackingNumber(tracking);
+  let trackingResult = null;
+  if (res.data?.success === true) {
+    const obj = Array.isArray(res.data.data) ? res.data.data[0] : res.data.data;
+    if (obj && typeof obj === "object") {
+      const tracking = norm(obj?.tracking_number);
+      const carrier = norm(obj?.tracking_company);
+      const shipped = isValidTrackingNumber(tracking);
 
-    return { tracking, carrier, shipped, raw: obj };
+      trackingResult = { tracking, carrier, shipped, raw: obj };
+    }
   }
 
   // 2) Fallback: order-detail
@@ -608,17 +1232,26 @@ async function fetchMerchize(orderId) {
   if (res.status >= 400)
     throw new Error(`Merchize HTTP ${res.status} (detail)`);
 
-  if (
-    res.data?.success === true &&
-    Array.isArray(res.data.data) &&
-    res.data.data.length > 0
-  ) {
-    const obj = res.data.data[0];
+  if (res.data?.success === true) {
+    const obj = Array.isArray(res.data.data) ? res.data.data[0] : res.data.data;
+    if (!obj || typeof obj !== "object") {
+      throw new Error(`Merchize empty for ${orderId}`);
+    }
     const tracking = norm(obj?.tracking_number);
     const carrier = norm(obj?.tracking_company);
-    const shipped = isValidTrackingNumber(tracking);
+    const pickedTracking = trackingResult?.tracking || tracking;
+    const pickedCarrier = trackingResult?.carrier || carrier;
+    const shipped = Boolean(trackingResult?.shipped) || isValidTrackingNumber(pickedTracking);
 
-    return { tracking, carrier, shipped, raw: obj };
+    return {
+      tracking: pickedTracking,
+      carrier: pickedCarrier,
+      shipped,
+      raw: {
+        ...obj,
+        tracking_response: trackingResult?.raw || null,
+      },
+    };
   }
 
   throw new Error(`Merchize empty for ${orderId}`);
@@ -905,6 +1538,13 @@ function getLenfulExternalOrderId(doc = {}) {
   return norm(doc?.vendor_submissions?.lenful?.external_id);
 }
 
+function getLenfulDetailOrderId(doc = {}) {
+  return norm(
+    doc?.vendor_submissions?.lenful?.tracking_last_response?.order_id ||
+    doc?.vendor_submissions?.lenful?.order_id
+  );
+}
+
 function pickLenfulTracking(raw, orderId, doc = {}) {
   const rows = Array.isArray(raw?.data) ? raw.data : [];
   const trimmedOrderId = norm(orderId);
@@ -923,8 +1563,12 @@ function pickLenfulTracking(raw, orderId, doc = {}) {
 }
 
 async function fetchLenful(orderId, doc) {
-  const token = LENFUL_API_KEY || LENFUL_ACCESS_TOKEN || LENFUL_TOKEN;
+  const token = getLenfulToken();
   if (!token) throw new Error("Lenful missing API key (LENFUL_API_KEY)");
+  const headers = {
+    Authorization: `Bearer ${token}`,
+    Accept: "application/json",
+  };
 
   const res = await httpLenful.get("/api/order/trackings", {
     params: {
@@ -934,10 +1578,7 @@ async function fetchLenful(orderId, doc) {
       keyword_type: "order",
       sort_by: "create_at_desc",
     },
-    headers: {
-      Authorization: `Bearer ${token}`,
-      Accept: "application/json",
-    },
+    headers,
   });
 
   if (res.status === 401) {
@@ -947,7 +1588,29 @@ async function fetchLenful(orderId, doc) {
     throw new Error(`Lenful HTTP ${res.status}: ${res.data?.message || res.data?.error || "tracking failed"}`);
   }
 
-  return pickLenfulTracking(res.data, orderId, doc);
+  const picked = pickLenfulTracking(res.data, orderId, doc);
+  const detailOrderId = norm(picked?.raw?.order_id) || getLenfulDetailOrderId(doc);
+  if (!detailOrderId) return picked;
+
+  const detailRes = await httpLenful.get(`/api/order/${encodeURIComponent(detailOrderId)}`, {
+    headers,
+  });
+  if (detailRes.status === 401) {
+    throw new Error("Lenful unauthorized (401): check LENFUL_API_KEY");
+  }
+  if (detailRes.status >= 400) {
+    throw new Error(`Lenful HTTP ${detailRes.status}: ${detailRes.data?.message || detailRes.data?.error || "order detail failed"}`);
+  }
+
+  return {
+    ...picked,
+    raw: {
+      tracking: picked.raw,
+      detail: detailRes.data,
+      order_id: detailOrderId,
+      status: picked.raw?.status,
+    },
+  };
 }
 
 function buildLuxuryProTrackingUrl(orderId) {
@@ -1053,19 +1716,15 @@ function applyToItemsOfVendor(
 ) {
   let changed = 0;
   const sentVendorKeys = doc.__sentTrackingVendorKeys || [];
+  const targetIndexes = [];
 
-  doc.items = (doc.items || []).map((it) => {
-    const vpid = it?.cost_breakdown?.vendorProductId;
-    const cached = vpid ? doc.__vpidToVendor?.get(String(vpid)) : null;
-    const fulfillmentVendorKey = normalizeVendorKey(it?.tracking_info?.fulfillment);
-    const thisVendorKey =
-      sentVendorKeys.length === 1
-        ? sentVendorKeys[0]
-        : fulfillmentVendorKey || cached?.vendorKey || "";
+  doc.items = (doc.items || []).map((it, index) => {
+    const thisVendorKey = getItemVendorKey(doc, it, sentVendorKeys);
 
     if (thisVendorKey !== vendorKey) {
       return it.toObject?.() ? it.toObject() : it;
     }
+    targetIndexes.push(index);
 
     const ti = it.tracking_info || {};
     const prevTracking = norm(ti.tracking);
@@ -1093,6 +1752,28 @@ function applyToItemsOfVendor(
 
     return { ...(it.toObject?.() ? it.toObject() : it), tracking_info: nextTI };
   });
+
+  if (vendorKey === "beeful" && applyGrabinkActualCost(doc, raw, targetIndexes)) {
+    doc.__trackingPullCostChanged = true;
+  }
+  if (vendorKey === "lenful" && applyLenfulActualCost(doc, raw, targetIndexes)) {
+    doc.__trackingPullCostChanged = true;
+  }
+  if (vendorKey === "mangotee" && applyMangoTeeActualCost(doc, raw, targetIndexes)) {
+    doc.__trackingPullCostChanged = true;
+  }
+  if (vendorKey === "merchize" && applyMerchizeActualCost(doc, raw, targetIndexes)) {
+    doc.__trackingPullCostChanged = true;
+  }
+  if (vendorKey === "merchfox" && applyMerchFoxActualCost(doc, raw, targetIndexes)) {
+    doc.__trackingPullCostChanged = true;
+  }
+  if (vendorKey === "printway" && applyPrintwayActualCost(doc, raw, targetIndexes)) {
+    doc.__trackingPullCostChanged = true;
+  }
+  if (vendorKey === "onos" && applyOnosActualCost(doc, raw, targetIndexes)) {
+    doc.__trackingPullCostChanged = true;
+  }
 
   if (vendorKey === "beeful") {
     doc.beeful_submission = {
@@ -1159,7 +1840,7 @@ function applyToItemsOfVendor(
       ...(doc.vendor_submissions.lenful || {}),
       tracking_attempt_count: (doc.vendor_submissions.lenful?.tracking_attempt_count || 0) + 1,
       tracking_last_response: raw,
-      tracking_status: norm(raw?.status || ""),
+      tracking_status: norm(raw?.tracking?.status || raw?.status || ""),
     };
     if (typeof doc.markModified === "function") doc.markModified("vendor_submissions");
   }
@@ -1222,7 +1903,7 @@ async function updateOrderByVendors(orderId, vpidToVendorPrefetched = null) {
     orderStatusChanged = true;
   }
 
-  if (totalChanged > 0 || orderStatusChanged) {
+  if (totalChanged > 0 || orderStatusChanged || doc.__trackingPullCostChanged) {
     await doc.save();
     await logOrderLifecycleEvent(buildOrderLifecyclePayload({
       order: doc,
@@ -1231,7 +1912,11 @@ async function updateOrderByVendors(orderId, vpidToVendorPrefetched = null) {
       stage: "TRACKING_PULL",
       eventType: "TRACKING_UPDATED",
       status: "success",
-      metadata: { updatedItems: totalChanged, orderStatusChanged },
+      metadata: {
+        updatedItems: totalChanged,
+        orderStatusChanged,
+        costChanged: !!doc.__trackingPullCostChanged,
+      },
     }));
   }
   return { updatedItems: totalChanged, orderStatusChanged };
@@ -1308,19 +1993,15 @@ function applyToEtsyItemsOfVendor(doc, vendorKey, { tracking, carrier, shipped, 
   let changed = 0;
   const fulfillment = getVendorFulfillmentName(vendorKey);
   const sentVendorKeys = doc.__sentTrackingVendorKeys || [];
+  const targetIndexes = [];
 
-  doc.items = (doc.items || []).map((it) => {
-    const vpid = it?.cost_breakdown?.vendorProductId;
-    const cached = vpid ? doc.__vpidToVendor?.get(String(vpid)) : null;
-    const fulfillmentVendorKey = normalizeVendorKey(it?.tracking_info?.fulfillment);
-    const thisVendorKey =
-      sentVendorKeys.length === 1
-        ? sentVendorKeys[0]
-        : fulfillmentVendorKey || cached?.vendorKey || "";
+  doc.items = (doc.items || []).map((it, index) => {
+    const thisVendorKey = getItemVendorKey(doc, it, sentVendorKeys);
 
     if (thisVendorKey !== vendorKey) {
       return it.toObject?.() ? it.toObject() : it;
     }
+    targetIndexes.push(index);
 
     const ti = it.tracking_info || {};
     const prevTracking = norm(ti.tracking);
@@ -1345,6 +2026,28 @@ function applyToEtsyItemsOfVendor(doc, vendorKey, { tracking, carrier, shipped, 
 
     return { ...(it.toObject?.() ? it.toObject() : it), tracking_info: nextTI };
   });
+
+  if (vendorKey === "beeful" && applyGrabinkActualCost(doc, raw, targetIndexes)) {
+    doc.__trackingPullCostChanged = true;
+  }
+  if (vendorKey === "lenful" && applyLenfulActualCost(doc, raw, targetIndexes)) {
+    doc.__trackingPullCostChanged = true;
+  }
+  if (vendorKey === "mangotee" && applyMangoTeeActualCost(doc, raw, targetIndexes)) {
+    doc.__trackingPullCostChanged = true;
+  }
+  if (vendorKey === "merchize" && applyMerchizeActualCost(doc, raw, targetIndexes)) {
+    doc.__trackingPullCostChanged = true;
+  }
+  if (vendorKey === "merchfox" && applyMerchFoxActualCost(doc, raw, targetIndexes)) {
+    doc.__trackingPullCostChanged = true;
+  }
+  if (vendorKey === "printway" && applyPrintwayActualCost(doc, raw, targetIndexes)) {
+    doc.__trackingPullCostChanged = true;
+  }
+  if (vendorKey === "onos" && applyOnosActualCost(doc, raw, targetIndexes)) {
+    doc.__trackingPullCostChanged = true;
+  }
 
   if (vendorKey === "onos" && changed > 0) {
     doc.vendor_submissions = doc.vendor_submissions || {};
@@ -1430,7 +2133,7 @@ async function updateEtsyOrderByVendors(orderId, options = {}) {
     orderStatusChanged = true;
   }
 
-  if (totalChanged > 0 || orderStatusChanged) {
+  if (totalChanged > 0 || orderStatusChanged || doc.__trackingPullCostChanged) {
     await doc.save();
     await logOrderLifecycleEvent(buildOrderLifecyclePayload({
       order: doc,
@@ -1449,6 +2152,7 @@ async function updateEtsyOrderByVendors(orderId, options = {}) {
           shipped: !!result.shipped,
           message: result.message || "",
         })),
+        costChanged: !!doc.__trackingPullCostChanged,
       },
     }));
   }

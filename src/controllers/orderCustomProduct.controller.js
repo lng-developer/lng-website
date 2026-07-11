@@ -51,6 +51,20 @@ require("../config/env.config")();
 const ALLOWED = ["New", "Fulfilled", "Shipping", "Shipped", "Canceled", "Cancelled"];
 const isCanceledStatus = (s) => s === "Canceled" || s === "Cancelled";
 const norm = (s) => (ALLOWED.includes(s) ? s : "New");
+const IMPORT_SCALE_STATUS = "Need Scale";
+const ITEM_SCALE_STATUSES = new Set([IMPORT_SCALE_STATUS, "Pending", "Complete", "QC Rejected", "Cancelled"]);
+
+function normalizeImportedItemScaleStatuses(orderDoc) {
+  if (!orderDoc || !Array.isArray(orderDoc.items)) return false;
+  let changed = false;
+  for (const item of orderDoc.items) {
+    if (!ITEM_SCALE_STATUSES.has(item.scale_status)) {
+      item.scale_status = IMPORT_SCALE_STATUS;
+      changed = true;
+    }
+  }
+  return changed;
+}
 
 async function loadActiveSkuMappingConfigs() {
   const now = new Date();
@@ -1115,6 +1129,7 @@ const updateOrdersFromXlsx = async (req, res) => {
         customized_url: row.customized_url,
         quantity: Number(row.quantity_purchased || 1),
         asin: asin || null,
+        scale_status: IMPORT_SCALE_STATUS,
       };
 
       // ✅ Finance per row (item)
@@ -1165,6 +1180,9 @@ const updateOrdersFromXlsx = async (req, res) => {
       let skipProcessingZip = false;
 
       if (existing) {
+        if (normalizeImportedItemScaleStatuses(existing)) {
+          await existing.save();
+        }
         const exists = existing.items.some(
           (i) => i.orderItemId === itemData.orderItemId
         );
@@ -2048,6 +2066,11 @@ const getOrderStatistics = async (req, res) => {
           all: 0,
           new: 0,
           noCostCenter: 0,
+          noCostCenterByStatus: {
+            new: 0,
+            fulfilled: 0,
+            shipped: 0,
+          },
           noPsd: 0,
           paymentPending: 0,
           fulfilled: 0,
@@ -2082,6 +2105,11 @@ const getOrderStatistics = async (req, res) => {
           all: 0,
           new: 0,
           noCostCenter: 0,
+          noCostCenterByStatus: {
+            new: 0,
+            fulfilled: 0,
+            shipped: 0,
+          },
           noPsd: 0,
           paymentPending: 0,
           fulfilled: 0,
@@ -2114,6 +2142,15 @@ const getOrderStatistics = async (req, res) => {
         { status: { $ne: "Cancelled" } },
       ],
     };
+    const NO_COST_CENTER_NEW = {
+      $and: [...NO_COST_CENTER.$and, { status: "New" }],
+    };
+    const NO_COST_CENTER_FULFILLED = {
+      $and: [...NO_COST_CENTER.$and, { status: "Fulfilled" }],
+    };
+    const NO_COST_CENTER_SHIPPED = {
+      $and: [...NO_COST_CENTER.$and, { status: "Shipped" }],
+    };
 
     // ✅ matcher cho facet "noPsd" (không phụ thuộc populate)
     const NO_PSD_MATCH =
@@ -2135,6 +2172,9 @@ const getOrderStatistics = async (req, res) => {
           all: [{ $count: "c" }],
           new: [{ $match: { status: "New" } }, { $count: "c" }],
           noCostCenter: [{ $match: NO_COST_CENTER }, { $count: "c" }],
+          noCostCenterNew: [{ $match: NO_COST_CENTER_NEW }, { $count: "c" }],
+          noCostCenterFulfilled: [{ $match: NO_COST_CENTER_FULFILLED }, { $count: "c" }],
+          noCostCenterShipped: [{ $match: NO_COST_CENTER_SHIPPED }, { $count: "c" }],
 
           // ✅ NEW: No PSD count
           noPsd: [{ $match: NO_PSD_MATCH }, { $count: "c" }],
@@ -2164,6 +2204,11 @@ const getOrderStatistics = async (req, res) => {
           noCostCenter: {
             $ifNull: [{ $arrayElemAt: ["$noCostCenter.c", 0] }, 0],
           },
+          noCostCenterByStatus: {
+            new: { $ifNull: [{ $arrayElemAt: ["$noCostCenterNew.c", 0] }, 0] },
+            fulfilled: { $ifNull: [{ $arrayElemAt: ["$noCostCenterFulfilled.c", 0] }, 0] },
+            shipped: { $ifNull: [{ $arrayElemAt: ["$noCostCenterShipped.c", 0] }, 0] },
+          },
           noPsd: { $ifNull: [{ $arrayElemAt: ["$noPsd.c", 0] }, 0] },
 
           paymentPending: {
@@ -2186,6 +2231,11 @@ const getOrderStatistics = async (req, res) => {
         all: 0,
         new: 0,
         noCostCenter: 0,
+        noCostCenterByStatus: {
+          new: 0,
+          fulfilled: 0,
+          shipped: 0,
+        },
         noPsd: 0,
         paymentPending: 0,
         fulfilled: 0,
@@ -3580,6 +3630,7 @@ const computeBaseCostForOrder = async (req, res) => {
     if (!Array.isArray(order.items) || order.items.length === 0) {
       return res.status(400).json({ message: "Order has no items" });
     }
+    normalizeImportedItemScaleStatuses(order);
 
     const oldBaseCost = Number(order.base_cost || 0);
     const oldShippingGroups = Array.isArray(order.base_cost_shipping_groups)
@@ -4598,8 +4649,8 @@ const updateItemTracking = async (req, res) => {
         $set["items.$[].scale_status"] = "Complete";
         $set["scale_overall_status"] = "Sent";
       } else if (nextStatus === "Cancelled") {
-        // Scale item dùng "Failed" để bám bộ trạng thái sẵn có
-        $set["items.$[].scale_status"] = "Failed";
+        // Import/cancel reset keeps item scale_status inside the schema enum.
+        $set["items.$[].scale_status"] = IMPORT_SCALE_STATUS;
         $set["scale_overall_status"] = "Cancelled";
       }
       // (Các trạng thái khác nếu có, ta không ép scale_overall_status)

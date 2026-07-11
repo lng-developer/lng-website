@@ -35,6 +35,7 @@ jest.mock('axios', () => ({
 const axios = require('axios');
 const db = require('../../models');
 const FulfillmentService = require('../../service/fulfillment');
+const { uploadFilePathToR2 } = require('../../service/cloudflareR2/r2.service');
 const { logOrderHistory } = require('../../service/orderHistoryLogger');
 const { logOrderLifecycleEvent } = require('../../service/orderLifecycleLogger');
 const controller = require('../etsyOrder.controller');
@@ -271,6 +272,71 @@ describe('resetEtsyScaleForOrdersBulk', () => {
       total: 1,
       results: [{ orderId: 'ETSY-1001', status: 'success', scale_overall_status: 'Need Scale' }],
     });
+  });
+});
+
+describe('uploadEtsyFulfillmentFileForItem response diagnostics', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
+
+  test('returns uploaded file details and timing diagnostics', async () => {
+    uploadFilePathToR2.mockResolvedValue({
+      provider: 'cloudflare-r2',
+      bucket: 'bucket',
+      key: 'fulfillment_files/etsy-ETSY-1001-t1-front.png',
+      url: 'https://cdn.example/fulfillment_files/etsy-ETSY-1001-t1-front.png',
+      folder: 'fulfillment_files',
+      mimeType: 'image/png',
+      size: 2048,
+    });
+
+    const save = jest.fn().mockResolvedValue(true);
+    const markModified = jest.fn();
+    const order = {
+      orderId: 'ETSY-1001',
+      items: [{ transactionId: 't1', scale_status: 'Need Scale', fulfillment_file: {} }],
+      markModified,
+      save,
+    };
+    db.EtsyOrder.findOne.mockResolvedValue(order);
+
+    const req = {
+      params: { orderId: 'ETSY-1001', transactionId: 't1' },
+      query: {},
+      body: { meta: JSON.stringify([{ position: 'front' }]) },
+      files: [{
+        path: 'tmp_uploads/etsy_fulfillment/test-front.png',
+        originalname: 'front.png',
+        mimetype: 'image/png',
+        size: 2048,
+      }],
+      user: { _id: 'not-objectid', role: 'Admin' },
+    };
+    const res = makeRes();
+
+    await controller.uploadEtsyFulfillmentFileForItem[1](req, res);
+
+    expect(res.json).toHaveBeenCalledWith(expect.objectContaining({
+      message: 'Uploaded Etsy fulfillment files successfully',
+      uploaded_files: [expect.objectContaining({
+        position: 'front',
+        originalName: 'front.png',
+        size: 2048,
+        key: 'fulfillment_files/etsy-ETSY-1001-t1-front.png',
+        url: 'https://cdn.example/fulfillment_files/etsy-ETSY-1001-t1-front.png',
+        durationMs: expect.any(Number),
+      })],
+      diagnostics: expect.objectContaining({
+        orderId: 'ETSY-1001',
+        transactionId: 't1',
+        receivedFiles: 1,
+        uploadedFiles: 1,
+        totalBytes: 2048,
+        stage: 'completed',
+        durationMs: expect.any(Number),
+      }),
+    }));
   });
 });
 

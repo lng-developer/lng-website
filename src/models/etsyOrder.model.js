@@ -114,6 +114,8 @@ const EtsyOrderItemEmbeddedSchema = new Schema(
             ref: "VendorCostCenter",
             default: null,
         },
+
+        replace_meta: { type: Schema.Types.Mixed, default: undefined },
     },
     { _id: false }
 );
@@ -302,6 +304,7 @@ const EtsyOrderSchema = new Schema(
         numberOfItems: { type: Number, default: 0 },
         sumbittedoetsy: { type: Boolean, default: false },
         case: [{ type: Schema.Types.ObjectId, ref: "Case", required: true }],
+        replace_meta: { type: Schema.Types.Mixed, default: undefined },
 
         items: { type: [EtsyOrderItemEmbeddedSchema], default: [] },
         address_validation: {
