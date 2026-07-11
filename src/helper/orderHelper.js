@@ -566,10 +566,14 @@ function enrichOrder(order, listingMap, vendorMap) {
 function extractVersion3Data(item) {
     const surfaces = item.version3Data?.customizationInfo?.surfaces || [];
     return surfaces.flatMap((surface) =>
-      (surface.areas || []).map((area) => ({
-        label: area.label || area.name || "",
-        value: area.optionValue || area.text || area.numberValue || "",
-      }))
+      (surface.areas || []).map((area) => {
+        const value = area.optionValue || area.text || area.numberValue;
+        return {
+          ...area,
+          label: area.label || area.name || "",
+          value: value ?? "",
+        };
+      })
     );
 }
 
