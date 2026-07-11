@@ -20,9 +20,14 @@ function loadEnv() {
   const envFile = getEnvFile();
   const envPath = path.resolve(process.cwd(), envFile);
   const fallbackPath = path.resolve(process.cwd(), ".env");
+  const envName = String(process.env.NODE_ENV || "").trim().toLowerCase();
 
   if (fs.existsSync(envPath)) {
     dotenv.config({ path: envPath, quiet: true });
+  } else if (envName === "production") {
+    if (!process.env.MONGO_URI || !process.env.DB_NAME) {
+      throw new Error(`${envFile} not found and MONGO_URI/DB_NAME are not set`);
+    }
   } else if (envPath !== fallbackPath && fs.existsSync(fallbackPath)) {
     dotenv.config({ path: fallbackPath, quiet: true });
   } else {

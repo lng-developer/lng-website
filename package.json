@@ -7,9 +7,11 @@
     "test": "jest",
     "test:onos": "set NODE_ENV=test&& node scripts/onos.smoke-test.js",
     "start": "node server.js",
+    "start:prod": "set NODE_ENV=production&& node server.js",
     "start:test": "set NODE_ENV=test&& node server.js",
     "dev:test": "set NODE_ENV=test&& nodemon server.js",
-    "dev": "nodemon server.js"
+    "dev:prod": "set NODE_ENV=production&& nodemon server.js",
+    "dev": "npm run dev:test"
   },
   "keywords": [],
   "author": "",
