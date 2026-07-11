@@ -8,7 +8,7 @@ jest.mock("../../models", () => ({
 }));
 
 const db = require("../../models");
-const { buildFilters, buildPipeline, executePipeline } = require("../orderHelper");
+const { buildFilters, buildPipeline, executePipeline, enrichOrdersData } = require("../orderHelper");
 
 describe("orderHelper executePipeline", () => {
   beforeEach(() => {
@@ -71,6 +71,49 @@ describe("orderHelper buildFilters", () => {
     expect(buildFilters({ status: "New", isNoCostCenter: "true" })).toEqual([
       { status: { $in: ["New"] } },
       { base_cost: { $in: [null, 0] } },
+    ]);
+  });
+});
+
+describe("orderHelper enrichOrdersData", () => {
+  test("keeps full version3 customization area fields for FE orders", async () => {
+    const [order] = await enrichOrdersData([
+      {
+        orderId: "114-5797564-5559402",
+        items: [
+          {
+            orderItemId: "164336876284961",
+            version3Data: {
+              customizationInfo: {
+                surfaces: [
+                  {
+                    areas: [
+                      {
+                        label: "Custom Name",
+                        text: "Mrs. Adams",
+                        fontFamily: "Lora",
+                        Dimensions: { width: 100, height: 20 },
+                        Position: { x: 12, y: 34 },
+                      },
+                    ],
+                  },
+                ],
+              },
+            },
+          },
+        ],
+      },
+    ]);
+
+    expect(order.items[0].version3Data).toEqual([
+      expect.objectContaining({
+        label: "Custom Name",
+        value: "Mrs. Adams",
+        text: "Mrs. Adams",
+        fontFamily: "Lora",
+        Dimensions: { width: 100, height: 20 },
+        Position: { x: 12, y: 34 },
+      }),
     ]);
   });
 });
