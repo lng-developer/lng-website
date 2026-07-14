@@ -271,7 +271,7 @@ const getEtsyReportMatrix = async (req, res) => {
       S.items[idx] = r.items || 0;
       S.revenue[idx] = +(r.revenue || 0).toFixed(2);
       S.baseCost[idx] = +(r.baseCost || 0).toFixed(2);
-      S.fee[idx] = +(r.fee || 0).toFixed(2);
+      S.fee[idx] = +(S.revenue[idx] * 0.21).toFixed(2);
       S.refund[idx] = +(r.refund || 0).toFixed(2);
       S.shippingTax[idx] = +(r.shipping_tax || 0).toFixed(2); // Actually mapping 'shipping' here
       S.itemPromotionDiscount[idx] = +(Math.abs(r.item_promotion_discount) || 0).toFixed(2);
