@@ -1,6 +1,6 @@
 const db = require("../models");
 const EtsyOrder = db.EtsyOrder;
-const AdsDailySummary = db.Ads;
+const EtsyAdsDailySummary = db.EtsyAdsDailySummary;
 const User = db.user;
 const Team = db.Team;
 const mongoose = require("mongoose");
@@ -23,6 +23,21 @@ const makeDayList = (fromISO, toISO) => {
 const iso = (d) => d.toISOString();
 const pad2 = (n) => String(n).padStart(2, "0");
 const labelDDMM = (d) => `${pad2(d.getUTCDate())}-${pad2(d.getUTCMonth() + 1)}`;
+const normalizeSellerKey = (value) => String(value || "").trim().toLowerCase();
+const makeMetricSeries = (zeroArr) => ({
+  fee: zeroArr(),
+  opCost: zeroArr(),
+  refund: zeroArr(),
+  items: zeroArr(),
+  revenue: zeroArr(),
+  baseCost: zeroArr(),
+  ads: zeroArr(),
+  shippingTax: zeroArr(),
+  itemPromotionDiscount: zeroArr(),
+  itemTax: zeroArr(),
+  profit1: zeroArr(),
+  profit2: zeroArr(),
+});
 
 const getEtsyReportMatrix = async (req, res) => {
   try {
@@ -159,26 +174,80 @@ const getEtsyReportMatrix = async (req, res) => {
       },
       { $sort: { "_id.day": 1 } },
     ]);
-    // ===== 4) Fetch Ads (similar logic to Amazon) =====
-    // const adsDocs = await AdsDailySummary.find(
-    //   { day: { $gte: dayList[0], $lte: dayList[dayList.length - 1] } },
-    //   { day: 1, by_seller: 1 }
-    // ).lean();
+    // ===== 4) Fetch Ads from EtsyAdsDailySummary =====
+    const adsDocs = await EtsyAdsDailySummary.find(
+      { day: { $gte: dayList[0], $lte: dayList[dayList.length - 1] } },
+      { day: 1, rows: 1 },
+    ).lean();
 
-    // const adsMap = new Map();
-    // for (const doc of adsDocs) {
-    //   const dayIso = iso(doc.day);
-    //   for (const row of doc.by_seller || []) {
-    //     const sid = row?.seller?._id;
-    //     if (!sid) continue;
-    //     if (sellerIdSet && !sellerIdSet.has(String(sid))) continue;
-    //     const key = `${String(sid)}|${dayIso}`;
-    //     adsMap.set(key, {
-    //       spend: Number(row.spend || 0),
-    //       sellerName: row.seller.full_name || "Unknown",
-    //     });
-    //   }
-    // }
+    const adsSellerKeys = new Set();
+    for (const doc of adsDocs) {
+      for (const row of doc.rows || []) {
+        const sellerKey = String(row?.seller || "").trim();
+        if (sellerKey) adsSellerKeys.add(sellerKey);
+      }
+    }
+
+    const adsSellerLookupKeys = Array.from(
+      new Set(
+        Array.from(adsSellerKeys).flatMap((key) => [
+          key,
+          key.toUpperCase(),
+          key.toLowerCase(),
+        ]),
+      ),
+    );
+
+    const adsSellerDocs = adsSellerLookupKeys.length
+      ? await User.find(
+          {
+            $or: [
+              { employee_id: { $in: adsSellerLookupKeys } },
+              { full_name: { $in: adsSellerLookupKeys } },
+            ],
+          },
+          { _id: 1, full_name: 1, employee_id: 1 },
+        ).lean()
+      : [];
+
+    const sellerByAdsKey = new Map();
+    for (const sellerDoc of adsSellerDocs) {
+      const sellerInfo = {
+        sellerId: String(sellerDoc._id),
+        sellerName: sellerDoc.full_name || sellerDoc.employee_id || "Unknown",
+      };
+      if (sellerDoc.employee_id) {
+        sellerByAdsKey.set(normalizeSellerKey(sellerDoc.employee_id), sellerInfo);
+      }
+      if (sellerDoc.full_name) {
+        sellerByAdsKey.set(normalizeSellerKey(sellerDoc.full_name), sellerInfo);
+      }
+    }
+
+    const adsMap = new Map();
+    for (const doc of adsDocs) {
+      const dayIso = iso(new Date(doc.day));
+      for (const row of doc.rows || []) {
+        const spend = Number(row?.spend || 0);
+        if (!Number.isFinite(spend) || spend === 0) continue;
+
+        const sellerKey = String(row?.seller || "").trim();
+        const sellerInfo = sellerByAdsKey.get(normalizeSellerKey(sellerKey));
+        const sid = sellerInfo?.sellerId || "";
+
+        if (sellerIdSet && (!sid || !sellerIdSet.has(String(sid)))) continue;
+
+        const mapSellerKey = sid || `unknown:${sellerKey || "Unknown"}`;
+        const key = `${mapSellerKey}|${dayIso}`;
+        const current = adsMap.get(key) || {
+          spend: 0,
+          sellerId: sid,
+          sellerName: sellerInfo?.sellerName || sellerKey || "Unknown",
+        };
+        current.spend += spend;
+        adsMap.set(key, current);
+      }
+    }
 
     // ===== 5) Group results =====
     const result = {};
@@ -195,7 +264,7 @@ const getEtsyReportMatrix = async (req, res) => {
       }
 
       if (!result[sellerName]) {
-        result[sellerName] = { fee: zeroArr(), opCost: zeroArr(), refund: zeroArr(), items: zeroArr(), revenue: zeroArr(), baseCost: zeroArr(), ads: zeroArr(), shippingTax: zeroArr(), itemPromotionDiscount: zeroArr(), itemTax: zeroArr(), profit1: zeroArr(), profit2: zeroArr() };
+        result[sellerName] = makeMetricSeries(zeroArr);
       }
 
       const S = result[sellerName];
@@ -211,18 +280,22 @@ const getEtsyReportMatrix = async (req, res) => {
     }
 
     // ===== 6) Overwrite Ads =====
-    // for (const [key, val] of adsMap.entries()) {
-    //   const [sid, dayIso] = key.split("|");
-    //   const idx = dayIndex.get(dayIso);
-    //   if (idx == null) continue;
-    //   const sellerName = val.sellerName || "Unknown";
-    //   if (!sellerNameToId.has(sellerName) && sid) sellerNameToId.set(sellerName, String(sid));
+    for (const [key, val] of adsMap.entries()) {
+      const splitAt = key.lastIndexOf("|");
+      const dayIso = key.slice(splitAt + 1);
+      const idx = dayIndex.get(dayIso);
+      if (idx == null) continue;
 
-    //   if (!result[sellerName]) {
-    //     result[sellerName] = { fee: zeroArr(), opCost: zeroArr(), refund: zeroArr(), items: zeroArr(), revenue: zeroArr(), baseCost: zeroArr(), ads: zeroArr(), shippingTax: zeroArr(), itemPromotionDiscount: zeroArr(), itemTax: zeroArr(), profit1: zeroArr(), profit2: zeroArr() };
-    //   }
-    //   result[sellerName].ads[idx] = +(val.spend || 0).toFixed(2);
-    // }
+      const sellerName = val.sellerName || "Unknown";
+      if (!sellerNameToId.has(sellerName) && val.sellerId) {
+        sellerNameToId.set(sellerName, String(val.sellerId));
+      }
+
+      if (!result[sellerName]) {
+        result[sellerName] = makeMetricSeries(zeroArr);
+      }
+      result[sellerName].ads[idx] = +(val.spend || 0).toFixed(2);
+    }
 
     // ===== 6.5) Compute OpCost (Start/End Work Day logic) =====
     const fixedOpCost = Number(OPCOST_PER_PERSON_PER_DAY);
