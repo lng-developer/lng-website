@@ -48,7 +48,6 @@ router.get(
 // ✅ Route mới: FE gửi task UPLOAD_TRACKING thủ công
 router.post(
   "/manual-upload-task",
-  authenticateToken,
   shippingBatchController.manualUploadTask
 );
 
@@ -61,7 +60,6 @@ router.get(
 // ✅ Route mới: FE tạo batch từ danh sách orders
 router.post(
   "/create-from-orders",
-  authenticateToken,
   shippingBatchController.createBatchFromOrders
 );
 
