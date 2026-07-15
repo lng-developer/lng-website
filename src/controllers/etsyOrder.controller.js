@@ -2053,6 +2053,80 @@ const computeMissingBaseCostsForEtsyOrders = async (req, res) => {
     }
 };
 
+const updateBaseCostForEtsyOrder = async (req, res) => {
+    try {
+        const { orderId, base_cost } = req.body;
+
+        if (!orderId || base_cost === undefined || base_cost === null) {
+            return res.status(400).json({ message: "Missing orderId or base cost" });
+        }
+
+        if (typeof base_cost !== "number" || base_cost <= 0) {
+            return res
+                .status(400)
+                .json({ message: "Base Cost must be a positive number" });
+        }
+
+        const order = await EtsyOrder.findOne({ orderId });
+        if (!order) {
+            return res.status(404).json({ message: "Etsy order not found" });
+        }
+
+        const oldBaseCost = Number(order.base_cost || 0);
+        order.base_cost = base_cost;
+        await order.save();
+
+        if (oldBaseCost !== Number(base_cost)) {
+            await logOrderHistory({
+                orderDoc: order,
+                action: "UPDATE_BASE_COST",
+                description: "Etsy order base cost manually updated",
+                changes: [
+                    {
+                        field: "base_cost",
+                        from: oldBaseCost,
+                        to: base_cost,
+                    },
+                ],
+                user: req.user,
+                context: {
+                    source: "PORTAL",
+                    ip: req.ip,
+                    userAgent: req.headers["user-agent"],
+                },
+            });
+
+            await logOrderLifecycleEvent({
+                platform: "etsy",
+                orderId,
+                orderObjectId: order._id,
+                shopId: order.shopId || null,
+                stage: "BASE_COST",
+                eventType: "ORDER_BASE_COST_UPDATED",
+                status: "success",
+                actorType: "user",
+                actorId: req.user?._id,
+                actorName: req.user?.name || req.user?.email || "",
+                metadata: {
+                    oldBaseCost,
+                    newBaseCost: base_cost,
+                },
+            });
+        }
+
+        return res.status(200).json({
+            message: "Etsy order base cost updated successfully",
+            orderId,
+            newBaseCost: base_cost,
+        });
+    } catch (error) {
+        return res.status(500).json({
+            message: "Failed to update Etsy order base cost",
+            error: error.message,
+        });
+    }
+};
+
 const resetBaseCostForEtsyOrder = async (req, res) => {
     try {
         const { orderId } = req.body;
@@ -6623,6 +6697,7 @@ module.exports = {
     getListOrders,
     computeBaseCostForEtsyOrder,
     computeMissingBaseCostsForEtsyOrders,
+    updateBaseCostForEtsyOrder,
     resetBaseCostForEtsyOrder,
     getEtsyOrderStatistics,
     createOrder,

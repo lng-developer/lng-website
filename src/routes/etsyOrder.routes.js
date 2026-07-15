@@ -71,6 +71,7 @@ router.post(
 );
 router.patch('/sumbittedoetsy', etsyOrderController.updateSumbittedoetsyStatus);
 router.put('/manual-mapping', authenticateToken, orderCustomProductController.applyManualVendorMapping);
+router.put('/update-base-cost', authenticateToken, etsyOrderController.updateBaseCostForEtsyOrder);
 router.put('/reset-base-cost', authenticateToken, etsyOrderController.resetBaseCostForEtsyOrder);
 router.post('/compute-base-cost/batch', authenticateToken, etsyOrderController.computeMissingBaseCostsForEtsyOrders);
 router.put('/scale/orders/reset/bulk', authenticateToken, etsyOrderController.resetEtsyScaleForOrdersBulk);
