@@ -2,6 +2,7 @@
 const db = require("../models");
 const EtsyAdsDailySummary = db.EtsyAdsDailySummary;
 const EtsyOrder = db.EtsyOrder;
+const User = db.user;
 const EtsyListing = require("../models/etsyListing.model");
 const mongoose = require("mongoose");
 
@@ -14,6 +15,7 @@ const toNum = (v) => {
 };
 const round2 = (v) => +toNum(v).toFixed(2);
 const centsToUsd = (v) => round2(toNum(v) / 100);
+const normalizeSellerKey = (value) => String(value || "").trim().toLowerCase();
 
 const uniqueStrings = (values = []) =>
   Array.from(new Set(values.map((value) => String(value || "").trim()).filter(Boolean)));
@@ -59,6 +61,80 @@ const deriveSellerFromSku = (sku) => {
   if (!s) return "";
   const token = s.split("-")[0]?.trim();
   return token || s.slice(0, 5);
+};
+
+const buildEmployeeLookup = (users = []) => {
+  const map = new Map();
+
+  for (const user of users || []) {
+    const employeeCode = String(user?.employee_id || "").trim();
+    const employeeName = String(user?.full_name || "").trim();
+    const employeeInfo = {
+      employeeId: user?._id ? String(user._id) : "",
+      employeeCode,
+      employeeName: employeeName || employeeCode || "Unknown",
+    };
+
+    if (employeeCode) map.set(normalizeSellerKey(employeeCode), employeeInfo);
+    if (employeeName) map.set(normalizeSellerKey(employeeName), employeeInfo);
+  }
+
+  return map;
+};
+
+const buildEtsyAdsByEmployeeItems = (docs = [], users = []) => {
+  const employeeLookup = buildEmployeeLookup(users);
+  const grouped = new Map();
+
+  for (const doc of docs || []) {
+    for (const row of doc.rows || []) {
+      const rawSeller = String(row?.seller || "").trim();
+      const employeeInfo = employeeLookup.get(normalizeSellerKey(rawSeller));
+      const employeeCode = employeeInfo?.employeeCode || rawSeller || "Unknown";
+      const employeeName = employeeInfo?.employeeName || rawSeller || "Unknown";
+      const groupKey = employeeInfo?.employeeCode || rawSeller || "Unknown";
+
+      if (!grouped.has(groupKey)) {
+        grouped.set(groupKey, {
+          employeeCode,
+          employeeName,
+          sellerKey: groupKey,
+          totals: {
+            rows: 0,
+            spend: 0,
+            views: 0,
+            clicks: 0,
+            orders: 0,
+            revenue: 0,
+            roas: 0,
+          },
+          details: [],
+        });
+      }
+
+      const group = grouped.get(groupKey);
+      const detail = {
+        day: doc.day,
+        shopId: doc.shopId,
+        etsyShopId: doc.etsyShopId,
+        shopName: doc.shopName,
+        ...row,
+      };
+
+      group.details.push(detail);
+      group.totals.rows += 1;
+      group.totals.spend = round2(group.totals.spend + toNum(row?.spend));
+      group.totals.views += toNum(row?.views);
+      group.totals.clicks += toNum(row?.clicks);
+      group.totals.orders += toNum(row?.orders);
+      group.totals.revenue = round2(group.totals.revenue + toNum(row?.revenue));
+      group.totals.roas = group.totals.spend > 0 ? round2(group.totals.revenue / group.totals.spend) : 0;
+    }
+  }
+
+  return Array.from(grouped.values()).sort((a, b) =>
+    String(a.employeeCode || "").localeCompare(String(b.employeeCode || ""))
+  );
 };
 
 async function buildListingSkuMapFromOrders(listingIds = [], shopId) {
@@ -598,6 +674,54 @@ const listEtsyAds = async (req, res) => {
 };
 
 /**
+ * GET /api/etsy-ads/by-employee?from=YYYY-MM-DD&to=YYYY-MM-DD&shopId=<id>
+ * Cung param voi listEtsyAds, nhung group rows theo ma nhan vien.
+ */
+const listEtsyAdsByEmployee = async (req, res) => {
+  try {
+    const { from, to, shopId } = req.query;
+    const q = {};
+    if (from || to) {
+      q.day = {};
+      if (from) q.day.$gte = utcDay(new Date(from));
+      if (to) q.day.$lte = utcDay(new Date(to));
+    }
+    if (shopId && mongoose.Types.ObjectId.isValid(shopId)) {
+      q.shopId = new mongoose.Types.ObjectId(shopId);
+    }
+
+    const docs = await EtsyAdsDailySummary.find(q)
+      .sort({ day: -1 })
+      .lean();
+
+    const sellerKeys = uniqueStrings(
+      docs.flatMap((doc) => (doc.rows || []).map((row) => row?.seller))
+    );
+    const users = sellerKeys.length
+      ? await User.find(
+          {
+            $or: [
+              { employee_id: { $in: sellerKeys } },
+              { full_name: { $in: sellerKeys } },
+            ],
+          },
+          { _id: 1, employee_id: 1, full_name: 1 }
+        ).lean()
+      : [];
+
+    const items = buildEtsyAdsByEmployeeItems(docs, users);
+
+    return res.json({
+      ok: true,
+      count: items.length,
+      items,
+    });
+  } catch (err) {
+    return res.status(500).json({ ok: false, message: err.message });
+  }
+};
+
+/**
  * GET /api/etsy-ads/:id
  * Detail 1 doc đầy đủ kèm rawStats + rawListing cho từng row.
  */
@@ -620,5 +744,7 @@ const getEtsyAdsDetail = async (req, res) => {
 module.exports = {
   importEtsyAds,
   listEtsyAds,
+  listEtsyAdsByEmployee,
   getEtsyAdsDetail,
+  buildEtsyAdsByEmployeeItems,
 };
