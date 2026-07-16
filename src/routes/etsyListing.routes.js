@@ -7,6 +7,7 @@ const etsyListingController = require("../controllers/etsyListing.controller");
 const upload = multer({ dest: "tmp_uploads/" });
 
 router.get("/sync-status", etsyListingController.getEtsyListingSyncStatus);
+router.get("/", etsyListingController.listEtsyListings);
 router.get("/:id", etsyListingController.getEtsyListingDetail);
 router.post("/sync", etsyListingController.syncEtsyListings);
 

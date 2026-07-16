@@ -199,6 +199,106 @@ const toListingDetailResponse = (listing) => ({
     updatedAt: listing.updatedAt || null,
 });
 
+const escapeRegex = (value) => String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+const parsePositiveInt = (value, fallback, max) => {
+    const parsed = Number.parseInt(value, 10);
+    if (!Number.isFinite(parsed) || parsed < 1) return fallback;
+    return max ? Math.min(parsed, max) : parsed;
+};
+
+const buildEtsyListingQuery = ({ search, stock, shopId } = {}) => {
+    const query = {};
+    const andConditions = [];
+    const searchText = String(search || "").trim();
+    const stockFilter = String(stock || "").trim().toLowerCase();
+    const shopIdText = String(shopId || "").trim();
+
+    if (shopIdText) {
+        if (!mongoose.Types.ObjectId.isValid(shopIdText)) {
+            const err = new Error("shopId invalid");
+            err.statusCode = 400;
+            throw err;
+        }
+        query.shopId = new mongoose.Types.ObjectId(shopIdText);
+    }
+
+    if (searchText) {
+        const regex = new RegExp(escapeRegex(searchText), "i");
+        andConditions.push({
+            $or: [
+                { listingId: regex },
+                { title: regex },
+                { SKU: regex },
+                { sku: regex },
+                { skus: regex },
+                { shopName: regex },
+                { etsyShopId: regex },
+            ],
+        });
+    }
+
+    if (stockFilter === "in_stock" || stockFilter === "instock" || stockFilter === "available") {
+        andConditions.push({
+            $or: [
+                { "raw.quantity": { $gt: 0 } },
+                { "raw.raw.quantity": { $gt: 0 } },
+            ],
+        });
+    } else if (stockFilter === "out_of_stock" || stockFilter === "outofstock" || stockFilter === "empty") {
+        andConditions.push({
+            $or: [
+                { "raw.quantity": { $lte: 0 } },
+                { "raw.raw.quantity": { $lte: 0 } },
+                { "raw.quantity": { $exists: false }, "raw.raw.quantity": { $exists: false } },
+            ],
+        });
+    }
+
+    if (andConditions.length) {
+        query.$and = andConditions;
+    }
+
+    return query;
+};
+
+const listEtsyListings = async (req, res) => {
+    try {
+        const page = parsePositiveInt(req.query?.page, 1);
+        const perPage = parsePositiveInt(req.query?.perPage || req.query?.limit, 20, 200);
+        const skip = (page - 1) * perPage;
+        const query = buildEtsyListingQuery(req.query || {});
+
+        const [listings, total] = await Promise.all([
+            EtsyListing.find(query)
+                .sort({ updatedAt: -1, _id: -1 })
+                .skip(skip)
+                .limit(perPage)
+                .lean(),
+            EtsyListing.countDocuments(query),
+        ]);
+
+        return res.json({
+            ok: true,
+            data: listings.map(toListingDetailResponse),
+            pagination: {
+                page,
+                perPage,
+                total,
+                totalPages: Math.ceil(total / perPage),
+            },
+        });
+    } catch (error) {
+        const statusCode = error.statusCode || 500;
+        console.error("listEtsyListings error:", error);
+        return res.status(statusCode).json({
+            ok: false,
+            message: statusCode === 400 ? error.message : "List Etsy listings failed",
+            ...(statusCode === 500 ? { error: error.message } : {}),
+        });
+    }
+};
+
 const getEtsyListingDetail = async (req, res) => {
     try {
         const { id } = req.params || {};
@@ -392,4 +492,5 @@ module.exports = {
     syncEtsyListings,
     getEtsyListingSyncStatus,
     getEtsyListingDetail,
+    listEtsyListings,
 };
