@@ -173,6 +173,60 @@ const normalizeListingMasterRow = (listing) => {
     };
 };
 
+const firstFiniteNumber = (...values) => {
+    for (const value of values) {
+        if (value == null || value === "") continue;
+        const number = typeof value === "number"
+            ? value
+            : Number(String(value).replace(/[^0-9.-]/g, ""));
+        if (Number.isFinite(number)) return number;
+    }
+
+    return null;
+};
+
+const toListingDetailResponse = (listing) => ({
+    _id: String(listing._id),
+    shopId: listing.shopId ? String(listing.shopId) : "",
+    etsyShopId: listing.etsyShopId || "",
+    shopName: listing.shopName || "",
+    listingId: listing.listingId || "",
+    title: listing.title || "",
+    SKU: listing.SKU || listing.sku || "",
+    price: firstFiniteNumber(listing.price, listing.raw?.price, listing.raw?.raw?.price),
+    quantity: firstFiniteNumber(listing.quantity, listing.raw?.quantity, listing.raw?.raw?.quantity),
+    syncedAt: listing.syncedAt || null,
+    updatedAt: listing.updatedAt || null,
+});
+
+const getEtsyListingDetail = async (req, res) => {
+    try {
+        const { id } = req.params || {};
+
+        if (!mongoose.Types.ObjectId.isValid(id)) {
+            return res.status(400).json({ ok: false, message: "id invalid" });
+        }
+
+        const listing = await EtsyListing.findById(id).lean();
+
+        if (!listing) {
+            return res.status(404).json({ ok: false, message: "Etsy listing not found" });
+        }
+
+        return res.json({
+            ok: true,
+            data: toListingDetailResponse(listing),
+        });
+    } catch (error) {
+        console.error("getEtsyListingDetail error:", error);
+        return res.status(500).json({
+            ok: false,
+            message: "Get Etsy listing detail failed",
+            error: error.message,
+        });
+    }
+};
+
 const syncEtsyListings = async (req, res) => {
     try {
         const {
@@ -337,4 +391,5 @@ module.exports = {
     parseEtsyListingFile,
     syncEtsyListings,
     getEtsyListingSyncStatus,
+    getEtsyListingDetail,
 };
