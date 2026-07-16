@@ -127,7 +127,6 @@ function buildShopifyOrdersQueryString({ from, to, includeFulfillmentStatus = tr
         `created_at:>=${from}`,
         `created_at:<=${to}`,
         "financial_status:paid",
-        includeFulfillmentStatus ? "fulfillment_status:unfulfilled" : "",
     ].filter(Boolean).join(" ");
 }
 
