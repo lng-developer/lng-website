@@ -17,6 +17,11 @@ router.post(
   shopifyController.handleOrderUpdatedWebhook
 );
 router.post(
+  "/webhooks/orders-cancelled",
+  verifyShopifyWebhook,
+  shopifyController.handleOrderCancelledWebhook
+);
+router.post(
  "/webhooks/register",
  shopifyController.registerShopifyWebhook
 );

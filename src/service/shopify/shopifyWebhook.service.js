@@ -77,8 +77,47 @@ async function createOrdersUpdatedWebhook() {
     return data.webhookSubscriptionCreate;
 }
 
+async function createOrdersCancelledWebhook() {
+
+    const mutation = `
+    mutation CreateOrdersCancelledWebhook {
+        webhookSubscriptionCreate(
+            topic: ORDERS_CANCELLED,
+            webhookSubscription: {
+                callbackUrl: "https://api.lngmerch.co/api/shopify/webhooks/orders-cancelled",
+                format: JSON
+            }
+        ) {
+            webhookSubscription {
+                id
+                topic
+                callbackUrl
+            }
+
+            userErrors {
+                field
+                message
+            }
+        }
+    }
+    `;
+
+
+    const data = await shopifyGraphQL(mutation);
+
+
+    console.log(
+        "[SHOPIFY][WEBHOOK][CANCELLED]",
+        JSON.stringify(data, null, 2)
+    );
+
+
+    return data.webhookSubscriptionCreate;
+}
+
 
 module.exports = {
     createOrdersCreateWebhook,
     createOrdersUpdatedWebhook,
+    createOrdersCancelledWebhook,
 };
