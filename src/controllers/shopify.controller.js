@@ -11,6 +11,7 @@ const OrderProductShopify = db.orderProductShopify;
 const {
     createOrdersCreateWebhook,
     createOrdersUpdatedWebhook,
+    createOrdersCancelledWebhook,
 } = require("../service/shopify/shopifyWebhook.service");
 
 
@@ -22,6 +23,8 @@ const registerShopifyWebhook = async(req,res)=>{
             await createOrdersCreateWebhook();
         const ordersUpdated =
             await createOrdersUpdatedWebhook();
+        const ordersCancelled =
+            await createOrdersCancelledWebhook();
 
 
         return res.json({
@@ -29,6 +32,7 @@ const registerShopifyWebhook = async(req,res)=>{
             result: {
                 ordersCreate,
                 ordersUpdated,
+                ordersCancelled,
             },
         });
 
@@ -668,11 +672,56 @@ const handleOrderUpdatedWebhook = async (req, res) => {
     });
 };
 
+const handleOrderCancelledWebhook = async (req, res) => {
+    if (!req.body) {
+        return res.status(400).json({
+            ok: false,
+            message: "Missing webhook payload",
+        });
+    }
+
+    const shopifyOrderId = String(req.body.id || "");
+    const existingOrder = await OrderProductShopify.findOne({
+        shopifyOrderId,
+    });
+
+    if (!existingOrder) {
+        return res.status(200).json({
+            ok: true,
+            cancelled: false,
+            reason: "ORDER_NOT_FOUND",
+        });
+    }
+
+    const normalizedOrder = normalizeWebhookOrder(req.body);
+
+    existingOrder.processStatus = "cancelled";
+    existingOrder.financialStatus = normalizedOrder.displayFinancialStatus;
+    existingOrder.fulfillmentStatus = normalizedOrder.displayFulfillmentStatus;
+    existingOrder.updatedAtShopify = normalizedOrder.updatedAt ? new Date(normalizedOrder.updatedAt) : null;
+    existingOrder.lastShopifySyncAt = new Date();
+    existingOrder.rawShopifyOrder = req.body;
+
+    await existingOrder.save();
+
+    console.log("[SHOPIFY][WEBHOOK][ORDER_CANCELLED]", {
+        shopifyOrderId,
+        shopifyOrderName: req.body.name || existingOrder.shopifyOrderName || "",
+    });
+
+    return res.status(200).json({
+        ok: true,
+        cancelled: true,
+        shopifyOrderId,
+    });
+};
+
 module.exports = {
     testConnection,
     importOrdersDryRun,
     handleOrderCreatedWebhook,
     handleOrderUpdatedWebhook,
+    handleOrderCancelledWebhook,
     normalizeWebhookOrder,
     registerShopifyWebhook
 };
