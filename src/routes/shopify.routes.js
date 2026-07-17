@@ -11,5 +11,8 @@ router.post(
   verifyShopifyWebhook,
   shopifyController.handleOrderCreatedWebhook
 );
-
+router.post(
+ "/webhooks/register",
+ shopifyController.registerShopifyWebhook
+);
 module.exports = router;

@@ -30,6 +30,12 @@ function verifyShopifyWebhook(req, res, next) {
   }
 
   if (!crypto.timingSafeEqual(digestBuffer, hmacBuffer)) {
+    console.log("[SHOPIFY][HMAC_DEBUG]", {
+      received: hmacHeader,
+      calculated: digest,
+      rawLength: req.rawBody?.length,
+      contentLength: req.headers["content-length"],
+    });
     return rejectInvalidWebhook(req, res);
   }
 
