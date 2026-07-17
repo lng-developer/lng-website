@@ -644,6 +644,16 @@ const handleOrderUpdatedWebhook = async (req, res) => {
 
     const normalizedOrder = normalizeWebhookOrder(req.body);
 
+    if (req.body.cancelled_at) {
+        existingOrder.processStatus = "cancelled";
+        console.log("[SHOPIFY][WEBHOOK][ORDER_CANCEL_DETECTED_FROM_UPDATE]", {
+            shopifyOrderId,
+            shopifyOrderName: req.body.name,
+            cancelReason: req.body.cancel_reason || null,
+            cancelledAt: req.body.cancelled_at,
+        });
+    }
+
     existingOrder.customer = normalizedOrder.customer;
     existingOrder.email = normalizedOrder.email;
     existingOrder.phone = normalizedOrder.phone;
