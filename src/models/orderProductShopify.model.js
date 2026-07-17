@@ -108,6 +108,17 @@ const orderProductShopifySchema = new mongoose.Schema(
 
     financialStatus: String,
     fulfillmentStatus: String,
+    fulfillmentOrderId: String,
+
+    trackingInfo: {
+      fulfillmentId: String,
+      status: String,
+      trackingNumber: String,
+      trackingCompany: String,
+      trackingUrl: String,
+      createdAt: Date,
+      updatedAt: Date,
+    },
 
     purchaseDate: Date,
     updatedAtShopify: Date,

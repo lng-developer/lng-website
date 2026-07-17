@@ -13,6 +13,12 @@ const {
     createOrdersUpdatedWebhook,
     createOrdersCancelledWebhook,
 } = require("../service/shopify/shopifyWebhook.service");
+const {
+    getShopifyFulfillmentOrder,
+} = require("../service/shopify/shopifyFulfillmentOrder.service");
+const {
+    createShopifyFulfillment,
+} = require("../service/shopify/shopifyFulfillment.service");
 
 
 const registerShopifyWebhook = async(req,res)=>{
@@ -270,6 +276,11 @@ function normalizeOrder(edge = {}) {
         totalPrice: normalizeMoneySet(order.totalPriceSet),
         shippingAddress: normalizeAddress(order.shippingAddress),
         customer: normalizeCustomer(order.customer),
+        fulfillmentOrders: Array.isArray(order.fulfillmentOrders?.edges)
+            ? order.fulfillmentOrders.edges.map((edge) => ({
+                id: edge.node?.id || "",
+            }))
+            : [],
         lineItems: Array.isArray(order.lineItems?.edges)
             ? order.lineItems.edges.map(normalizeLineItem)
             : [],
@@ -351,6 +362,13 @@ async function fetchShopifyOrders(queryString) {
                             firstName
                             lastName
                             displayName
+                        }
+                        fulfillmentOrders(first: 1) {
+                            edges {
+                                node {
+                                    id
+                                }
+                            }
                         }
                         lineItems(first: 50) {
                             edges {
@@ -605,6 +623,20 @@ const handleOrderCreatedWebhook = async (req, res) => {
         });
     }
 
+    const fulfillmentOrder = await getShopifyFulfillmentOrder(mapped.shopifyOrderGid);
+    mapped.fulfillmentOrderId = fulfillmentOrder?.id || "";
+    if (!mapped.fulfillmentOrderId) {
+        console.log("[SHOPIFY][FULFILLMENT_ORDER][RESOLVE_FAILED]", {
+            shopifyOrderId: mapped.shopifyOrderId,
+            shopifyOrderName: mapped.shopifyOrderName,
+        });
+    }
+    console.log("[SHOPIFY][FULFILLMENT_ORDER][RESOLVED]", {
+        shopifyOrderId: mapped.shopifyOrderId,
+        shopifyOrderName: mapped.shopifyOrderName,
+        fulfillmentOrderId: mapped.fulfillmentOrderId,
+    });
+
     await OrderProductShopify.create(mapped);
 
     console.log("[SHOPIFY][WEBHOOK][DB_CREATE]", {
@@ -668,6 +700,11 @@ const handleOrderUpdatedWebhook = async (req, res) => {
     existingOrder.shopifyOrderName = normalizedOrder.name;
     existingOrder.rawShopifyOrder = req.body;
 
+    if (!existingOrder.fulfillmentOrderId) {
+        const fulfillmentOrder = await getShopifyFulfillmentOrder(existingOrder.shopifyOrderGid);
+        existingOrder.fulfillmentOrderId = fulfillmentOrder?.id || "";
+    }
+
     await existingOrder.save();
 
     console.log("[SHOPIFY][WEBHOOK][ORDER_UPDATED]", {
@@ -726,12 +763,114 @@ const handleOrderCancelledWebhook = async (req, res) => {
     });
 };
 
+const handleCreateFulfillment = async (req, res) => {
+    const shopifyOrderId = String(req.params.orderId || "");
+    const body = req.body || {};
+
+    if (!body.trackingNumber) {
+        return res.status(400).json({
+            ok: false,
+            message: "Missing trackingNumber",
+        });
+    }
+
+    const existingOrder = await OrderProductShopify.findOne({
+        shopifyOrderId,
+    });
+
+    if (!existingOrder) {
+        return res.status(404).json({
+            ok: false,
+            message: "Shopify order not found",
+        });
+    }
+
+    const fulfillmentOrder = await getShopifyFulfillmentOrder(existingOrder.shopifyOrderGid);
+
+    if (!fulfillmentOrder) {
+        return res.status(400).json({
+            ok: false,
+            message: "Fulfillment order not found",
+        });
+    }
+
+    if (fulfillmentOrder.status !== "OPEN") {
+        return res.status(400).json({
+            ok: false,
+            message: "Fulfillment order is not available",
+            status: fulfillmentOrder.status,
+        });
+    }
+
+    existingOrder.fulfillmentOrderId = fulfillmentOrder.id;
+
+    console.log("[SHOPIFY][FULFILLMENT][CREATE_START]", {
+        shopifyOrderId,
+        shopifyOrderName: existingOrder.shopifyOrderName,
+        fulfillmentOrderId: fulfillmentOrder.id,
+        trackingNumber: body.trackingNumber,
+    });
+
+    let fulfillment;
+    try {
+        fulfillment = await createShopifyFulfillment({
+            fulfillmentOrderId: fulfillmentOrder.id,
+            trackingNumber: body.trackingNumber,
+            trackingCompany: body.trackingCompany,
+            trackingUrl: body.trackingUrl,
+        });
+    } catch (err) {
+        console.error("[SHOPIFY][FULFILLMENT][CREATE_FAILED]", {
+            shopifyOrderId,
+            fulfillmentOrderId: fulfillmentOrder.id,
+            trackingNumber: body.trackingNumber,
+            message: err.message,
+        });
+        return res.status(502).json({
+            ok: false,
+            message: err.message,
+            code: err.code || null,
+        });
+    }
+    const now = new Date();
+
+    existingOrder.fulfillmentStatus = "fulfilled";
+    existingOrder.lastShopifySyncAt = now;
+    existingOrder.trackingInfo = {
+        fulfillmentId: fulfillment?.id || "",
+        status: fulfillment?.status || "",
+        trackingNumber: body.trackingNumber,
+        trackingCompany: body.trackingCompany,
+        trackingUrl: body.trackingUrl,
+        createdAt: existingOrder.trackingInfo?.createdAt || now,
+        updatedAt: now,
+    };
+
+    await existingOrder.save();
+
+    console.log("[SHOPIFY][FULFILLMENT][CREATE_SUCCESS]", {
+        shopifyOrderId,
+        shopifyOrderName: existingOrder.shopifyOrderName,
+        fulfillmentId: existingOrder.trackingInfo.fulfillmentId,
+        status: existingOrder.trackingInfo.status,
+    });
+
+    return res.json({
+        ok: true,
+        fulfilled: true,
+        shopifyOrderId,
+        fulfillmentId: existingOrder.trackingInfo.fulfillmentId,
+        status: existingOrder.trackingInfo.status,
+    });
+};
+
 module.exports = {
     testConnection,
     importOrdersDryRun,
     handleOrderCreatedWebhook,
     handleOrderUpdatedWebhook,
     handleOrderCancelledWebhook,
+    handleCreateFulfillment,
     normalizeWebhookOrder,
     registerShopifyWebhook
 };

@@ -74,6 +74,9 @@ function mapShopifyLineItem(item = {}) {
 function mapShopifyOrderToOrderProductShopify(order = {}, options = {}) {
     const shopDomain = cleanString(options.shopDomain || process.env.SHOPIFY_SHOP_DOMAIN).trim();
     const shopifyOrderId = extractShopifyNumericId(order.id);
+    const fulfillmentOrderId = Array.isArray(order.fulfillmentOrders)
+        ? cleanString(order.fulfillmentOrders[0]?.id)
+        : "";
     const now = new Date();
 
     return {
@@ -85,6 +88,7 @@ function mapShopifyOrderToOrderProductShopify(order = {}, options = {}) {
         duplicateKey: `${shopDomain}:${shopifyOrderId}`,
         financialStatus: cleanString(order.displayFinancialStatus),
         fulfillmentStatus: cleanString(order.displayFulfillmentStatus),
+        fulfillmentOrderId,
         purchaseDate: order.createdAt ? new Date(order.createdAt) : null,
         updatedAtShopify: order.updatedAt ? new Date(order.updatedAt) : null,
         email: cleanString(order.email),

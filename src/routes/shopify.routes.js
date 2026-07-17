@@ -6,6 +6,7 @@ const router = express.Router();
 
 router.get("/test-connection", shopifyController.testConnection);
 router.post("/orders/import", shopifyController.importOrdersDryRun);
+router.post("/orders/:orderId/fulfillment", shopifyController.handleCreateFulfillment);
 router.post(
   "/webhooks/orders-create",
   verifyShopifyWebhook,
