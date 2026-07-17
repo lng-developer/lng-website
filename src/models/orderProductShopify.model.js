@@ -117,6 +117,7 @@ const orderProductShopifySchema = new mongoose.Schema(
 
     customer: shopifyCustomerSchema,
     shippingAddress: shopifyShippingAddressSchema,
+    billingAddress: shopifyShippingAddressSchema,
     totalPrice: moneySetSchema,
     items: [shopifyItemSchema],
 
@@ -137,6 +138,7 @@ const orderProductShopifySchema = new mongoose.Schema(
     },
 
     lastImportAt: Date,
+    lastShopifySyncAt: Date,
     errorMessage: String,
   },
   { timestamps: true, collection: "orderproducshopify" }
