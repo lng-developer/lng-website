@@ -1,6 +1,8 @@
 const axios = require("axios");
 const { getShopifyAccessToken } = require("./shopifyAuth.service");
 
+require("../../config/env.config")();
+
 function getShopifyClientEnv() {
     const shopDomain = String(process.env.SHOPIFY_SHOP_DOMAIN || "").trim();
     const apiVersion = String(process.env.SHOPIFY_API_VERSION || "2026-04").trim();

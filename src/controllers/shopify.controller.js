@@ -6,6 +6,46 @@ const {
 
 const OrderProductShopify = db.orderProductShopify;
 
+
+
+const {
+    createOrdersCreateWebhook
+} = require("../service/shopify/shopifyWebhook.service");
+
+
+const registerShopifyWebhook = async(req,res)=>{
+
+    try {
+
+        const result =
+            await createOrdersCreateWebhook();
+
+
+        return res.json({
+            ok:true,
+            result
+        });
+
+
+    } catch(err){
+
+        console.error(
+            "[SHOPIFY][WEBHOOK][REGISTER_ERROR]",
+            err
+        );
+
+
+        return res.status(500).json({
+            ok:false,
+            message:err.message
+        });
+
+    }
+
+};
+
+
+
 function toBoolean(value, defaultValue = false) {
     if (value === undefined || value === null || value === "") return defaultValue;
     if (typeof value === "boolean") return value;
@@ -550,4 +590,5 @@ module.exports = {
     importOrdersDryRun,
     handleOrderCreatedWebhook,
     normalizeWebhookOrder,
+    registerShopifyWebhook
 };

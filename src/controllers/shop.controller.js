@@ -3,6 +3,8 @@ const Shop = db.shop;
 const User = db.user;
 const RealtimeLog = db.RealtimeLog;
 
+
+
 const getAllShops = async (req, res) => {
   const { merchant } = req.query;
   const filter = {};
@@ -182,4 +184,5 @@ module.exports = {
   updateShopStatus,
   getClients,
   connectExtension,
+
 };
