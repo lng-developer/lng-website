@@ -9,7 +9,8 @@ const OrderProductShopify = db.orderProductShopify;
 
 
 const {
-    createOrdersCreateWebhook
+    createOrdersCreateWebhook,
+    createOrdersUpdatedWebhook,
 } = require("../service/shopify/shopifyWebhook.service");
 
 
@@ -17,13 +18,18 @@ const registerShopifyWebhook = async(req,res)=>{
 
     try {
 
-        const result =
+        const ordersCreate =
             await createOrdersCreateWebhook();
+        const ordersUpdated =
+            await createOrdersUpdatedWebhook();
 
 
         return res.json({
             ok:true,
-            result
+            result: {
+                ordersCreate,
+                ordersUpdated,
+            },
         });
 
 
@@ -213,10 +219,36 @@ function normalizeWebhookOrder(order = {}) {
         phone: order.phone || "",
         totalPrice: normalizeWebhookMoney(order.total_price, currencyCode),
         shippingAddress: normalizeWebhookAddress(order.shipping_address),
+        billingAddress: normalizeWebhookAddress(order.billing_address),
         customer: normalizeWebhookCustomer(order.customer),
         lineItems: Array.isArray(order.line_items)
             ? order.line_items.map((item) => normalizeWebhookLineItem(item, currencyCode))
             : [],
+    };
+}
+
+function mapNormalizedLineItemToOrderProductItem(item = {}) {
+    const id = item.id || "";
+    const parts = String(id).split("/");
+    const shopifyLineItemId = parts[parts.length - 1] || id;
+
+    return {
+        shopifyLineItemGid: id,
+        shopifyLineItemId,
+        name: item.name || "",
+        title: item.title || "",
+        sku: item.sku || "",
+        quantity: Number(item.quantity || 0),
+        variantTitle: item.variantTitle || "",
+        originalUnitPrice: item.originalUnitPrice,
+        customAttributes: Array.isArray(item.customAttributes)
+            ? item.customAttributes.map((attr) => ({
+                key: attr.key || "",
+                value: attr.value || "",
+                source: "shopify_line_item_custom_attributes",
+            }))
+            : [],
+        rawLineItem: item,
     };
 }
 
@@ -585,10 +617,62 @@ const handleOrderCreatedWebhook = async (req, res) => {
     });
 };
 
+const handleOrderUpdatedWebhook = async (req, res) => {
+    if (!req.body) {
+        return res.status(400).json({
+            ok: false,
+            message: "Missing webhook payload",
+        });
+    }
+
+    const shopifyOrderId = String(req.body.id || "");
+    const existingOrder = await OrderProductShopify.findOne({
+        shopifyOrderId,
+    });
+
+    if (!existingOrder) {
+        return res.status(200).json({
+            ok: true,
+            updated: false,
+            reason: "ORDER_NOT_FOUND",
+        });
+    }
+
+    const normalizedOrder = normalizeWebhookOrder(req.body);
+
+    existingOrder.customer = normalizedOrder.customer;
+    existingOrder.email = normalizedOrder.email;
+    existingOrder.phone = normalizedOrder.phone;
+    existingOrder.shippingAddress = normalizedOrder.shippingAddress;
+    existingOrder.billingAddress = normalizedOrder.billingAddress;
+    existingOrder.items = normalizedOrder.lineItems.map(mapNormalizedLineItemToOrderProductItem);
+    existingOrder.totalPrice = normalizedOrder.totalPrice;
+    existingOrder.financialStatus = normalizedOrder.displayFinancialStatus;
+    existingOrder.fulfillmentStatus = normalizedOrder.displayFulfillmentStatus;
+    existingOrder.updatedAtShopify = normalizedOrder.updatedAt ? new Date(normalizedOrder.updatedAt) : null;
+    existingOrder.lastShopifySyncAt = new Date();
+    existingOrder.shopifyOrderName = normalizedOrder.name;
+    existingOrder.rawShopifyOrder = req.body;
+
+    await existingOrder.save();
+
+    console.log("[SHOPIFY][WEBHOOK][ORDER_UPDATED]", {
+        shopifyOrderId,
+        shopifyOrderName: normalizedOrder.name,
+    });
+
+    return res.status(200).json({
+        ok: true,
+        updated: true,
+        shopifyOrderId,
+    });
+};
+
 module.exports = {
     testConnection,
     importOrdersDryRun,
     handleOrderCreatedWebhook,
+    handleOrderUpdatedWebhook,
     normalizeWebhookOrder,
     registerShopifyWebhook
 };

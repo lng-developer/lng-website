@@ -39,7 +39,46 @@ async function createOrdersCreateWebhook() {
     return data.webhookSubscriptionCreate;
 }
 
+async function createOrdersUpdatedWebhook() {
+
+    const mutation = `
+    mutation CreateOrdersUpdatedWebhook {
+        webhookSubscriptionCreate(
+            topic: ORDERS_UPDATED,
+            webhookSubscription: {
+                callbackUrl: "https://api.lngmerch.co/api/shopify/webhooks/orders-updated",
+                format: JSON
+            }
+        ) {
+            webhookSubscription {
+                id
+                topic
+                callbackUrl
+            }
+
+            userErrors {
+                field
+                message
+            }
+        }
+    }
+    `;
+
+
+    const data = await shopifyGraphQL(mutation);
+
+
+    console.log(
+        "[SHOPIFY][WEBHOOK][UPDATED]",
+        JSON.stringify(data, null, 2)
+    );
+
+
+    return data.webhookSubscriptionCreate;
+}
+
 
 module.exports = {
     createOrdersCreateWebhook,
+    createOrdersUpdatedWebhook,
 };

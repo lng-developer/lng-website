@@ -12,6 +12,11 @@ router.post(
   shopifyController.handleOrderCreatedWebhook
 );
 router.post(
+  "/webhooks/orders-updated",
+  verifyShopifyWebhook,
+  shopifyController.handleOrderUpdatedWebhook
+);
+router.post(
  "/webhooks/register",
  shopifyController.registerShopifyWebhook
 );
