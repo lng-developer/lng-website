@@ -102,7 +102,7 @@ router.put(
 router.post("/orders/address/validate-invalid", authenticateToken, controller.validateInvalidAddressesBatch);
 
 
-router.post("/update-tracking", authenticateToken, controller.updateTrackingByOrderId);
+router.post("/update-tracking", controller.updateTrackingByOrderId);
 
 router.patch(
   "/:orderId/items/:orderItemId/quantity",
