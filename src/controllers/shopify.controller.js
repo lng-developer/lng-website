@@ -94,6 +94,92 @@ function normalizeLineItem(edge = {}) {
     };
 }
 
+function toShopifyGid(type, id) {
+    if (id === null || id === undefined || id === "") return "";
+    const text = String(id);
+    return text.startsWith("gid://shopify/") ? text : `gid://shopify/${type}/${text}`;
+}
+
+function normalizeWebhookAddress(address = null) {
+    if (!address) return null;
+    return {
+        name: address.name || [address.first_name, address.last_name].filter(Boolean).join(" ").trim() || "",
+        firstName: address.first_name || "",
+        lastName: address.last_name || "",
+        company: address.company || "",
+        address1: address.address1 || "",
+        address2: address.address2 || "",
+        city: address.city || "",
+        province: address.province || "",
+        provinceCode: address.province_code || "",
+        zip: address.zip || "",
+        country: address.country || "",
+        countryCode: address.country_code || "",
+        phone: address.phone || "",
+    };
+}
+
+function normalizeWebhookCustomer(customer = null) {
+    if (!customer) return null;
+    const firstName = customer.first_name || "";
+    const lastName = customer.last_name || "";
+    return {
+        id: toShopifyGid("Customer", customer.id),
+        email: customer.email || "",
+        phone: customer.phone || "",
+        firstName,
+        lastName,
+        displayName: customer.display_name || [firstName, lastName].filter(Boolean).join(" "),
+    };
+}
+
+function normalizeWebhookMoney(amount, currencyCode) {
+    return {
+        amount: amount === null || amount === undefined ? null : String(amount),
+        currencyCode: currencyCode || null,
+        shopAmount: amount === null || amount === undefined ? null : String(amount),
+        shopCurrencyCode: currencyCode || null,
+    };
+}
+
+function normalizeWebhookLineItem(item = {}, currencyCode = null) {
+    return {
+        id: toShopifyGid("LineItem", item.id),
+        name: item.name || "",
+        title: item.title || "",
+        sku: item.sku || "",
+        quantity: item.quantity || 0,
+        variantTitle: item.variant_title || "",
+        customAttributes: Array.isArray(item.properties)
+            ? item.properties.map((property) => ({
+                key: property.name || property.key || "",
+                value: property.value || "",
+            }))
+            : [],
+        originalUnitPrice: normalizeWebhookMoney(item.price, currencyCode),
+    };
+}
+
+function normalizeWebhookOrder(order = {}) {
+    const currencyCode = order.presentment_currency || order.currency || null;
+    return {
+        id: toShopifyGid("Order", order.id),
+        name: order.name || "",
+        createdAt: order.created_at || null,
+        updatedAt: order.updated_at || null,
+        displayFinancialStatus: order.financial_status || "",
+        displayFulfillmentStatus: order.fulfillment_status || "",
+        email: order.email || "",
+        phone: order.phone || "",
+        totalPrice: normalizeWebhookMoney(order.total_price, currencyCode),
+        shippingAddress: normalizeWebhookAddress(order.shipping_address),
+        customer: normalizeWebhookCustomer(order.customer),
+        lineItems: Array.isArray(order.line_items)
+            ? order.line_items.map((item) => normalizeWebhookLineItem(item, currencyCode))
+            : [],
+    };
+}
+
 function normalizeOrder(edge = {}) {
     const order = edge.node || edge;
     return {
@@ -410,7 +496,58 @@ const importOrdersDryRun = async (req, res) => {
     }
 };
 
+const handleOrderCreatedWebhook = async (req, res) => {
+    if (!req.body) {
+        return res.status(400).json({
+            ok: false,
+            message: "Missing webhook payload",
+        });
+    }
+
+    console.log("[SHOPIFY][WEBHOOK][ORDER_CREATE]", {
+        topic: req.headers["x-shopify-topic"],
+        shop: req.headers["x-shopify-shop-domain"],
+        orderId: req.body.id,
+        orderName: req.body.name,
+    });
+
+    const normalizedOrder = normalizeWebhookOrder(req.body);
+    const mapped = mapShopifyOrderToOrderProductShopify(normalizedOrder, {
+        shopDomain: req.headers["x-shopify-shop-domain"],
+    });
+
+    const duplicate = await OrderProductShopify.findOne({
+        duplicateKey: mapped.duplicateKey,
+    });
+
+    if (duplicate) {
+        return res.status(200).json({
+            ok: true,
+            duplicate: true,
+            shopifyOrderId: mapped.shopifyOrderId,
+            shopifyOrderName: mapped.shopifyOrderName,
+        });
+    }
+
+    await OrderProductShopify.create(mapped);
+
+    console.log("[SHOPIFY][WEBHOOK][DB_CREATE]", {
+        duplicateKey: mapped.duplicateKey,
+        shopifyOrderId: mapped.shopifyOrderId,
+        shopifyOrderName: mapped.shopifyOrderName,
+        itemCount: Array.isArray(mapped.items) ? mapped.items.length : 0,
+    });
+
+    return res.status(200).json({
+        ok: true,
+        imported: true,
+        orderId: mapped.shopifyOrderId,
+    });
+};
+
 module.exports = {
     testConnection,
     importOrdersDryRun,
+    handleOrderCreatedWebhook,
+    normalizeWebhookOrder,
 };
