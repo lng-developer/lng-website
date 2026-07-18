@@ -55,6 +55,7 @@ const EtsyOrderItemEmbeddedSchema = new Schema(
         transactionId: { type: String, required: true }, // unique in order (enforce by import logic)
         listingId: { type: String },
         sku: { type: String },
+        mapped_sku: { type: String, default: null },
         orderItemId: { type: String },
 
         itemName: { type: String },
