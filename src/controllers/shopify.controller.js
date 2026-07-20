@@ -4,6 +4,7 @@ const {
     mapShopifyOrderToOrderProductShopify,
 } = require("../service/shopify/shopifyOrderProduct.mapper");
 const {
+    buildCustomization,
     extractCustomFiles,
 } = require("../service/shopify/shopifyImage.service");
 
@@ -221,12 +222,15 @@ function normalizeLineItem(edge = {}) {
     const variantImageUrl = variantImage?.url || "";
     const productImageUrl = featuredImage?.url || "";
     const imageUrl = productImage.url || item.image?.url || "";
+    const variant = item.variant || {};
+    const product = variant.product || item.product || {};
     const customAttributes = Array.isArray(item.customAttributes)
         ? item.customAttributes.map((attr) => ({
             key: attr.key || "",
             value: attr.value || "",
         }))
         : [];
+    const customization = buildCustomization(customAttributes);
     return {
         id: item.id || "",
         name: item.name || "",
@@ -234,13 +238,29 @@ function normalizeLineItem(edge = {}) {
         sku: item.sku || "",
         quantity: item.quantity || 0,
         variantTitle: item.variantTitle || "",
+        productId: product.id || "",
+        productTitle: product.title || "",
+        productHandle: product.handle || "",
+        productVendor: product.vendor || "",
+        productType: product.productType || "",
+        variantId: variant.id || "",
+        variantSku: variant.sku || item.sku || "",
+        variantBarcode: variant.barcode || "",
+        variantPrice: variant.price || "",
+        selectedOptions: Array.isArray(variant.selectedOptions)
+            ? variant.selectedOptions.map((option) => ({
+                name: option.name || "",
+                value: option.value || "",
+            }))
+            : [],
         img: imageUrl,
         imageUrl,
         variantImageUrl,
         productImageUrl,
         productImage,
         customAttributes,
-        customFiles: extractCustomFiles(customAttributes),
+        customFiles: customization.files,
+        customization,
         originalUnitPrice: normalizeMoneySet(item.originalUnitPriceSet),
     };
 }
@@ -249,6 +269,14 @@ function toShopifyGid(type, id) {
     if (id === null || id === undefined || id === "") return "";
     const text = String(id);
     return text.startsWith("gid://shopify/") ? text : `gid://shopify/${type}/${text}`;
+}
+
+function extractShopifyNumericId(gid) {
+    const text = String(gid || "").trim();
+    if (!text) return "";
+    const parts = text.split("/");
+    const last = parts[parts.length - 1] || "";
+    return last.split("?")[0] || text;
 }
 
 function normalizeWebhookAddress(address = null) {
@@ -301,6 +329,9 @@ function normalizeWebhookLineItem(item = {}, currencyCode = null) {
             value: property.value || "",
         }))
         : [];
+    const productGid = toShopifyGid("Product", item.product_id);
+    const variantGid = toShopifyGid("ProductVariant", item.variant_id);
+    const customization = buildCustomization(customAttributes);
     return {
         id: toShopifyGid("LineItem", item.id),
         name: item.name || "",
@@ -308,6 +339,18 @@ function normalizeWebhookLineItem(item = {}, currencyCode = null) {
         sku: item.sku || "",
         quantity: item.quantity || 0,
         variantTitle: item.variant_title || "",
+        productId: productGid,
+        productTitle: item.product_title || item.title || "",
+        productHandle: item.product_handle || "",
+        productVendor: item.vendor || "",
+        productType: item.product_type || "",
+        variantId: variantGid,
+        variantSku: item.sku || "",
+        variantBarcode: item.variant_barcode || "",
+        variantPrice: item.price || "",
+        selectedOptions: item.variant_title
+            ? [{ name: "Variant", value: item.variant_title }]
+            : [],
         img: imageUrl,
         imageUrl,
         variantImageUrl: item.variant_image_url || "",
@@ -317,7 +360,8 @@ function normalizeWebhookLineItem(item = {}, currencyCode = null) {
             imageUrl ? "rest_line_item_image" : ""
         ),
         customAttributes,
-        customFiles: extractCustomFiles(customAttributes),
+        customFiles: customization.files,
+        customization,
         originalUnitPrice: normalizeWebhookMoney(item.price, currencyCode),
     };
 }
@@ -347,6 +391,9 @@ function mapNormalizedLineItemToOrderProductItem(item = {}) {
     const id = item.id || "";
     const parts = String(id).split("/");
     const shopifyLineItemId = parts[parts.length - 1] || id;
+    const variantGid = item.variantId || "";
+    const productGid = item.productId || "";
+    const customization = item.customization || buildCustomization(item.customAttributes);
 
     return {
         shopifyLineItemGid: id,
@@ -361,6 +408,33 @@ function mapNormalizedLineItemToOrderProductItem(item = {}) {
         variantImageUrl: item.variantImageUrl || "",
         productImageUrl: item.productImageUrl || "",
         productImage: item.productImage || normalizeShopifyImage(null),
+        skuInfo: {
+            sku: item.sku || "",
+            variantSku: item.variantSku || item.sku || "",
+            productId: extractShopifyNumericId(productGid),
+            productGid,
+            productTitle: item.productTitle || "",
+            productHandle: item.productHandle || "",
+            productVendor: item.productVendor || "",
+            productType: item.productType || "",
+            lineItemId: shopifyLineItemId,
+            lineItemGid: id,
+        },
+        variantInfo: {
+            variantId: extractShopifyNumericId(variantGid),
+            variantGid,
+            title: item.variantTitle || "",
+            sku: item.variantSku || item.sku || "",
+            barcode: item.variantBarcode || "",
+            price: item.variantPrice || "",
+            selectedOptions: Array.isArray(item.selectedOptions)
+                ? item.selectedOptions.map((option) => ({
+                    name: option.name || "",
+                    value: option.value || "",
+                }))
+                : [],
+        },
+        customization,
         originalUnitPrice: item.originalUnitPrice,
         customAttributes: Array.isArray(item.customAttributes)
             ? item.customAttributes.map((attr) => ({
@@ -519,6 +593,14 @@ async function fetchShopifyOrders(queryString) {
                                     }
                                     variant {
                                         id
+                                        title
+                                        sku
+                                        barcode
+                                        price
+                                        selectedOptions {
+                                            name
+                                            value
+                                        }
                                         image {
                                             url
                                             altText
@@ -527,6 +609,10 @@ async function fetchShopifyOrders(queryString) {
                                         }
                                         product {
                                             id
+                                            title
+                                            handle
+                                            vendor
+                                            productType
                                             featuredImage {
                                                 url
                                                 altText

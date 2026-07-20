@@ -76,6 +76,67 @@ const shopifyCustomFileSchema = new mongoose.Schema(
   { _id: false }
 );
 
+const shopifyCustomTextSchema = new mongoose.Schema(
+  {
+    key: String,
+    value: String,
+    source: String,
+  },
+  { _id: false }
+);
+
+const shopifySelectedOptionSchema = new mongoose.Schema(
+  {
+    name: String,
+    value: String,
+  },
+  { _id: false }
+);
+
+const shopifySkuInfoSchema = new mongoose.Schema(
+  {
+    sku: String,
+    variantSku: String,
+    productId: String,
+    productGid: String,
+    productTitle: String,
+    productHandle: String,
+    productVendor: String,
+    productType: String,
+    lineItemId: String,
+    lineItemGid: String,
+  },
+  { _id: false }
+);
+
+const shopifyVariantInfoSchema = new mongoose.Schema(
+  {
+    variantId: String,
+    variantGid: String,
+    title: String,
+    sku: String,
+    barcode: String,
+    price: String,
+    selectedOptions: [shopifySelectedOptionSchema],
+  },
+  { _id: false }
+);
+
+const shopifyCustomizationSchema = new mongoose.Schema(
+  {
+    attributes: [shopifyCustomAttributeSchema],
+    files: [shopifyCustomFileSchema],
+    texts: [shopifyCustomTextSchema],
+    customall: {
+      previewUrl: String,
+      printFileUrls: [String],
+      customizedUrl: String,
+      customId: String,
+    },
+  },
+  { _id: false }
+);
+
 const shopifyItemSchema = new mongoose.Schema(
   {
     shopifyLineItemGid: String,
@@ -90,6 +151,9 @@ const shopifyItemSchema = new mongoose.Schema(
     variantImageUrl: String,
     productImageUrl: String,
     productImage: shopifyImageSchema,
+    skuInfo: shopifySkuInfoSchema,
+    variantInfo: shopifyVariantInfoSchema,
+    customization: shopifyCustomizationSchema,
     originalUnitPrice: moneySetSchema,
     customAttributes: [shopifyCustomAttributeSchema],
     customFiles: [shopifyCustomFileSchema],

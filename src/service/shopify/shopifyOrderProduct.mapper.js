@@ -1,4 +1,7 @@
-const { extractCustomFiles } = require("./shopifyImage.service");
+const {
+    buildCustomization,
+    extractCustomFiles,
+} = require("./shopifyImage.service");
 
 function extractShopifyNumericId(gid) {
     const text = String(gid || "").trim();
@@ -45,6 +48,39 @@ function cloneShopifyImage(image = {}) {
     };
 }
 
+function buildSkuInfo(item = {}, lineItemId = "") {
+    return {
+        sku: cleanString(item.sku),
+        variantSku: cleanString(item.variantSku || item.variant?.sku || item.sku),
+        productId: extractShopifyNumericId(item.productId || item.variant?.product?.id || item.product?.id),
+        productGid: cleanString(item.productId || item.variant?.product?.id || item.product?.id),
+        productTitle: cleanString(item.productTitle || item.variant?.product?.title || item.product?.title),
+        productHandle: cleanString(item.productHandle || item.variant?.product?.handle || item.product?.handle),
+        productVendor: cleanString(item.productVendor || item.variant?.product?.vendor || item.product?.vendor),
+        productType: cleanString(item.productType || item.variant?.product?.productType || item.product?.productType),
+        lineItemId,
+        lineItemGid: cleanString(item.id),
+    };
+}
+
+function buildVariantInfo(item = {}) {
+    const variantGid = cleanString(item.variantId || item.variant?.id);
+    return {
+        variantId: extractShopifyNumericId(variantGid),
+        variantGid,
+        title: cleanString(item.variantTitle || item.variant?.title),
+        sku: cleanString(item.variantSku || item.variant?.sku || item.sku),
+        barcode: cleanString(item.variantBarcode || item.variant?.barcode),
+        price: cleanString(item.variantPrice || item.variant?.price),
+        selectedOptions: Array.isArray(item.selectedOptions || item.variant?.selectedOptions)
+            ? (item.selectedOptions || item.variant.selectedOptions).map((option) => ({
+                name: cleanString(option.name),
+                value: cleanString(option.value),
+            }))
+            : [],
+    };
+}
+
 function cloneCustomer(customer = null) {
     if (!customer) return null;
     return {
@@ -78,13 +114,15 @@ function cloneShippingAddress(address = null) {
 
 function mapShopifyLineItem(item = {}) {
     const imageUrl = pickImageUrl(item);
+    const lineItemId = extractShopifyNumericId(item.id);
     const productImage = cloneShopifyImage(item.productImage || {
         url: imageUrl,
         source: imageUrl ? "legacy_image_url" : "",
     });
+    const customization = buildCustomization(item.customAttributes);
     return {
         shopifyLineItemGid: cleanString(item.id),
-        shopifyLineItemId: extractShopifyNumericId(item.id),
+        shopifyLineItemId: lineItemId,
         name: cleanString(item.name),
         title: cleanString(item.title),
         sku: cleanString(item.sku),
@@ -95,6 +133,9 @@ function mapShopifyLineItem(item = {}) {
         variantImageUrl: cleanString(item.variantImageUrl || item.variant?.image?.url),
         productImageUrl: cleanString(item.productImageUrl || item.variant?.product?.featuredImage?.url || item.product?.featuredImage?.url),
         productImage,
+        skuInfo: buildSkuInfo(item, lineItemId),
+        variantInfo: buildVariantInfo(item),
+        customization,
         originalUnitPrice: cloneMoneySet(item.originalUnitPrice || {}),
         customAttributes: Array.isArray(item.customAttributes)
             ? item.customAttributes.map((attr) => ({
@@ -103,7 +144,7 @@ function mapShopifyLineItem(item = {}) {
                 source: "shopify_line_item_custom_attributes",
             }))
             : [],
-        customFiles: extractCustomFiles(item.customAttributes),
+        customFiles: customization.files.length ? customization.files : extractCustomFiles(item.customAttributes),
         rawLineItem: item,
     };
 }
