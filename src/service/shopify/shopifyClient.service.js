@@ -30,7 +30,7 @@ function buildGraphQLErrorMessage(errors = []) {
 
 async function shopifyGraphQL(query, variables = {}) {
     const { shopDomain, apiVersion } = getShopifyClientEnv();
-    const accessToken = await getShopifyAccessToken();
+    const accessToken = await getShopifyAccessToken(shopDomain);
     const url = `https://${shopDomain}/admin/api/${apiVersion}/graphql.json`;
 
     try {
