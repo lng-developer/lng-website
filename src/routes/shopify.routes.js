@@ -4,6 +4,8 @@ const { verifyShopifyWebhook } = require("../middleware/shopifyWebhook.middlewar
 
 const router = express.Router();
 
+router.get("/auth", shopifyController.shopifyAuth);
+router.get("/auth/callback", shopifyController.shopifyAuthCallback);
 router.get("/test-connection", shopifyController.testConnection);
 router.post("/orders/import", shopifyController.importOrdersDryRun);
 router.post("/orders/:orderId/fulfillment", shopifyController.handleCreateFulfillment);

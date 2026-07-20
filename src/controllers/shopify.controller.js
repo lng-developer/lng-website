@@ -19,7 +19,52 @@ const {
 const {
     createShopifyFulfillment,
 } = require("../service/shopify/shopifyFulfillment.service");
+const {
+    generateShopifyInstallUrl,
+    exchangeShopifyOAuthCode,
+} = require("../service/shopify/shopifyAuth.service");
 
+
+const shopifyAuth = (req, res) => {
+    try {
+        const installUrl = generateShopifyInstallUrl(req.query?.shop);
+        return res.redirect(installUrl);
+    } catch (err) {
+        return res.status(400).json({
+            ok: false,
+            message: err.message,
+            code: err.code || null,
+        });
+    }
+};
+
+const shopifyAuthCallback = async (req, res) => {
+    try {
+        const result = await exchangeShopifyOAuthCode({
+            shop: req.query?.shop,
+            code: req.query?.code,
+            state: req.query?.state,
+        });
+
+        return res.json({
+            ok: true,
+            installed: true,
+            shopDomain: result.shopDomain,
+            scopes: result.scopes,
+        });
+    } catch (err) {
+        console.error("[SHOPIFY][OAUTH][CALLBACK_ERROR]", {
+            shop: req.query?.shop || null,
+            message: err.message,
+            code: err.code || null,
+        });
+        return res.status(err.httpStatus || 400).json({
+            ok: false,
+            message: err.message,
+            code: err.code || null,
+        });
+    }
+};
 
 const registerShopifyWebhook = async(req,res)=>{
 
@@ -865,6 +910,8 @@ const handleCreateFulfillment = async (req, res) => {
 };
 
 module.exports = {
+    shopifyAuth,
+    shopifyAuthCallback,
     testConnection,
     importOrdersDryRun,
     handleOrderCreatedWebhook,
