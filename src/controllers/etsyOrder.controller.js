@@ -5,6 +5,7 @@ const EtsyListing = require('../models/etsyListing.model');
 const User = db.user;
 const Role = db.role;
 const Store = db.shop;
+const SkuMappingConfig = db.SkuMappingConfig;
 
 const fs = require('fs');
 const path = require('path');
@@ -21,6 +22,10 @@ const {
     buildEtsyTrackingSummary,
 } = require("../service/etsyTrackingResponse.service");
 const logger = require("../helper/logger");
+const {
+    applyRulesToSku,
+    buildRulesFromConfig,
+} = require("../utils/skuMigrate");
 
 const etsyFulfillmentUploadDir = path.join(process.cwd(), "tmp_uploads", "etsy_fulfillment");
 if (!fs.existsSync(etsyFulfillmentUploadDir)) fs.mkdirSync(etsyFulfillmentUploadDir, { recursive: true });
@@ -350,6 +355,39 @@ const getSellerCodeFromSku = (sku) => {
     const first = s.split('-')[0]?.trim();
     if (!first) return null;
     return first;
+};
+
+const loadActiveEtsySkuMappingConfigs = async () => {
+    if (!SkuMappingConfig?.find) return [];
+
+    const now = new Date();
+    return SkuMappingConfig.find({
+        is_active: true,
+        $and: [
+            { $or: [{ valid_from: null }, { valid_from: { $lte: now } }] },
+            { $or: [{ valid_to: null }, { valid_to: { $gte: now } }] },
+        ],
+    })
+        .sort({ priority: 1, createdAt: 1 })
+        .lean();
+};
+
+const resolveMappedSkuFromConfigs = (sku, configs = []) => {
+    if (!sku || !Array.isArray(configs) || configs.length === 0) return null;
+
+    for (const cfg of configs) {
+        const rules = buildRulesFromConfig(cfg);
+        const result = applyRulesToSku(sku, rules);
+        if (result.ok && result.changed) {
+            return {
+                mapped_sku: result.next,
+                config: cfg,
+                rulesSnapshot: rules,
+            };
+        }
+    }
+
+    return null;
 };
 
 const fillSellerIfMissing = async (orderId, shopId, sellerCode) => {
@@ -2823,7 +2861,7 @@ function buildCustomItemResponseFields(item = {}, customFileOptions = {}) {
 
 const deriveSellerCodeFromItems = (items = []) => {
     for (const item of items) {
-        const sellerCode = getSellerCodeFromSku(item?.sku);
+        const sellerCode = getSellerCodeFromSku(item?.mapped_sku || item?.sku);
         if (sellerCode) return sellerCode;
     }
     return undefined;
@@ -2840,7 +2878,7 @@ const isExistingEtsyOrderTooOldForBackfill = (order) => {
     return createdAt.getTime() < Date.now() - days * 24 * 60 * 60 * 1000;
 };
 
-const normalizeItem = (raw, idx) => {
+const normalizeItem = (raw, idx, skuMappingConfigs = []) => {
     const transactionId = String(raw?.transactionId ?? "").trim();
     if (!transactionId) {
         const err = new Error(`items[${idx}].transactionId is required`);
@@ -2858,18 +2896,23 @@ const normalizeItem = (raw, idx) => {
         listingId,
         useExternalCustomFileLink: raw?.useExternalCustomFileLink === true,
     });
+    const sku = firstNonBlankString(
+        raw?.sku,
+        raw?.SKU,
+        raw?.productSku,
+        raw?.product_sku,
+        raw?.productIdentifier,
+        raw?.product_identifier
+    );
+    const mappedSku = firstNonBlankString(raw?.mapped_sku, raw?.mappedSku)
+        || resolveMappedSkuFromConfigs(sku, skuMappingConfigs)?.mapped_sku
+        || undefined;
 
     return {
         transactionId,
         listingId,
-        sku: firstNonBlankString(
-            raw?.sku,
-            raw?.SKU,
-            raw?.productSku,
-            raw?.product_sku,
-            raw?.productIdentifier,
-            raw?.product_identifier
-        ),
+        sku,
+        mapped_sku: mappedSku,
         itemName: raw?.itemName ? String(raw.itemName).trim() : undefined,
         quantity: toInt(raw?.quantity),
         unitPrice: toNumber(raw?.unitPrice),
@@ -2887,7 +2930,7 @@ const normalizeItem = (raw, idx) => {
     };
 };
 
-const buildEtsyOrderPayload = (body) => {
+const buildEtsyOrderPayload = (body, skuMappingConfigs = []) => {
     const orderId = String(body?.orderId ?? "").trim();
     if (!orderId) {
         const err = new Error("orderId is required");
@@ -2907,7 +2950,7 @@ const buildEtsyOrderPayload = (body) => {
         ? body.items.map((item, idx) => normalizeItem({
             ...item,
             useExternalCustomFileLink: item?.useExternalCustomFileLink === true || useExternalCustomFileLink,
-        }, idx))
+        }, idx, skuMappingConfigs))
         : [];
     const customSummary = summarizeCustomData(items);
 
@@ -3070,6 +3113,9 @@ const backfillExistingEtsyOrder = async (existing, payload) => {
             skuBackfilled += 1;
             itemChanged = true;
         }
+        if (backfillField(current, incoming, "mapped_sku")) {
+            itemChanged = true;
+        }
         if (backfillField(current, incoming, "listingId")) {
             listingIdBackfilled += 1;
             itemChanged = true;
@@ -3208,7 +3254,8 @@ const backfillExistingEtsyOrder = async (existing, payload) => {
 
 const createOrder = async (req, res) => {
     try {
-        const payload = buildEtsyOrderPayload(req.body || {});
+        const skuMappingConfigs = await loadActiveEtsySkuMappingConfigs();
+        const payload = buildEtsyOrderPayload(req.body || {}, skuMappingConfigs);
 
         const existing = await EtsyOrder.findOne({ orderId: payload.orderId, shopId: payload.shopId });
         if (existing) {

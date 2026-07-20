@@ -348,9 +348,9 @@ const getEtsyReportMatrix = async (req, res) => {
       const S = result[sellerName];
       for (let i = 0; i < dayList.length; i++) {
         // user requested formula: 
-        // profit1: Revenue - (BaseCost + Fee + Ads + Tax + ShipTax + Discount)
+        // profit1 intentionally does not subtract tax or discount.
         // profit2: Profit1 - (OpCost của seller + Tiền Hoàn trả)
-        const p1 = S.revenue[i] - (S.baseCost[i] + S.fee[i] + S.ads[i] + S.itemTax[i] + S.shippingTax[i] + S.itemPromotionDiscount[i]);
+        const p1 = S.revenue[i] - (S.baseCost[i] + S.fee[i] + S.ads[i]);
         const p2 = p1 - (S.opCost[i] + S.refund[i]);
 
         S.profit1[i] = +p1.toFixed(2);

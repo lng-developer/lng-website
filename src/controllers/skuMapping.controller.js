@@ -3,6 +3,7 @@ const SkuMappingConfig = db.SkuMappingConfig;
 const SkuMappingEntry = db.SkuMappingEntry;
 const OrderCustomProduct = db.orderCustomProduct;
 const EtsyOrder = db.EtsyOrder;
+const User = db.user;
 
 const {
     applyRulesToSku,
@@ -70,6 +71,27 @@ function getItemId(item, primaryField) {
     return item?.[primaryField] || item?.orderItemId || item?.transactionId || "";
 }
 
+function getSellerCodeFromSku(sku) {
+    const first = String(sku || "").trim().split("-")[0]?.trim();
+    return first || null;
+}
+
+async function buildSellerUpdateFromSku(orderId, sku) {
+    const sellerCode = getSellerCodeFromSku(sku);
+    if (!orderId || !sellerCode || !User?.findOne) return null;
+
+    const user = await User.findOne({ employee_id: sellerCode }).lean();
+    const $set = { "seller.sellerCode": sellerCode };
+    if (user?._id) $set["seller.sellerId"] = user._id;
+
+    return {
+        updateOne: {
+            filter: { orderId },
+            update: { $set },
+        },
+    };
+}
+
 exports.previewWithConfig = async (req, res) => {
     try {
         const { orderIds = [], configId } = req.body || {};
@@ -127,6 +149,7 @@ exports.applyConfigLogOnly = async (req, res) => {
             amazon: [],
             etsy: [],
         };
+        const etsySellerSkuByOrderId = new Map();
         const samples = [];
         const marketplaces = {
             amazon: { ordersTouched: 0, totalMapped: 0, orderOpsQueued: 0 },
@@ -193,6 +216,9 @@ exports.applyConfigLogOnly = async (req, res) => {
                                 update: { $set: { "items.$.mapped_sku": r.next } },
                             },
                         });
+                        if (sourceInfo.marketplace === "etsy") {
+                            etsySellerSkuByOrderId.set(ord.orderId, r.next);
+                        }
                     }
                 }
 
@@ -206,12 +232,18 @@ exports.applyConfigLogOnly = async (req, res) => {
 
         marketplaces.amazon.orderOpsQueued = orderOpsByMarketplace.amazon.length;
         marketplaces.etsy.orderOpsQueued = orderOpsByMarketplace.etsy.length;
+        const itemOrderOpsQueued = orderOpsByMarketplace.amazon.length + orderOpsByMarketplace.etsy.length;
+
+        for (const [orderId, sku] of etsySellerSkuByOrderId.entries()) {
+            const sellerUpdate = await buildSellerUpdateFromSku(orderId, sku);
+            if (sellerUpdate) orderOpsByMarketplace.etsy.push(sellerUpdate);
+        }
 
         let logResult = "skipped (dryRun=true)";
         let orderResult = "skipped (dryRun=true)";
         const orderResults = {
-            amazon: "skipped (dryRun=true)",
-            etsy: "skipped (dryRun=true)",
+            amazon: dryRun ? "skipped (dryRun=true)" : "skipped (no ops)",
+            etsy: dryRun ? "skipped (dryRun=true)" : "skipped (no ops)",
         };
 
         if (!dryRun && logOps.length) {
@@ -250,7 +282,7 @@ exports.applyConfigLogOnly = async (req, res) => {
             ordersTouched,
             totalMapped,
             opsQueued: logOps.length,
-            orderOpsQueued: orderOpsByMarketplace.amazon.length + orderOpsByMarketplace.etsy.length,
+            orderOpsQueued: itemOrderOpsQueued,
             logResult,
             orderResult,
             orderResults,
