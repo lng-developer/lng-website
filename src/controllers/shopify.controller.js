@@ -121,10 +121,32 @@ function toPositiveInt(value, defaultValue) {
     return Number.isFinite(n) && n > 0 ? Math.floor(n) : defaultValue;
 }
 
+function clampPositiveInt(value, defaultValue, maxValue) {
+    return Math.min(toPositiveInt(value, defaultValue), maxValue);
+}
+
 function toIsoDate(value) {
     if (!value) return null;
     const date = new Date(value);
     return Number.isNaN(date.getTime()) ? null : date.toISOString();
+}
+
+function escapeRegex(value) {
+    return String(value || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function toDateBoundary(value, boundary) {
+    if (!value) return null;
+    const text = String(value).trim();
+    const date = new Date(text);
+    if (Number.isNaN(date.getTime())) return null;
+
+    if (/^\d{4}-\d{2}-\d{2}$/.test(text)) {
+        if (boundary === "end") date.setUTCHours(23, 59, 59, 999);
+        if (boundary === "start") date.setUTCHours(0, 0, 0, 0);
+    }
+
+    return date;
 }
 
 function buildDateRange({ fromDate, toDate, days }) {
@@ -495,6 +517,95 @@ const testConnection = async (_req, res) => {
             durationMs: Date.now() - startedAt,
         });
         return res.status(err.httpStatus || 500).json({
+            ok: false,
+            message: err.message,
+            code: err.code || null,
+        });
+    }
+};
+
+const listShopifyOrders = async (req, res) => {
+    const query = req.query || {};
+    const page = clampPositiveInt(query.page, 1, 100000);
+    const limit = clampPositiveInt(query.limit, 20, 100);
+    const skip = (page - 1) * limit;
+    const filter = {};
+
+    [
+        "shopDomain",
+        "processStatus",
+        "financialStatus",
+        "fulfillmentStatus",
+        "importStatus",
+    ].forEach((field) => {
+        if (query[field] !== undefined && query[field] !== null && String(query[field]).trim() !== "") {
+            filter[field] = String(query[field]).trim();
+        }
+    });
+
+    const fromDate = toDateBoundary(query.fromDate, "start");
+    const toDate = toDateBoundary(query.toDate, "end");
+    if (fromDate || toDate) {
+        filter.purchaseDate = {};
+        if (fromDate) filter.purchaseDate.$gte = fromDate;
+        if (toDate) filter.purchaseDate.$lte = toDate;
+    }
+
+    const search = String(query.search || "").trim();
+    if (search) {
+        const regex = new RegExp(escapeRegex(search), "i");
+        filter.$or = [
+            { shopifyOrderId: regex },
+            { shopifyOrderName: regex },
+            { email: regex },
+            { phone: regex },
+            { "customer.displayName": regex },
+            { "shippingAddress.name": regex },
+            { "items.sku": regex },
+            { "items.name": regex },
+        ];
+    }
+
+    const allowedSortFields = new Set([
+        "createdAt",
+        "updatedAt",
+        "purchaseDate",
+        "updatedAtShopify",
+        "lastImportAt",
+        "lastShopifySyncAt",
+        "shopifyOrderName",
+        "financialStatus",
+        "fulfillmentStatus",
+        "processStatus",
+    ]);
+    const sortBy = allowedSortFields.has(query.sortBy) ? query.sortBy : "createdAt";
+    const sortOrder = String(query.sortOrder || "desc").toLowerCase() === "asc" ? 1 : -1;
+    const sort = { [sortBy]: sortOrder };
+
+    try {
+        const [items, total] = await Promise.all([
+            OrderProductShopify.find(filter)
+                .sort(sort)
+                .skip(skip)
+                .limit(limit)
+                .lean(),
+            OrderProductShopify.countDocuments(filter),
+        ]);
+
+        return res.json({
+            ok: true,
+            page,
+            limit,
+            total,
+            totalPages: Math.ceil(total / limit),
+            items,
+        });
+    } catch (err) {
+        console.error("[SHOPIFY][ORDERPRODUCT][LIST_ERROR]", {
+            message: err.message,
+            code: err.code || null,
+        });
+        return res.status(500).json({
             ok: false,
             message: err.message,
             code: err.code || null,
@@ -913,6 +1024,7 @@ module.exports = {
     shopifyAuth,
     shopifyAuthCallback,
     testConnection,
+    listShopifyOrders,
     importOrdersDryRun,
     handleOrderCreatedWebhook,
     handleOrderUpdatedWebhook,
