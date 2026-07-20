@@ -2,6 +2,8 @@ const crypto = require("crypto");
 const axios = require("axios");
 const db = require("../../models");
 
+require("../../config/env.config")();
+
 const SHOPIFY_OAUTH_SCOPES = [
     "read_customers",
     "read_orders",
