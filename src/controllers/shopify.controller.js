@@ -3,6 +3,9 @@ const db = require("../models");
 const {
     mapShopifyOrderToOrderProductShopify,
 } = require("../service/shopify/shopifyOrderProduct.mapper");
+const {
+    extractCustomFiles,
+} = require("../service/shopify/shopifyImage.service");
 
 const OrderProductShopify = db.orderProductShopify;
 
@@ -198,8 +201,32 @@ function normalizeCustomer(customer = null) {
     };
 }
 
+function normalizeShopifyImage(image = null, source = "") {
+    return {
+        url: image?.url || "",
+        altText: image?.altText || "",
+        width: Number(image?.width || 0),
+        height: Number(image?.height || 0),
+        source: image?.url ? source : "",
+    };
+}
+
 function normalizeLineItem(edge = {}) {
     const item = edge.node || edge;
+    const variantImage = item.variant?.image || null;
+    const featuredImage = item.variant?.product?.featuredImage || item.product?.featuredImage || null;
+    const productImage = variantImage?.url
+        ? normalizeShopifyImage(variantImage, "variant_image")
+        : normalizeShopifyImage(featuredImage, featuredImage?.url ? "product_featured_image" : "");
+    const variantImageUrl = variantImage?.url || "";
+    const productImageUrl = featuredImage?.url || "";
+    const imageUrl = productImage.url || item.image?.url || "";
+    const customAttributes = Array.isArray(item.customAttributes)
+        ? item.customAttributes.map((attr) => ({
+            key: attr.key || "",
+            value: attr.value || "",
+        }))
+        : [];
     return {
         id: item.id || "",
         name: item.name || "",
@@ -207,12 +234,13 @@ function normalizeLineItem(edge = {}) {
         sku: item.sku || "",
         quantity: item.quantity || 0,
         variantTitle: item.variantTitle || "",
-        customAttributes: Array.isArray(item.customAttributes)
-            ? item.customAttributes.map((attr) => ({
-                key: attr.key || "",
-                value: attr.value || "",
-            }))
-            : [],
+        img: imageUrl,
+        imageUrl,
+        variantImageUrl,
+        productImageUrl,
+        productImage,
+        customAttributes,
+        customFiles: extractCustomFiles(customAttributes),
         originalUnitPrice: normalizeMoneySet(item.originalUnitPriceSet),
     };
 }
@@ -266,6 +294,13 @@ function normalizeWebhookMoney(amount, currencyCode) {
 }
 
 function normalizeWebhookLineItem(item = {}, currencyCode = null) {
+    const imageUrl = item.image_url || item.image?.src || item.image?.url || "";
+    const customAttributes = Array.isArray(item.properties)
+        ? item.properties.map((property) => ({
+            key: property.name || property.key || "",
+            value: property.value || "",
+        }))
+        : [];
     return {
         id: toShopifyGid("LineItem", item.id),
         name: item.name || "",
@@ -273,12 +308,16 @@ function normalizeWebhookLineItem(item = {}, currencyCode = null) {
         sku: item.sku || "",
         quantity: item.quantity || 0,
         variantTitle: item.variant_title || "",
-        customAttributes: Array.isArray(item.properties)
-            ? item.properties.map((property) => ({
-                key: property.name || property.key || "",
-                value: property.value || "",
-            }))
-            : [],
+        img: imageUrl,
+        imageUrl,
+        variantImageUrl: item.variant_image_url || "",
+        productImageUrl: item.product_image_url || imageUrl,
+        productImage: normalizeShopifyImage(
+            imageUrl ? { url: imageUrl } : null,
+            imageUrl ? "rest_line_item_image" : ""
+        ),
+        customAttributes,
+        customFiles: extractCustomFiles(customAttributes),
         originalUnitPrice: normalizeWebhookMoney(item.price, currencyCode),
     };
 }
@@ -317,6 +356,11 @@ function mapNormalizedLineItemToOrderProductItem(item = {}) {
         sku: item.sku || "",
         quantity: Number(item.quantity || 0),
         variantTitle: item.variantTitle || "",
+        img: item.img || item.imageUrl || "",
+        imageUrl: item.imageUrl || item.img || "",
+        variantImageUrl: item.variantImageUrl || "",
+        productImageUrl: item.productImageUrl || "",
+        productImage: item.productImage || normalizeShopifyImage(null),
         originalUnitPrice: item.originalUnitPrice,
         customAttributes: Array.isArray(item.customAttributes)
             ? item.customAttributes.map((attr) => ({
@@ -325,6 +369,9 @@ function mapNormalizedLineItemToOrderProductItem(item = {}) {
                 source: "shopify_line_item_custom_attributes",
             }))
             : [],
+        customFiles: Array.isArray(item.customFiles)
+            ? item.customFiles
+            : extractCustomFiles(item.customAttributes),
         rawLineItem: item,
     };
 }
@@ -381,6 +428,24 @@ function buildImportSample(mapped, duplicate) {
         customerName: address.name || customer.displayName || [customer.firstName, customer.lastName].filter(Boolean).join(" "),
         duplicate: !!duplicate,
     };
+}
+
+function logShopifyImageExtraction(mapped) {
+    const items = Array.isArray(mapped?.items) ? mapped.items : [];
+    const imageCount = items.filter((item) => item.productImage?.url || item.img || item.imageUrl).length;
+    const customFileCount = items.reduce(
+        (sum, item) => sum + (Array.isArray(item.customFiles) ? item.customFiles.length : 0),
+        0
+    );
+
+    console.log("[SHOPIFY][IMAGE][EXTRACT]", {
+        shopifyOrderId: mapped?.shopifyOrderId || "",
+        shopifyOrderName: mapped?.shopifyOrderName || "",
+        order: mapped?.shopifyOrderName || "",
+        itemCount: items.length,
+        imageCount,
+        customFileCount,
+    });
 }
 
 async function fetchShopifyOrders(queryString) {
@@ -446,6 +511,30 @@ async function fetchShopifyOrders(queryString) {
                                     sku
                                     quantity
                                     variantTitle
+                                    image {
+                                        url
+                                        altText
+                                        width
+                                        height
+                                    }
+                                    variant {
+                                        id
+                                        image {
+                                            url
+                                            altText
+                                            width
+                                            height
+                                        }
+                                        product {
+                                            id
+                                            featuredImage {
+                                                url
+                                                altText
+                                                width
+                                                height
+                                            }
+                                        }
+                                    }
                                     customAttributes {
                                         key
                                         value
@@ -640,6 +729,7 @@ const importOrdersDryRun = async (req, res) => {
         const mappedOrders = orders.map((order) => mapShopifyOrderToOrderProductShopify(order, {
             shopDomain: process.env.SHOPIFY_SHOP_DOMAIN,
         }));
+        mappedOrders.forEach(logShopifyImageExtraction);
         console.log("[SHOPIFY][ORDERPRODUCT][MAP]", {
             totalFetched: orders.length,
             mapped: mappedOrders.length,
@@ -765,6 +855,7 @@ const handleOrderCreatedWebhook = async (req, res) => {
     const mapped = mapShopifyOrderToOrderProductShopify(normalizedOrder, {
         shopDomain: req.headers["x-shopify-shop-domain"],
     });
+    logShopifyImageExtraction(mapped);
 
     const duplicate = await OrderProductShopify.findOne({
         duplicateKey: mapped.duplicateKey,
@@ -848,6 +939,11 @@ const handleOrderUpdatedWebhook = async (req, res) => {
     existingOrder.shippingAddress = normalizedOrder.shippingAddress;
     existingOrder.billingAddress = normalizedOrder.billingAddress;
     existingOrder.items = normalizedOrder.lineItems.map(mapNormalizedLineItemToOrderProductItem);
+    logShopifyImageExtraction({
+        shopifyOrderId,
+        shopifyOrderName: normalizedOrder.name,
+        items: existingOrder.items,
+    });
     existingOrder.totalPrice = normalizedOrder.totalPrice;
     existingOrder.financialStatus = normalizedOrder.displayFinancialStatus;
     existingOrder.fulfillmentStatus = normalizedOrder.displayFulfillmentStatus;

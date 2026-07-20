@@ -53,6 +53,29 @@ const shopifyCustomAttributeSchema = new mongoose.Schema(
   { _id: false }
 );
 
+const shopifyImageSchema = new mongoose.Schema(
+  {
+    url: String,
+    altText: String,
+    width: Number,
+    height: Number,
+    source: String,
+  },
+  { _id: false }
+);
+
+const shopifyCustomFileSchema = new mongoose.Schema(
+  {
+    key: String,
+    url: String,
+    type: {
+      type: String,
+    },
+    source: String,
+  },
+  { _id: false }
+);
+
 const shopifyItemSchema = new mongoose.Schema(
   {
     shopifyLineItemGid: String,
@@ -62,8 +85,14 @@ const shopifyItemSchema = new mongoose.Schema(
     sku: String,
     quantity: Number,
     variantTitle: String,
+    img: String,
+    imageUrl: String,
+    variantImageUrl: String,
+    productImageUrl: String,
+    productImage: shopifyImageSchema,
     originalUnitPrice: moneySetSchema,
     customAttributes: [shopifyCustomAttributeSchema],
+    customFiles: [shopifyCustomFileSchema],
     rawLineItem: Object,
   },
   { _id: false }

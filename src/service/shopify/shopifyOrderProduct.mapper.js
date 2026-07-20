@@ -1,3 +1,5 @@
+const { extractCustomFiles } = require("./shopifyImage.service");
+
 function extractShopifyNumericId(gid) {
     const text = String(gid || "").trim();
     if (!text) return "";
@@ -16,6 +18,30 @@ function cloneMoneySet(value = {}) {
         currencyCode: cleanString(value.currencyCode),
         shopAmount: cleanString(value.shopAmount),
         shopCurrencyCode: cleanString(value.shopCurrencyCode),
+    };
+}
+
+function pickImageUrl(item = {}) {
+    return cleanString(
+        item.productImage?.url ||
+        item.imageUrl ||
+        item.img ||
+        item.variantImageUrl ||
+        item.productImageUrl ||
+        item.image?.url ||
+        item.variant?.image?.url ||
+        item.variant?.product?.featuredImage?.url ||
+        item.product?.featuredImage?.url
+    );
+}
+
+function cloneShopifyImage(image = {}) {
+    return {
+        url: cleanString(image.url),
+        altText: cleanString(image.altText),
+        width: Number(image.width || 0),
+        height: Number(image.height || 0),
+        source: cleanString(image.source),
     };
 }
 
@@ -51,6 +77,11 @@ function cloneShippingAddress(address = null) {
 }
 
 function mapShopifyLineItem(item = {}) {
+    const imageUrl = pickImageUrl(item);
+    const productImage = cloneShopifyImage(item.productImage || {
+        url: imageUrl,
+        source: imageUrl ? "legacy_image_url" : "",
+    });
     return {
         shopifyLineItemGid: cleanString(item.id),
         shopifyLineItemId: extractShopifyNumericId(item.id),
@@ -59,6 +90,11 @@ function mapShopifyLineItem(item = {}) {
         sku: cleanString(item.sku),
         quantity: Number(item.quantity || 0),
         variantTitle: cleanString(item.variantTitle),
+        img: imageUrl,
+        imageUrl,
+        variantImageUrl: cleanString(item.variantImageUrl || item.variant?.image?.url),
+        productImageUrl: cleanString(item.productImageUrl || item.variant?.product?.featuredImage?.url || item.product?.featuredImage?.url),
+        productImage,
         originalUnitPrice: cloneMoneySet(item.originalUnitPrice || {}),
         customAttributes: Array.isArray(item.customAttributes)
             ? item.customAttributes.map((attr) => ({
@@ -67,6 +103,7 @@ function mapShopifyLineItem(item = {}) {
                 source: "shopify_line_item_custom_attributes",
             }))
             : [],
+        customFiles: extractCustomFiles(item.customAttributes),
         rawLineItem: item,
     };
 }
