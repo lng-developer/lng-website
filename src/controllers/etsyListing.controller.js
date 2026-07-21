@@ -185,6 +185,20 @@ const firstFiniteNumber = (...values) => {
     return null;
 };
 
+const buildListingImages = (listing) => ([
+    listing.imageUrl,
+    listing.IMAGE1,
+    listing.IMAGE2,
+    listing.IMAGE3,
+    listing.IMAGE4,
+    listing.IMAGE5,
+    listing.IMAGE6,
+    listing.IMAGE7,
+    listing.IMAGE8,
+    listing.IMAGE9,
+    listing.IMAGE10,
+]).map((value) => String(value || "").trim()).filter(Boolean);
+
 const toListingDetailResponse = (listing) => ({
     _id: String(listing._id),
     shopId: listing.shopId ? String(listing.shopId) : "",
@@ -193,6 +207,10 @@ const toListingDetailResponse = (listing) => ({
     listingId: listing.listingId || "",
     title: listing.title || "",
     SKU: listing.SKU || listing.sku || "",
+    imageUrl: buildListingImages(listing)[0] || "",
+    img: buildListingImages(listing)[0] || "",
+    IMAGE1: listing.IMAGE1 || listing.imageUrl || "",
+    images: buildListingImages(listing),
     price: firstFiniteNumber(listing.price, listing.raw?.price, listing.raw?.raw?.price),
     quantity: firstFiniteNumber(listing.quantity, listing.raw?.quantity, listing.raw?.raw?.quantity),
     syncedAt: listing.syncedAt || null,
