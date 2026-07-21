@@ -10,6 +10,12 @@ const {
 
 const OrderProductShopify = db.orderProductShopify;
 
+const SHOPIFY_PROCESS_STATUS = {
+    NEW: "New",
+    SHIPPED: "Shipped",
+    CANCELLED: "Cancelled",
+};
+
 
 
 const {
@@ -385,6 +391,36 @@ function normalizeWebhookOrder(order = {}) {
             ? order.line_items.map((item) => normalizeWebhookLineItem(item, currencyCode))
             : [],
     };
+}
+
+function hasFulfillmentTracking(order = {}) {
+    const fulfillments = Array.isArray(order.fulfillments) ? order.fulfillments : [];
+    return fulfillments.some((fulfillment) => {
+        const trackingNumbers = Array.isArray(fulfillment.tracking_numbers)
+            ? fulfillment.tracking_numbers
+            : [];
+        const trackingUrls = Array.isArray(fulfillment.tracking_urls)
+            ? fulfillment.tracking_urls
+            : [];
+
+        return Boolean(
+            fulfillment.tracking_number ||
+            fulfillment.tracking_url ||
+            trackingNumbers.some(Boolean) ||
+            trackingUrls.some(Boolean)
+        );
+    });
+}
+
+function normalizeProcessStatus(value) {
+    if (value === SHOPIFY_PROCESS_STATUS.NEW) return SHOPIFY_PROCESS_STATUS.NEW;
+    if (value === SHOPIFY_PROCESS_STATUS.SHIPPED) return SHOPIFY_PROCESS_STATUS.SHIPPED;
+    if (value === SHOPIFY_PROCESS_STATUS.CANCELLED) return SHOPIFY_PROCESS_STATUS.CANCELLED;
+
+    const text = String(value || "").trim().toLowerCase();
+    if (text === "shipped") return SHOPIFY_PROCESS_STATUS.SHIPPED;
+    if (text === "cancelled" || text === "canceled") return SHOPIFY_PROCESS_STATUS.CANCELLED;
+    return SHOPIFY_PROCESS_STATUS.NEW;
 }
 
 function mapNormalizedLineItemToOrderProductItem(item = {}) {
@@ -941,6 +977,9 @@ const handleOrderCreatedWebhook = async (req, res) => {
     const mapped = mapShopifyOrderToOrderProductShopify(normalizedOrder, {
         shopDomain: req.headers["x-shopify-shop-domain"],
     });
+    if (hasFulfillmentTracking(req.body)) {
+        mapped.processStatus = SHOPIFY_PROCESS_STATUS.SHIPPED;
+    }
     logShopifyImageExtraction(mapped);
 
     const duplicate = await OrderProductShopify.findOne({
@@ -1010,13 +1049,17 @@ const handleOrderUpdatedWebhook = async (req, res) => {
     const normalizedOrder = normalizeWebhookOrder(req.body);
 
     if (req.body.cancelled_at) {
-        existingOrder.processStatus = "cancelled";
+        existingOrder.processStatus = SHOPIFY_PROCESS_STATUS.CANCELLED;
         console.log("[SHOPIFY][WEBHOOK][ORDER_CANCEL_DETECTED_FROM_UPDATE]", {
             shopifyOrderId,
             shopifyOrderName: req.body.name,
             cancelReason: req.body.cancel_reason || null,
             cancelledAt: req.body.cancelled_at,
         });
+    } else if (hasFulfillmentTracking(req.body)) {
+        existingOrder.processStatus = SHOPIFY_PROCESS_STATUS.SHIPPED;
+    } else {
+        existingOrder.processStatus = normalizeProcessStatus(existingOrder.processStatus);
     }
 
     existingOrder.customer = normalizedOrder.customer;
@@ -1080,7 +1123,7 @@ const handleOrderCancelledWebhook = async (req, res) => {
 
     const normalizedOrder = normalizeWebhookOrder(req.body);
 
-    existingOrder.processStatus = "cancelled";
+    existingOrder.processStatus = SHOPIFY_PROCESS_STATUS.CANCELLED;
     existingOrder.financialStatus = normalizedOrder.displayFinancialStatus;
     existingOrder.fulfillmentStatus = normalizedOrder.displayFulfillmentStatus;
     existingOrder.updatedAtShopify = normalizedOrder.updatedAt ? new Date(normalizedOrder.updatedAt) : null;
@@ -1173,6 +1216,7 @@ const handleCreateFulfillment = async (req, res) => {
     const now = new Date();
 
     existingOrder.fulfillmentStatus = "fulfilled";
+    existingOrder.processStatus = SHOPIFY_PROCESS_STATUS.SHIPPED;
     existingOrder.lastShopifySyncAt = now;
     existingOrder.trackingInfo = {
         fulfillmentId: fulfillment?.id || "",

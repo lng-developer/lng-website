@@ -177,7 +177,7 @@ function mapShopifyOrderToOrderProductShopify(order = {}, options = {}) {
         items: Array.isArray(order.lineItems) ? order.lineItems.map(mapShopifyLineItem) : [],
         rawShopifyOrder: order,
         importStatus: "imported",
-        processStatus: "new",
+        processStatus: "New",
         lastImportAt: now,
     };
 }
