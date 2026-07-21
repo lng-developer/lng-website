@@ -236,8 +236,17 @@ const orderProductShopifySchema = new mongoose.Schema(
 
     processStatus: {
       type: String,
-      enum: ["new", "mapped", "need_review", "ready_for_fulfillment", "cancelled"],
-      default: "new",
+      enum: [
+        "New",
+        "Shipped",
+        "Cancelled",
+        "new",
+        "mapped",
+        "need_review",
+        "ready_for_fulfillment",
+        "cancelled",
+      ],
+      default: "New",
       index: true,
     },
 
