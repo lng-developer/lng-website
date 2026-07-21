@@ -30,6 +30,9 @@ const {
     createShopifyFulfillment,
 } = require("../service/shopify/shopifyFulfillment.service");
 const {
+    cancelShopifyOrder,
+} = require("../service/shopify/shopifyOrderCancel.service");
+const {
     generateShopifyInstallUrl,
     exchangeShopifyOAuthCode,
 } = require("../service/shopify/shopifyAuth.service");
@@ -1246,6 +1249,110 @@ const handleCreateFulfillment = async (req, res) => {
     });
 };
 
+const handleCancelShopifyOrder = async (req, res) => {
+    const shopifyOrderId = String(req.params.orderId || "");
+    const body = req.body || {};
+
+    const existingOrder = await OrderProductShopify.findOne({
+        shopifyOrderId,
+    });
+
+    if (!existingOrder) {
+        return res.status(404).json({
+            ok: false,
+            message: "Shopify order not found",
+        });
+    }
+
+    if (
+        !body.force &&
+        (
+            existingOrder.processStatus === SHOPIFY_PROCESS_STATUS.SHIPPED ||
+            String(existingOrder.fulfillmentStatus || "").toLowerCase() === "fulfilled"
+        )
+    ) {
+        return res.status(400).json({
+            ok: false,
+            message: "Shopify order is already shipped. Pass force=true to cancel on Shopify anyway.",
+            processStatus: existingOrder.processStatus || null,
+            fulfillmentStatus: existingOrder.fulfillmentStatus || null,
+        });
+    }
+
+    if (
+        existingOrder.processStatus === SHOPIFY_PROCESS_STATUS.CANCELLED ||
+        existingOrder.processStatus === "cancelled"
+    ) {
+        return res.json({
+            ok: true,
+            cancelled: true,
+            alreadyCancelled: true,
+            shopifyOrderId,
+        });
+    }
+
+    console.log("[SHOPIFY][ORDER][CANCEL_START]", {
+        shopifyOrderId,
+        shopifyOrderName: existingOrder.shopifyOrderName,
+        reason: body.reason || "OTHER",
+    });
+
+    let result;
+    try {
+        result = await cancelShopifyOrder({
+            orderGid: existingOrder.shopifyOrderGid,
+            reason: body.reason || "OTHER",
+            notifyCustomer: body.notifyCustomer,
+            restock: body.restock,
+            refundOriginalPayment: body.refundOriginalPayment,
+            staffNote: body.staffNote,
+        });
+    } catch (err) {
+        console.error("[SHOPIFY][ORDER][CANCEL_FAILED]", {
+            shopifyOrderId,
+            shopifyOrderName: existingOrder.shopifyOrderName,
+            message: err.message,
+            code: err.code || null,
+        });
+        return res.status(502).json({
+            ok: false,
+            message: err.message,
+            code: err.code || null,
+            shopifyErrors: err.shopifyErrors || undefined,
+        });
+    }
+
+    const now = new Date();
+    existingOrder.processStatus = SHOPIFY_PROCESS_STATUS.CANCELLED;
+    existingOrder.fulfillmentStatus = "cancelled";
+    existingOrder.lastShopifySyncAt = now;
+    existingOrder.shopifyCancelInfo = {
+        jobId: result.job?.id || "",
+        jobDone: Boolean(result.job?.done),
+        reason: body.reason || "OTHER",
+        notifyCustomer: Boolean(body.notifyCustomer),
+        restock: Boolean(body.restock),
+        refundOriginalPayment: Boolean(body.refundOriginalPayment),
+        staffNote: body.staffNote || "",
+        cancelledAt: now,
+    };
+
+    await existingOrder.save();
+
+    console.log("[SHOPIFY][ORDER][CANCEL_SUCCESS]", {
+        shopifyOrderId,
+        shopifyOrderName: existingOrder.shopifyOrderName,
+        jobId: existingOrder.shopifyCancelInfo.jobId,
+    });
+
+    return res.json({
+        ok: true,
+        cancelled: true,
+        shopifyOrderId,
+        job: result.job,
+    });
+};
+
 module.exports = {
     shopifyAuth,
     shopifyAuthCallback,
@@ -1256,6 +1363,7 @@ module.exports = {
     handleOrderUpdatedWebhook,
     handleOrderCancelledWebhook,
     handleCreateFulfillment,
+    handleCancelShopifyOrder,
     normalizeWebhookOrder,
     registerShopifyWebhook
 };

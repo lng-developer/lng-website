@@ -213,6 +213,17 @@ const orderProductShopifySchema = new mongoose.Schema(
       updatedAt: Date,
     },
 
+    shopifyCancelInfo: {
+      jobId: String,
+      jobDone: Boolean,
+      reason: String,
+      notifyCustomer: Boolean,
+      restock: Boolean,
+      refundOriginalPayment: Boolean,
+      staffNote: String,
+      cancelledAt: Date,
+    },
+
     purchaseDate: Date,
     updatedAtShopify: Date,
 
