@@ -10,6 +10,7 @@ router.get("/test-connection", shopifyController.testConnection);
 router.get("/orders", shopifyController.listShopifyOrders);
 router.post("/orders/import", shopifyController.importOrdersDryRun);
 router.post("/orders/:orderId/fulfillment", shopifyController.handleCreateFulfillment);
+router.post("/orders/:orderId/cancel", shopifyController.handleCancelShopifyOrder);
 router.post(
   "/webhooks/orders-create",
   verifyShopifyWebhook,
