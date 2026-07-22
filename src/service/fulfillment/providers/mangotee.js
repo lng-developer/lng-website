@@ -20,6 +20,58 @@ function normalizePhone(raw = "") {
     return cleaned;
 }
 
+function normalizeSeller(rawSeller, fallback = "") {
+    if (rawSeller && typeof rawSeller === "object") {
+        return String(rawSeller.sellerCode || rawSeller.code || rawSeller.name || fallback || "");
+    }
+    return String(rawSeller || fallback || "");
+}
+
+function normalizeCountry(rawCountry = "") {
+    const value = String(rawCountry || "").trim();
+    const lowered = value.toLowerCase();
+    if (!value) return "US";
+    if (lowered === "united states" || lowered === "united states of america" || lowered === "usa") return "US";
+    if (lowered === "canada") return "CA";
+    if (lowered === "united kingdom" || lowered === "great britain") return "GB";
+    return value.length <= 3 ? value.toUpperCase() : value;
+}
+
+function formatValidationDetailItem(item) {
+    if (!item || typeof item !== "object") return String(item || "");
+    const loc = Array.isArray(item.loc) ? item.loc.join(".") : String(item.loc || item.field || "");
+    const msg = String(item.msg || item.message || item.error || "").trim();
+    const type = String(item.type || "").trim();
+    return [loc, msg].filter(Boolean).join(": ") + (type ? ` (${type})` : "");
+}
+
+function formatMangoTee422(data = {}) {
+    if (Array.isArray(data.detail)) {
+        return {
+            reason: data.detail.map(formatValidationDetailItem).filter(Boolean).join("; ") || "Validation Error",
+            details: data.detail,
+        };
+    }
+
+    const errors = Array.isArray(data.errors)
+        ? data.errors
+        : Array.isArray(data.data?.errors)
+            ? data.data.errors
+            : null;
+
+    if (errors) {
+        return {
+            reason: errors.map(formatValidationDetailItem).filter(Boolean).join("; ") || "Validation Error",
+            details: errors,
+        };
+    }
+
+    return {
+        reason: data.message || "Unprocessable Entity",
+        details: data.detail || data.errors || null,
+    };
+}
+
 /* -------------------- Key whitelist (theo spec Mango) -------------------- */
 const ALLOWED_PRINT_KEYS = new Set([
     "front", "back", "right_sleeve", "left_sleeve", "neck_label", "right_wrist", "left_wrist",
@@ -231,7 +283,7 @@ function buildPayload(orderObj = {}) {
     const { firstName, lastName } = splitName(customer.name || "");
     const payload = {
         order_id: orderObj.orderId|| orderObj.order_id || "",
-        seller: orderObj.seller || orderObj.sellerCode || "",
+        seller: normalizeSeller(orderObj.seller, orderObj.sellerCode),
         user_id: orderObj.user_id || orderObj.userId || "",
         shipping_method: mapShippingMethod(orderObj),
         email: customer.email || "",
@@ -243,7 +295,7 @@ function buildPayload(orderObj = {}) {
         city: customer.city || "",
         state: customer.state || "",
         zip: customer.zip_code || customer.zip || "",
-        country: customer.country_full || customer.country || "United States",
+        country: normalizeCountry(customer.country_full || customer.country || "US"),
         label_url:
             orderObj.label_url || orderObj.labelUrl || orderObj.shipping_label_url || "",
         note: orderObj.note || orderObj.order_note || "",
@@ -454,11 +506,10 @@ async function send(orderDoc) {
         }
 
         if (status === 422 && data) {
-            const reason = Array.isArray(data.errors)
-                ? data.errors.map((x) => x?.message || x).join("; ")
-                : data.message || "Unprocessable Entity";
+            const { reason, details } = formatMangoTee422(data);
             const err = new Error(`MangoTee 422: ${reason}`);
             err.code = "MANGOTEE_422";
+            if (details) err.details = details;
             err.vendorResponse = data;
             throw err;
         }
