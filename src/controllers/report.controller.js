@@ -212,6 +212,14 @@ function toAmzReportDayStart(value) {
   });
 }
 
+function isSellerReportDayAllowed(sellerWorkMap, sellerId, reportDay) {
+  if (!sellerId || !reportDay) return true;
+  const work = sellerWorkMap.get(String(sellerId));
+  if (!work?.endDay) return true;
+  const day = toAmzReportDayStart(reportDay);
+  return !day || day <= work.endDay;
+}
+
 function formatAmzDateTime(value) {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return "";
@@ -737,6 +745,39 @@ const getReportMatrix = async (req, res) => {
       { day: 1, by_seller: 1 },
     ).lean();
 
+    const sellerIdsForWork = new Set();
+    for (const r of rows) {
+      if (r?._id?.sellerId && mongoose.Types.ObjectId.isValid(r._id.sellerId)) {
+        sellerIdsForWork.add(String(r._id.sellerId));
+      }
+    }
+    for (const doc of adsDocs) {
+      for (const row of doc.by_seller || []) {
+        const sid = row?.seller?._id;
+        if (sid && mongoose.Types.ObjectId.isValid(sid)) {
+          sellerIdsForWork.add(String(sid));
+        }
+      }
+    }
+
+    const sellerObjectIdsForWork = Array.from(sellerIdsForWork).map(
+      (id) => new mongoose.Types.ObjectId(id),
+    );
+    const sellerWorkMap = new Map();
+    if (sellerObjectIdsForWork.length) {
+      const userDocs = await User.find(
+        { _id: { $in: sellerObjectIdsForWork } },
+        { _id: 1, start_seller: 1, end_seller: 1 },
+      ).lean();
+
+      for (const u of userDocs) {
+        sellerWorkMap.set(String(u._id), {
+          startDay: toAmzReportDayStart(u.start_seller),
+          endDay: toAmzReportDayStart(u.end_seller),
+        });
+      }
+    }
+
     const adsMap = new Map(); // key = `${sellerId}|${iso(day)}`
     for (const doc of adsDocs) {
       const reportDay = adsSummaryDayToAmzReportDayStart(doc.day);
@@ -748,6 +789,7 @@ const getReportMatrix = async (req, res) => {
 
         // ✅ vẫn giữ logic filter ads theo sellerIdSet (đã set theo team/seller ở trên)
         if (sellerIdSet && !sellerIdSet.has(String(sid))) continue;
+        if (!isSellerReportDayAllowed(sellerWorkMap, sid, reportDay)) continue;
 
         const key = `${String(sid)}|${dayIso}`;
         adsMap.set(key, {
@@ -765,6 +807,9 @@ const getReportMatrix = async (req, res) => {
 
     for (const r of rows) {
       const sellerName = r._id.sellerName || "Unknown";
+      if (!isSellerReportDayAllowed(sellerWorkMap, r?._id?.sellerId, r._id.day)) {
+        continue;
+      }
       const idx = dayIndex.get(iso(r._id.day));
       if (idx == null) continue;
 
@@ -836,29 +881,6 @@ const getReportMatrix = async (req, res) => {
 
     // ===== 6.5) Tính opCost theo start_seller / end_seller + loại trừ boss + inclusive start day =====
     const fixedOpCost = Number(OPCOST_PER_PERSON_PER_DAY || 0);
-
-    const sellerIdsForOp = Array.from(sellerNameToId.values())
-      .filter((id) => mongoose.Types.ObjectId.isValid(id))
-      .map((id) => String(id));
-
-    const sellerObjectIdsForOp = sellerIdsForOp
-      .filter((id) => !OP_COST_EXCLUDE_USER_IDS.has(id))
-      .map((id) => new mongoose.Types.ObjectId(id));
-
-    const sellerWorkMap = new Map();
-    if (sellerObjectIdsForOp.length) {
-      const userDocs = await User.find(
-        { _id: { $in: sellerObjectIdsForOp } },
-        { _id: 1, start_seller: 1, end_seller: 1 },
-      ).lean();
-
-      for (const u of userDocs) {
-        sellerWorkMap.set(String(u._id), {
-          startDay: toAmzReportDayStart(u.start_seller),
-          endDay: toAmzReportDayStart(u.end_seller),
-        });
-      }
-    }
 
     const today = new Date();
     const effectiveNow = today < toDate ? today : toDate;
