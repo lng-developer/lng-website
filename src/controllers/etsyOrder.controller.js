@@ -264,6 +264,49 @@ const toDate = (v) => {
     return Number.isNaN(d.getTime()) ? null : d;
 };
 
+const decodeEtsyHtmlEntities = (value) => {
+    if (value === null || value === undefined) return "";
+    return String(value)
+        .replace(/&#(\d+);/g, (_match, code) => {
+            const point = Number(code);
+            if (!Number.isFinite(point) || point < 0 || point > 0x10FFFF) return _match;
+            return String.fromCodePoint(point);
+        })
+        .replace(/&#x([0-9a-f]+);/gi, (_match, code) => {
+            const point = Number.parseInt(code, 16);
+            if (!Number.isFinite(point) || point < 0 || point > 0x10FFFF) return _match;
+            return String.fromCodePoint(point);
+        })
+        .replace(/&quot;/g, '"')
+        .replace(/&apos;/g, "'")
+        .replace(/&#39;/g, "'")
+        .replace(/&amp;/g, "&")
+        .replace(/&lt;/g, "<")
+        .replace(/&gt;/g, ">");
+};
+
+const normalizeEtsyTextValue = (value) => decodeEtsyHtmlEntities(String(value ?? "").trim());
+
+const normalizeEtsyVariationObject = (variations = {}) => {
+    if (!variations || typeof variations !== "object" || Array.isArray(variations)) return {};
+    return Object.fromEntries(
+        Object.entries(variations).map(([key, value]) => [
+            normalizeEtsyTextValue(key),
+            normalizeEtsyTextValue(value),
+        ])
+    );
+};
+
+function decodeEtsyHtmlEntitiesInObject(value) {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return value;
+    return Object.fromEntries(
+        Object.entries(value).map(([key, raw]) => [
+            key,
+            typeof raw === "string" ? decodeEtsyHtmlEntities(raw) : raw,
+        ])
+    );
+}
+
 const parseVariations = (raw) => {
     if (!raw) return {};
     const out = {};
@@ -271,7 +314,7 @@ const parseVariations = (raw) => {
     for (const p of parts) {
         const idx = p.indexOf(':');
         if (idx === -1) continue;
-        out[p.slice(0, idx).trim()] = p.slice(idx + 1).trim();
+        out[normalizeEtsyTextValue(p.slice(0, idx))] = normalizeEtsyTextValue(p.slice(idx + 1));
     }
     return out;
 };
@@ -1587,17 +1630,6 @@ async function selectConfigByProductType(configCode, labelValueMap, mapOptionVal
     return { cfg: null, reason: `Multiple configs (${cfgCandidates.length}) - partial matches (${partialMatches.length}); cannot determine by product type key/value` };
 }
 
-function decodeEtsyHtmlEntities(value) {
-    return String(value || "")
-        .replace(/&#39;/g, "'")
-        .replace(/&#x27;/gi, "'")
-        .replace(/&quot;/g, '"')
-        .replace(/&#34;/g, '"')
-        .replace(/&amp;/g, "&")
-        .replace(/&lt;/g, "<")
-        .replace(/&gt;/g, ">");
-}
-
 function normalizeEtsyCostValue(value) {
     return decodeEtsyHtmlEntities(value)
         .trim()
@@ -2637,8 +2669,8 @@ function normalizeCustomizations(input = {}) {
         ? input.textFields
             .slice(0, MAX_CUSTOM_TEXT_FIELDS)
             .map((field) => ({
-                name: sanitizeCustomString(field?.name),
-                value: sanitizeCustomString(field?.value),
+                name: decodeEtsyHtmlEntities(sanitizeCustomString(field?.name)),
+                value: decodeEtsyHtmlEntities(sanitizeCustomString(field?.value)),
                 source: sanitizeCustomString(field?.source),
             }))
             .filter((field) => field.name || field.value)
@@ -2646,8 +2678,8 @@ function normalizeCustomizations(input = {}) {
 
     return {
         textFields,
-        buyerNote: sanitizeCustomString(input.buyerNote),
-        raw: sanitizeCustomRaw(input.raw),
+        buyerNote: decodeEtsyHtmlEntities(sanitizeCustomString(input.buyerNote)),
+        raw: decodeEtsyHtmlEntitiesInObject(sanitizeCustomRaw(input.raw)),
     };
 }
 
@@ -2889,6 +2921,7 @@ const normalizeItem = (raw, idx, skuMappingConfigs = []) => {
     let variations = raw?.variations;
     if (typeof variations === "string") variations = parseVariations(variations);
     if (!variations || typeof variations !== "object") variations = {};
+    variations = normalizeEtsyVariationObject(variations);
     const listingId = firstNonBlankString(raw?.listingId, raw?.listing_id, raw?.listingID, raw?.listing);
     const customizations = normalizeCustomizations(raw?.customizations);
     const customFiles = normalizeCustomFiles(raw?.customFiles, {
@@ -4134,6 +4167,12 @@ const getFulfillmentFileKeys = (value) => {
     return Object.keys(fileMap).filter((key) => fileMap[key]);
 };
 
+const toEtsyFullSizeImageUrl = (url) => {
+    const value = firstNonBlankString(url);
+    if (!value) return "";
+    return value.replace(/\/il_(?:\d+x\d+|\d+xN|N+x\d+)\./i, "/il_fullxfull.");
+};
+
 const buildFulfillmentPlatformPayloadPreview = (payload) =>
     (Array.isArray(payload?.data) ? payload.data : []).flatMap((order) =>
         (Array.isArray(order.items) ? order.items : []).map((item) => ({
@@ -4147,9 +4186,9 @@ const buildFulfillmentPlatformPayloadPreview = (payload) =>
     );
 
 const resolveEtsyBaseImageUrl = (item = {}) => {
-    if (typeof item.baseImage === "string") return firstNonBlankString(item.baseImage);
+    if (typeof item.baseImage === "string") return toEtsyFullSizeImageUrl(item.baseImage);
 
-    return firstNonBlankString(
+    return toEtsyFullSizeImageUrl(firstNonBlankString(
         item.baseImageUrl,
         item.baseImage?.imageUrl,
         item.baseImage?.url,
@@ -4157,7 +4196,7 @@ const resolveEtsyBaseImageUrl = (item = {}) => {
         item.baseImage?.previewUrl,
         item.listing?.product_image,
         item.listing?.imageUrl
-    );
+    ));
 };
 
 const serializeEtsyOrderForFulfillmentPlatform = (order) => ({
