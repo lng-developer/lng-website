@@ -1,7 +1,14 @@
 const XLSX = require("xlsx");
 const fs = require("fs");
+const path = require("path");
+const multer = require("multer");
 const mongoose = require("mongoose");
 const EtsyListing = require("../models/etsyListing.model");
+const {
+    uploadBufferToWasabi,
+    getSignedUrlForKey,
+    deleteObjectFromWasabi,
+} = require("../utils/wasabi");
 
 // Các cột cần extract từ file Excel/CSV
 const REQUIRED_COLUMNS = [
@@ -18,6 +25,27 @@ const REQUIRED_COLUMNS = [
     "IMAGE10",
     "SKU",
 ];
+
+const DESIGN_FILE_MIME_BY_EXT = {
+    ".zip": "application/zip",
+};
+
+const designFileUpload = multer({
+    storage: multer.memoryStorage(),
+    limits: { fileSize: 1024 * 1024 * 1024 },
+    fileFilter: (_req, file, cb) => {
+        const ext = (path.extname(file.originalname) || "").toLowerCase();
+        if (ext !== ".zip") return cb(new Error("Only .zip files are accepted"));
+        cb(null, true);
+    },
+});
+
+const normalizeListingIdParam = (value) => String(value || "").trim();
+
+const buildEtsyListingDesignFileKey = (listingId, ext = ".zip") => {
+    const safeListingId = normalizeListingIdParam(listingId).replace(/[^A-Za-z0-9_.-]/g, "_");
+    return `etsy-listings/${safeListingId}/${safeListingId}${ext}`;
+};
 
 /**
  * API parse file Excel/CSV chứa Etsy listing
@@ -345,6 +373,169 @@ const getEtsyListingDetail = async (req, res) => {
     }
 };
 
+const uploadEtsyListingDesignFile = [
+    designFileUpload.single("file"),
+    async (req, res) => {
+        try {
+            const listingId = normalizeListingIdParam(req.query?.listingId);
+
+            if (!listingId) {
+                return res.status(400).json({ ok: false, message: "listingId is required" });
+            }
+            if (!req.file?.buffer) {
+                return res.status(400).json({ ok: false, message: "file is required (field: file)" });
+            }
+
+            const existing = await EtsyListing.findOne({ listingId }).lean();
+            if (!existing) {
+                return res.status(404).json({ ok: false, message: "Etsy listing not found" });
+            }
+
+            const originalName = req.file.originalname || `${listingId}.zip`;
+            const ext = ".zip";
+            const key = buildEtsyListingDesignFileKey(listingId, ext);
+            const contentType = DESIGN_FILE_MIME_BY_EXT[ext];
+            const uploaded = await uploadBufferToWasabi(req.file.buffer, {
+                key,
+                contentType,
+            });
+
+            const updated = await EtsyListing.findOneAndUpdate(
+                { listingId },
+                {
+                    $set: {
+                        "designFile.key": uploaded.key,
+                        "designFile.url": uploaded.url,
+                        "designFile.fileName": originalName,
+                        "designFile.fileExt": ext,
+                        "designFile.mime": contentType,
+                        "designFile.size": req.file.size || 0,
+                        "designFile.uploadedAt": new Date(),
+                    },
+                },
+                { new: true }
+            ).lean();
+
+            if (!updated) {
+                return res.status(404).json({ ok: false, message: "Etsy listing not found" });
+            }
+
+            return res.json({
+                ok: true,
+                message: "Etsy listing design file uploaded",
+                listingId,
+                key: uploaded.key,
+                item: updated,
+            });
+        } catch (error) {
+            console.error("uploadEtsyListingDesignFile error:", error);
+            return res.status(500).json({
+                ok: false,
+                message: "Upload Etsy listing design file failed",
+                error: error.message,
+            });
+        }
+    },
+];
+
+const getEtsyListingDesignFileSignedUrl = async (req, res) => {
+    try {
+        const listingId = normalizeListingIdParam(req.query?.listingId);
+        const expires = Math.max(60, Math.min(86400, Number(req.query?.expires) || 3600));
+        const asAttachment = String(req.query?.download || "") === "1";
+
+        if (!listingId) {
+            return res.status(400).json({ ok: false, message: "listingId is required" });
+        }
+
+        const listing = await EtsyListing.findOne({ listingId }).lean();
+        if (!listing) {
+            return res.status(404).json({ ok: false, message: "Etsy listing not found" });
+        }
+
+        const key = String(listing.designFile?.key || "").trim();
+        if (!key) {
+            return res.status(404).json({ ok: false, message: "Etsy listing design file not found" });
+        }
+
+        const ext = String(listing.designFile?.fileExt || ".zip").toLowerCase();
+        const filename = `${listingId}${ext}`;
+        const signedUrl = await getSignedUrlForKey(key, {
+            expiresIn: expires,
+            asAttachment,
+            filename,
+        });
+
+        return res.json({
+            ok: true,
+            listingId,
+            key,
+            signed_url: signedUrl,
+            expires_in: expires,
+        });
+    } catch (error) {
+        console.error("getEtsyListingDesignFileSignedUrl error:", error);
+        return res.status(500).json({
+            ok: false,
+            message: "Get Etsy listing design file signed URL failed",
+            error: error.message,
+        });
+    }
+};
+
+const deleteEtsyListingDesignFile = async (req, res) => {
+    try {
+        const listingId = normalizeListingIdParam(req.query?.listingId);
+
+        if (!listingId) {
+            return res.status(400).json({ ok: false, message: "listingId is required" });
+        }
+
+        const listing = await EtsyListing.findOne({ listingId }).lean();
+        if (!listing) {
+            return res.status(404).json({ ok: false, message: "Etsy listing not found" });
+        }
+
+        const key = String(listing.designFile?.key || "").trim();
+        if (!key) {
+            return res.status(404).json({ ok: false, message: "Etsy listing design file not found" });
+        }
+
+        await deleteObjectFromWasabi(key);
+
+        const updated = await EtsyListing.findOneAndUpdate(
+            { listingId },
+            {
+                $set: {
+                    "designFile.key": "",
+                    "designFile.url": "",
+                    "designFile.fileName": "",
+                    "designFile.fileExt": ".zip",
+                    "designFile.mime": "",
+                    "designFile.size": 0,
+                    "designFile.uploadedAt": null,
+                },
+            },
+            { new: true }
+        ).lean();
+
+        return res.json({
+            ok: true,
+            message: "Etsy listing design file deleted",
+            listingId,
+            key,
+            item: updated,
+        });
+    } catch (error) {
+        console.error("deleteEtsyListingDesignFile error:", error);
+        return res.status(500).json({
+            ok: false,
+            message: "Delete Etsy listing design file failed",
+            error: error.message,
+        });
+    }
+};
+
 const syncEtsyListings = async (req, res) => {
     try {
         const {
@@ -511,4 +702,8 @@ module.exports = {
     getEtsyListingSyncStatus,
     getEtsyListingDetail,
     listEtsyListings,
+    uploadEtsyListingDesignFile,
+    getEtsyListingDesignFileSignedUrl,
+    deleteEtsyListingDesignFile,
+    buildEtsyListingDesignFileKey,
 };
