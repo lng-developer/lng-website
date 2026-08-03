@@ -53,6 +53,20 @@ function computeOverallScaleStatus(orderDoc) {
   return "Need Scale";
 }
 
+function extractVersion3Data(item) {
+  const surfaces = item.version3Data?.customizationInfo?.surfaces || [];
+  return surfaces.flatMap((surface) =>
+    (surface.areas || []).map((area) => {
+      const value = area.optionValue || area.text || area.numberValue;
+      return {
+        ...area,
+        label: area.label || area.name || "",
+        value: value ?? "",
+      };
+    })
+  );
+}
+
 // Detect if an order belongs to LNG Group based on Shop info
 async function isLNGGroupOrder(orderDoc) {
   try {
@@ -1588,13 +1602,7 @@ const getScaleList = async (req, res) => {
     // ===== Final result =====
     const result = orders.map((order) => {
       const items = (order.items || []).map((item) => {
-        const surfaces = item.version3Data?.customizationInfo?.surfaces || [];
-        const version3Data = surfaces.flatMap((surface) =>
-          (surface.areas || []).map((area) => ({
-            label: area.label || area.name || "",
-            value: area.optionValue || area.text || "",
-          }))
-        );
+        const version3Data = extractVersion3Data(item);
 
         const vendorProductId = item?.cost_breakdown?.vendorProductId || null;
         const vendorProductDisplayName = vendorProductId
@@ -2150,13 +2158,7 @@ const getScaleListForDesign = async (req, res) => {
     // === Final mapping ===
     const result = orders.map((order) => {
       const items = (order.items || []).map((item) => {
-        const surfaces = item.version3Data?.customizationInfo?.surfaces || [];
-        const version3Data = surfaces.flatMap((surface) =>
-          (surface.areas || []).map((area) => ({
-            label: area.label || area.name || "",
-            value: area.optionValue || area.text || "",
-          }))
-        );
+        const version3Data = extractVersion3Data(item);
 
         const vendorProductId = item?.cost_breakdown?.vendorProductId || null;
         const vendorProductDisplayName = vendorProductId
