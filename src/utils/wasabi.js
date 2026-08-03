@@ -4,6 +4,7 @@ const {
     PutObjectCommand,
     GetObjectCommand,
     HeadObjectCommand,
+    DeleteObjectCommand,
 } = require('@aws-sdk/client-s3');
 const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
 
@@ -111,10 +112,20 @@ async function getSignedUrlForKey(key, { expiresIn = 3600, asAttachment = false,
     return await getSignedUrl(client, cmd, { expiresIn });
 }
 
+async function deleteObjectFromWasabi(key) {
+    const { client, config } = getWasabiClient();
+    await client.send(new DeleteObjectCommand({
+        Bucket: config.bucket,
+        Key: key,
+    }));
+    return { key };
+}
+
 module.exports = {
     s3,
     uploadBufferToWasabi,
     getSignedUrlForKey,
+    deleteObjectFromWasabi,
     objectExists,
     buildPsdKeyFromAsin,
     inferWasabiRegion,
