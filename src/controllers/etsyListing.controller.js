@@ -235,6 +235,8 @@ const toListingDetailResponse = (listing) => ({
     listingId: listing.listingId || "",
     title: listing.title || "",
     SKU: listing.SKU || listing.sku || "",
+    PSDstatus: !!listing.PSDstatus,
+    designFile: listing.designFile || null,
     imageUrl: buildListingImages(listing)[0] || "",
     img: buildListingImages(listing)[0] || "",
     IMAGE1: listing.IMAGE1 || listing.imageUrl || "",
@@ -411,6 +413,7 @@ const uploadEtsyListingDesignFile = [
                         "designFile.mime": contentType,
                         "designFile.size": req.file.size || 0,
                         "designFile.uploadedAt": new Date(),
+                        PSDstatus: true,
                     },
                 },
                 { new: true }
@@ -514,6 +517,7 @@ const deleteEtsyListingDesignFile = async (req, res) => {
                     "designFile.mime": "",
                     "designFile.size": 0,
                     "designFile.uploadedAt": null,
+                    PSDstatus: false,
                 },
             },
             { new: true }

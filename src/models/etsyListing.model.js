@@ -30,6 +30,7 @@ const etsyListingSchema = new mongoose.Schema(
         skuSource: { type: String, default: "" },
         raw: { type: mongoose.Schema.Types.Mixed, default: null },
         syncedAt: { type: Date },
+        PSDstatus: { type: Boolean, default: false },
         designFile: {
             key: { type: String, default: "" },
             url: { type: String, default: "" },
