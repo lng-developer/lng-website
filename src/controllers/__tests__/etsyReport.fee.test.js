@@ -23,6 +23,7 @@ test("uses the aggregated Etsy fee instead of 21.5% of revenue", async () => {
     item_promotion_discount: 12.85,
     baseCost: 0,
     refund: 0,
+    missing_base_cost_orders: 1,
   }]);
   db.EtsyAdsDailySummary.find.mockReturnValue({
     lean: jest.fn().mockResolvedValue([]),
@@ -45,4 +46,6 @@ test("uses the aggregated Etsy fee instead of 21.5% of revenue", async () => {
   const seller = res.json.mock.calls[0][0].data["Nguyễn Đức Sơn (Bé)"];
   expect(seller.fee).toEqual([5.26]);
   expect(seller.profit1).toEqual([35.6]);
+  expect(seller.missingBaseCostOrders).toEqual([1]);
+  expect(seller.totals.missingBaseCostOrders).toBe(1);
 });

@@ -37,6 +37,7 @@ const makeMetricSeries = (zeroArr) => ({
   itemTax: zeroArr(),
   profit1: zeroArr(),
   profit2: zeroArr(),
+  missingBaseCostOrders: zeroArr(),
 });
 
 const getEtsyReportMatrix = async (req, res) => {
@@ -170,6 +171,11 @@ const getEtsyReportMatrix = async (req, res) => {
 
           baseCost: { $sum: { $ifNull: ["$base_cost", 0] } },
           refund: { $sum: { $ifNull: ["$etsy_finance_total.refund", 0] } },
+          missing_base_cost_orders: {
+            $sum: {
+              $cond: [{ $lte: [{ $ifNull: ["$base_cost", 0] }, 0] }, 1, 0],
+            },
+          },
         }
       },
       { $sort: { "_id.day": 1 } },
@@ -276,6 +282,7 @@ const getEtsyReportMatrix = async (req, res) => {
       S.shippingTax[idx] = +(r.shipping_tax || 0).toFixed(2); // Actually mapping 'shipping' here
       S.itemPromotionDiscount[idx] = +(Math.abs(r.item_promotion_discount) || 0).toFixed(2);
       S.itemTax[idx] = +(r.item_tax || 0).toFixed(2);
+      S.missingBaseCostOrders[idx] = Number(r.missing_base_cost_orders) || 0;
       // opCost and ads filled below
     }
 
@@ -368,7 +375,8 @@ const getEtsyReportMatrix = async (req, res) => {
         opCost: sum(S.opCost),
         refund: sum(S.refund),
         profit1: sum(S.profit1),
-        profit2: sum(S.profit2)
+        profit2: sum(S.profit2),
+        missingBaseCostOrders: sum(S.missingBaseCostOrders),
       };
     }
 
