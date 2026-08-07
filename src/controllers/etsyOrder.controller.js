@@ -22,6 +22,7 @@ const {
     buildEtsyTrackingSummary,
 } = require("../service/etsyTrackingResponse.service");
 const logger = require("../helper/logger");
+const { calculateEtsyEstimatedFee } = require("../helper/etsyFee");
 const {
     applyRulesToSku,
     buildRulesFromConfig,
@@ -1048,18 +1049,7 @@ const importOrders = async (req, res) => {
                             }
                         }
 
-                        // Tính FEE theo công thức đặc thù VN:
-                        // 1. 6.5% of ordertotal (excluding tax)
-                        // 2. 4.5% of ordertotal + 11500vnd (quy đổi USD)
-                        // 3. 1.24% of ordertotal (excluding tax)
-                        const orderTotalExcludingTax = orderTotal - salesTax;
-                        const exchangeRate = 26000; // Tỷ giá giả định 26,000 VND = 1 USD
-                        const fixedFeeUsd = 11500 / exchangeRate;
-
-                        const calculatedFee =
-                            (0.065 * orderTotalExcludingTax) +
-                            (0.045 * orderTotal + fixedFeeUsd) +
-                            (0.0124 * orderTotalExcludingTax);
+                        const calculatedFee = calculateEtsyEstimatedFee({ orderTotal, salesTax });
 
                         return {
                             updateOne: {
@@ -1086,7 +1076,7 @@ const importOrders = async (req, res) => {
                                         "totals.shipping": shipping,
                                         "totals.salesTax": salesTax,
                                         "totals.orderTotal": orderTotal,
-                                        "totals.fee": Number(calculatedFee.toFixed(2)),
+                                        "totals.fee": calculatedFee,
                                         "totals.cardProcessingFees": cardProcessingFees,
                                         "totals.orderNet": orderNet,
                                         "totals.discountAmount": discountAmount

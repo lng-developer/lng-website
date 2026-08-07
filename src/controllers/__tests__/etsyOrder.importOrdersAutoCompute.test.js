@@ -148,6 +148,9 @@ describe("importOrders auto base cost", () => {
 
     expect(res.status).not.toHaveBeenCalled();
     expect(db.EtsyOrder.bulkWrite).toHaveBeenCalledTimes(2);
+    expect(
+      db.EtsyOrder.bulkWrite.mock.calls[0][0][0].updateOne.update.$set["totals.fee"]
+    ).toBe(1.67);
     expect(db.EtsyOrder.updateOne).toHaveBeenCalledWith(
       { _id: orderDocId },
       expect.objectContaining({
