@@ -41,7 +41,6 @@ Invalid, negative, or absent numeric inputs are treated as zero. The result is r
 
 - Backfill is dry-run by default.
 - Apply mode requires the explicit `--apply` flag.
-- The query is limited to Etsy orders with missing/zero `totals.fee` and a positive `totals.orderTotal`.
+- The query is limited to Etsy orders sold from `2026-08-01T00:00:00.000Z` with missing/zero `totals.fee` and a positive `totals.orderTotal`.
 - Unit tests lock the sample calculation and ensure reports consume aggregated fee rather than `21.5%` of revenue.
 - Focused Jest tests run before the full suite.
-

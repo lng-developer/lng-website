@@ -16,6 +16,7 @@
 - Do not import Etsy Payment Account data in this change.
 - Backfill must make no writes unless `--apply` is present.
 - Apply mode may update only `totals.fee` on eligible Etsy orders.
+- Backfill may select only orders with `saleDate >= 2026-08-01T00:00:00.000Z`.
 
 ---
 
@@ -174,6 +175,7 @@ Query only:
 
 ```js
 {
+  saleDate: { $gte: new Date("2026-08-01T00:00:00.000Z") },
   "totals.orderTotal": { $gt: 0 },
   $or: [
     { "totals.fee": { $exists: false } },
@@ -234,4 +236,3 @@ Expected: no whitespace errors; only intentional uncommitted plan/documentation 
 - [ ] **Step 4: Recheck J2610 without writing**
 
 Run the existing report path or an equivalent read-only aggregation for employee `J2610` on `2026-08-07`. Confirm the report uses the stored/backfilled fee and separately flag any order whose `base_cost` remains zero.
-

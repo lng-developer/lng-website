@@ -1,6 +1,8 @@
 const { calculateEtsyEstimatedFee } = require("../src/helper/etsyFee");
 
+const BACKFILL_FROM = new Date("2026-08-01T00:00:00.000Z");
 const ELIGIBLE_ORDERS = {
+  saleDate: { $gte: BACKFILL_FROM },
   "totals.orderTotal": { $gt: 0 },
   $or: [
     { "totals.fee": { $exists: false } },
@@ -71,4 +73,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { ELIGIBLE_ORDERS, backfillEtsyFees };
+module.exports = { BACKFILL_FROM, ELIGIBLE_ORDERS, backfillEtsyFees };

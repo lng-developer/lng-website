@@ -18,6 +18,12 @@ test("dry-run reports changes without writing", async () => {
     collection,
     logger: jest.fn(),
   })).resolves.toEqual({ matched: 1, changed: 1, written: 0 });
+  expect(collection.find).toHaveBeenCalledWith(
+    expect.objectContaining({
+      saleDate: { $gte: new Date("2026-08-01T00:00:00.000Z") },
+    }),
+    expect.any(Object)
+  );
   expect(collection.bulkWrite).not.toHaveBeenCalled();
 });
 
