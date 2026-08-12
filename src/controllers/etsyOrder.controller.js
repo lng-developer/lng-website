@@ -4173,6 +4173,20 @@ const toEtsyFullSizeImageUrl = (url) => {
     return value.replace(/\/il_(?:\d+x\d+|\d+xN|N+x\d+)\./i, "/il_fullxfull.");
 };
 
+const normalizeEtsyImageLinks = (value) => {
+    if (typeof value === "string") return toEtsyFullSizeImageUrl(value);
+    if (Array.isArray(value)) return value.map(normalizeEtsyImageLinks);
+    if (value && typeof value === "object") {
+        return Object.fromEntries(
+            Object.entries(value).map(([key, objectValue]) => [
+                key,
+                normalizeEtsyImageLinks(objectValue),
+            ])
+        );
+    }
+    return value;
+};
+
 const buildFulfillmentPlatformPayloadPreview = (payload) =>
     (Array.isArray(payload?.data) ? payload.data : []).flatMap((order) =>
         (Array.isArray(order.items) ? order.items : []).map((item) => ({
@@ -4218,7 +4232,7 @@ const serializeEtsyOrderForFulfillmentPlatform = (order) => ({
     shopName: order.shopId?.name || order.shopName || "",
     shipping_type: order.shipping_type || "Standard",
     items: (order.items || []).map((item) => {
-        const snapshotImageUrl = item.snapshotImageUrl || item.snapshotImage || "";
+        const snapshotImageUrl = toEtsyFullSizeImageUrl(item.snapshotImageUrl || item.snapshotImage || "");
         const baseImageUrl = resolveEtsyBaseImageUrl(item);
 
         return {
@@ -4229,18 +4243,18 @@ const serializeEtsyOrderForFulfillmentPlatform = (order) => ({
             quantity: item.quantity || 1,
             asin: item.asin || "",
             version3Data: buildEtsyVersion3Data(item),
-            customized_url: item.customized_url || "",
+            customized_url: toEtsyFullSizeImageUrl(item.customized_url),
             baseImageUrl,
             snapshotImage: snapshotImageUrl,
             snapshotImageUrl,
-            fulfillment_file: toPlainFulfillmentFile(item.fulfillment_file),
+            fulfillment_file: normalizeEtsyImageLinks(toPlainFulfillmentFile(item.fulfillment_file)),
             listingId: item.listingId || "",
             cost_center: item.cost_breakdown || {},
             scale_status: item.scale_status || null,
             qc_note: item.qc_note || "",
             cs_note: item.cs_note || "",
             customizations: item.customizations || null,
-            customFiles: item.customFiles || [],
+            customFiles: normalizeEtsyImageLinks(item.customFiles || []),
         };
     }),
     source: "portal",

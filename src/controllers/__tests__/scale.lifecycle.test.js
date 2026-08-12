@@ -152,6 +152,57 @@ describe("scale lifecycle hooks", () => {
     }));
   });
 
+  test("confirmScaleForItem does not mark order ready when vendor send fails", async () => {
+    const item = {
+      orderItemId: "ITEM-1",
+      scale_status: "Pending",
+      fulfillment_file: { front: "https://cdn/front.png" },
+      markModified: jest.fn(),
+    };
+    const order = {
+      _id: "order-1",
+      orderId: "ORDER-1",
+      platform: "Amazon",
+      scale_overall_status: "Pending",
+      status: "New",
+      vendor_submissions: {},
+      items: [item],
+      markModified: jest.fn(),
+      save: jest.fn().mockResolvedValue(undefined),
+    };
+    db.orderCustomProduct.findOne.mockResolvedValue(order);
+    FulfillmentService.send.mockRejectedValue(new Error("Vendor API failed"));
+
+    const req = {
+      params: { orderId: "ORDER-1", orderItemId: "ITEM-1" },
+      body: { decision: "approve", provider: "merchize" },
+      user: { _id: "user-1", email: "qc@example.com", role: "Admin" },
+      headers: { "user-agent": "jest" },
+    };
+    const res = makeRes();
+
+    await controller.confirmScaleForItem(req, res);
+
+    expect(order.scale_overall_status).toBe("Failed");
+    expect(logOrderLifecycleEvent).not.toHaveBeenCalledWith(expect.objectContaining({
+      stage: "SCALE",
+      eventType: "SCALE_ORDER_READY",
+    }));
+    expect(logOrderLifecycleEvent).toHaveBeenCalledWith(expect.objectContaining({
+      platform: "amazon",
+      orderId: "ORDER-1",
+      stage: "VENDOR_PUSH",
+      eventType: "VENDOR_PUSH_FAILED",
+      status: "failed",
+      reason: "Vendor API failed",
+    }));
+    expect(res.status).toHaveBeenCalledWith(502);
+    expect(res.json).toHaveBeenCalledWith(expect.objectContaining({
+      message: "Approved but sending order to merchize failed. Overall status set to Failed.",
+      error: "Vendor API failed",
+    }));
+  });
+
   test("retrySendGrabink logs VENDOR_PUSH_SUCCESS", async () => {
     const order = {
       _id: "order-1",

@@ -654,7 +654,13 @@ describe('confirmEtsyScaleForItem', () => {
         {
           transactionId: 't1',
           scale_status: 'Pending',
-          fulfillment_file: { front: 'https://cdn/front.png' },
+          baseImageUrl: 'https://i.etsystatic.com/66742086/r/il/17d71c/8301789845/il_75x75.8301789845_hl6n.jpg',
+          snapshotImageUrl: 'https://i.etsystatic.com/66742086/r/il/17d71c/8301789845/il_75x75.8301789845_hl6n.jpg',
+          customized_url: 'https://i.etsystatic.com/66742086/r/il/17d71c/8301789845/il_75x75.8301789845_hl6n.jpg',
+          fulfillment_file: { front: 'https://i.etsystatic.com/66742086/r/il/17d71c/8301789845/il_75x75.8301789845_hl6n.jpg' },
+          customFiles: [
+            { url: 'https://i.etsystatic.com/66742086/r/il/17d71c/8301789845/il_75x75.8301789845_hl6n.jpg' },
+          ],
           cost_breakdown: { matchedSku: 'LNG-SKU', vendorProductId: '507f1f77bcf86cd799439011' },
         },
       ],
@@ -685,6 +691,15 @@ describe('confirmEtsyScaleForItem', () => {
         timeout: 15000,
       })
     );
+    const sentPayload = axios.post.mock.calls[0][1];
+    const sentItem = sentPayload.data[0].items[0];
+    const fullSizeUrl = 'https://i.etsystatic.com/66742086/r/il/17d71c/8301789845/il_fullxfull.8301789845_hl6n.jpg';
+    expect(sentItem.baseImageUrl).toBe(fullSizeUrl);
+    expect(sentItem.snapshotImage).toBe(fullSizeUrl);
+    expect(sentItem.snapshotImageUrl).toBe(fullSizeUrl);
+    expect(sentItem.customized_url).toBe(fullSizeUrl);
+    expect(sentItem.fulfillment_file.front).toBe(fullSizeUrl);
+    expect(sentItem.customFiles[0].url).toBe(fullSizeUrl);
     expect(order.scale_overall_status).toBe('Sent');
     expect(order.status).toBe('Fulfilled');
     expect(FulfillmentService.send).not.toHaveBeenCalled();
