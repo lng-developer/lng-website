@@ -748,7 +748,11 @@ const confirmScaleForItem = async (req, res) => {
 
     item.markModified("fulfillment_file");
 
-    order.scale_overall_status = computeOverallScaleStatus(order);
+    const computedOverallStatus = computeOverallScaleStatus(order);
+    const shouldSendToVendor = computedOverallStatus === "Ready";
+    order.scale_overall_status = shouldSendToVendor
+      ? before.order_scale_overall_status
+      : computedOverallStatus;
 
     // Log approve item + (optional) change of overall status if any
     const approveChanges = [];
@@ -819,41 +823,8 @@ const confirmScaleForItem = async (req, res) => {
       metadata: { orderItemId, note: note || "" },
     }));
 
-    // === If order becomes READY ===
-    if (order.scale_overall_status === "Ready") {
-      await logOrderHistory({
-        orderDoc: order,
-        action: "SCALE_ORDER_READY",
-        description: "All items approved. Order is Ready.",
-        changes: [
-          {
-            field: "scale_overall_status",
-            from: before.order_scale_overall_status,
-            to: "Ready",
-          },
-        ],
-        user,
-        context: {
-          source: "PORTAL",
-          ip: req.ip,
-          userAgent: req.headers["user-agent"],
-        },
-      });
-      await logOrderLifecycleEvent(buildOrderLifecyclePayload({
-        order,
-        req,
-        fallbackPlatform: "amazon",
-        stage: "SCALE",
-        eventType: "SCALE_ORDER_READY",
-        status: "success",
-        message: "All items approved. Order is Ready.",
-        metadata: {
-          orderItemId,
-          fromOverallStatus: before.order_scale_overall_status,
-          toOverallStatus: "Ready",
-        },
-      }));
-
+    // === If all items are complete, send to vendor before changing the order status ===
+    if (shouldSendToVendor) {
       // Points
       const asin = item.asin;
       const listing = asin
@@ -871,6 +842,7 @@ const confirmScaleForItem = async (req, res) => {
 
       // Address invalid
       if (isAddressInvalid(order)) {
+        const prevOverall = order.scale_overall_status;
         order.scale_overall_status = "Address Invalid";
         await order.save();
 
@@ -882,7 +854,7 @@ const confirmScaleForItem = async (req, res) => {
           changes: [
             {
               field: "scale_overall_status",
-              from: "Ready",
+              from: prevOverall,
               to: "Address Invalid",
             },
           ],
@@ -923,6 +895,11 @@ const confirmScaleForItem = async (req, res) => {
       if (!providerKey) providerKey = "grabink";
       try {
         const result = await FulfillmentService.send(order, providerKey);
+        if (result.alreadySent) {
+          order.scale_overall_status = "Sent";
+          order.status = "Fulfilled";
+          await order.save();
+        }
 
         // Log vendor submit (success or alreadySent)
         await logOrderHistory({
