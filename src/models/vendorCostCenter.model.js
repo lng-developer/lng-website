@@ -28,6 +28,12 @@ const vendorCostCenterSchema = new mongoose.Schema({
         two_sided_print: { type: Number, default: 0 },
         two_position_print: { type: Number, default: 0 }
     },
+    printing_method: {
+        type: String,
+        enum: ['DTF', 'DTG', ''],
+        default: '',
+        set: (v) => String(v || '').trim().toUpperCase()
+    },
     product_type_design: String,
     history: [
         {

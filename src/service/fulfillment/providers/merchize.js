@@ -147,6 +147,9 @@ function buildPayload(orderObj, options = {}) {
 
 function buildLineItem(item = {}) {
     const designs = buildMerchizeDesigns(item.fulfillment_file, item);
+    const printingMethod = ['DTF', 'DTG'].includes(String(item?.cost_breakdown?.printing_method || '').toUpperCase())
+        ? String(item.cost_breakdown.printing_method).toUpperCase()
+        : undefined;
 
     return {
         name: item?.cost_breakdown?.itemDisplayName || item?.title || item?.name || 'Custom Product',
@@ -157,6 +160,7 @@ function buildLineItem(item = {}) {
         price: Number(item?.price) || Number(item?.cost_breakdown?.unit_price) || null,
         currency: item?.currency || 'USD',
         image: pickMockup(item) || null,
+        ...(printingMethod ? { printing_method: printingMethod } : {}),
         ...designs,
         attributes: buildAttributes(item),
     };
@@ -271,5 +275,6 @@ async function send(orderDoc, options = {}) {
 module.exports = {
     key: 'merchize',
     canHandle: () => true,
-    send
+    send,
+    buildPayload,
 };

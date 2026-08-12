@@ -16,6 +16,16 @@ const num = (v) => {
 };
 const str = (v) => String(v ?? '').trim();
 const ucStatus = (s) => (String(s || '').toLowerCase() === 'inactive' ? 'Inactive' : 'Active');
+const printingMethod = (v) => {
+    const method = String(v || '').trim().toUpperCase();
+    return ['DTF', 'DTG'].includes(method) ? method : '';
+};
+const normalizeCostCenterPayload = (payload = {}) => ({
+    ...payload,
+    ...(Object.prototype.hasOwnProperty.call(payload, 'printing_method')
+        ? { printing_method: printingMethod(payload.printing_method) }
+        : {}),
+});
 
 const makeFilter = (vendor_product, sku, size, color) => {
     const f = { vendor_product };
@@ -90,7 +100,7 @@ const getVendorCostCenterById = async (req, res) => {
 // ==============================
 const createVendorCostCenter = async (req, res) => {
     try {
-        const item = await VendorCostCenter.create(req.body);
+        const item = await VendorCostCenter.create(normalizeCostCenterPayload(req.body));
         res.status(201).json(item);
     } catch (error) {
         res.status(400).json({ message: error.message });
@@ -104,7 +114,7 @@ const updateVendorCostCenter = async (req, res) => {
     try {
         const item = await VendorCostCenter.findByIdAndUpdate(
             req.params.id,
-            { ...req.body, $push: { history: { updated_by: req.body.updated_by } } },
+            { ...normalizeCostCenterPayload(req.body), $push: { history: { updated_by: req.body.updated_by } } },
             { new: true }
         );
         if (!item) return res.status(404).json({ message: 'Vendor Cost Center not found' });
@@ -187,6 +197,7 @@ const getVendorProductVariants = async (req, res) => {
             pricingMap[key] = {
                 base_cost: v.base_cost || 0,
                 sku: v.sku,
+                printing_method: v.printing_method || '',
                 cost_center_id: v._id
             };
         });
@@ -245,6 +256,7 @@ const importVendorCostCenterFromExcel = async (req, res) => {
 
             const priority_economy = num(row[14]);
             const priority_additional = num(row[15]);
+            const printing_method = printingMethod(row[16]);
 
             const sizeVal = vendor_size || '';
             const colorVal = vendor_color || '';
@@ -265,6 +277,7 @@ const importVendorCostCenterFromExcel = async (req, res) => {
                     two_sided_print: two_sided_print_cost,
                     two_position_print: two_position_print_cost
                 },
+                printing_method,
                 product_type_design,
                 status: ucStatus(statusRaw)
             });
@@ -348,6 +361,7 @@ const bulkUpdateVendorCostCenterFromExcel = async (req, res) => {
 
             const priority_economy = num(row[14]);
             const priority_additional = num(row[15]);
+            const printing_method = printingMethod(row[16]);
 
             const sizeVal = vendor_size || '';
             const colorVal = vendor_color || '';
@@ -371,6 +385,7 @@ const bulkUpdateVendorCostCenterFromExcel = async (req, res) => {
                     two_sided_print: two_sided_print_cost,
                     two_position_print: two_position_print_cost
                 },
+                printing_method,
                 product_type_design,
                 status: ucStatus(statusRaw)
             };
@@ -404,7 +419,8 @@ const bulkUpdateVendorCostCenterFromExcel = async (req, res) => {
                     'priority.additional': $set.priority.additional,
                     'additional_costs.embroidery': $set.additional_costs.embroidery,
                     'additional_costs.two_sided_print': $set.additional_costs.two_sided_print,
-                    'additional_costs.two_position_print': $set.additional_costs.two_position_print
+                    'additional_costs.two_position_print': $set.additional_costs.two_position_print,
+                    printing_method: $set.printing_method
                 };
                 const getter = (obj, path) =>
                     path.split('.').reduce((o, k) => (o && o[k] !== undefined ? o[k] : undefined), obj);
@@ -653,7 +669,7 @@ const lookupSpecificVariant = async (req, res) => {
             vendor_color: colorVal,
             status: { $in: ['Active', 'active', null] }
         })
-        .select('base_cost sku standard_size standard_color vendor_size vendor_color international priority additional_costs')
+        .select('base_cost sku standard_size standard_color vendor_size vendor_color international priority additional_costs printing_method')
         .lean();
 
         // TÌM KIẾM 2: Tìm linh hoạt (IgnoreCase & bỏ qua tham số rỗng)
@@ -666,7 +682,7 @@ const lookupSpecificVariant = async (req, res) => {
             if (colorVal) flexibleQuery.vendor_color = new RegExp(`^${colorVal}$`, "i");
             
             costCenter = await VendorCostCenter.findOne(flexibleQuery)
-                .select('base_cost sku standard_size standard_color vendor_size vendor_color international priority additional_costs')
+                .select('base_cost sku standard_size standard_color vendor_size vendor_color international priority additional_costs printing_method')
                 .lean();
         }
 
@@ -680,7 +696,7 @@ const lookupSpecificVariant = async (req, res) => {
             if (colorVal) standardQuery.standard_color = new RegExp(`^${colorVal}$`, "i");
             
             costCenter = await VendorCostCenter.findOne(standardQuery)
-                .select('base_cost sku standard_size standard_color vendor_size vendor_color international priority additional_costs')
+                .select('base_cost sku standard_size standard_color vendor_size vendor_color international priority additional_costs printing_method')
                 .lean();
         }
 
@@ -690,7 +706,7 @@ const lookupSpecificVariant = async (req, res) => {
                 vendor_product: vendorProductId,
                 status: { $in: ['Active', 'active', null] }
             })
-            .select('base_cost sku standard_size standard_color vendor_size vendor_color international priority additional_costs')
+            .select('base_cost sku standard_size standard_color vendor_size vendor_color international priority additional_costs printing_method')
             .lean();
         }
 

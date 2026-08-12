@@ -1691,7 +1691,7 @@ async function calculateEtsyCost(order) {
     const cachedMapOption = async (o) => { const k = `${o.configCode}::${o.key}::${o.rawValue}`; if (_optCache.has(k)) return _optCache.get(k); const r = await mapOptionValue(o); _optCache.set(k, r); return r; };
     const cachedSelectConfig = async (cc, lvm) => { if (_cfgCache.has(cc)) return _cfgCache.get(cc); const r = await selectConfigByProductType(cc, lvm, cachedMapOption); _cfgCache.set(cc, r); return r; };
     const cachedVendorId = async (vpId) => { const k = String(vpId); if (_vpIdCache.has(k)) return _vpIdCache.get(k); const r = await getVendorIdByVendorProductId(vpId); _vpIdCache.set(k, r); return r; };
-    const cachedVCC = async (vpId) => { const k = String(vpId); if (_vccCache.has(k)) return _vccCache.get(k); const docs = await VendorCostCenter.find({ vendor_product: vpId, status: { $in: ["Active", "active", null] } }).select("vendor_size vendor_color standard_size standard_color base_cost sku international priority additional_costs").lean(); _vccCache.set(k, docs); return docs; };
+    const cachedVCC = async (vpId) => { const k = String(vpId); if (_vccCache.has(k)) return _vccCache.get(k); const docs = await VendorCostCenter.find({ vendor_product: vpId, status: { $in: ["Active", "active", null] } }).select("vendor_size vendor_color standard_size standard_color base_cost sku international priority additional_costs printing_method").lean(); _vccCache.set(k, docs); return docs; };
 
     // ===== helper: sku audit (giống Amazon version) =====
     function getSkuForCost(item) {
@@ -1838,7 +1838,7 @@ async function calculateEtsyCost(order) {
         if (["EBM", "EBMA"].includes(configCode.toUpperCase())) additionalCosts.embroidery = Number(matched?.additional_costs?.embroidery || 0);
         const totalAdditionalCost = additionalCosts.embroidery + additionalCosts.two_sided_print + additionalCosts.two_position_print;
 
-        const rec = { transactionId: itemId, sku, mapped_sku, used_sku, configCode, productTypeValue: productTypeValue || null, selectedConfigBy: matchedBy || "unknown", sizeValue, colorValue, vendorProductId, vendorId, selectedOrder, itemDisplayName, baseEach, qty, eco: rate.eco, add: rate.add, shipProfile: rate.profile, matchedSku: matched?.sku || null, additionalCosts, totalAdditionalCost, status: "ok" };
+        const rec = { transactionId: itemId, sku, mapped_sku, used_sku, configCode, productTypeValue: productTypeValue || null, selectedConfigBy: matchedBy || "unknown", sizeValue, colorValue, vendorProductId, vendorId, selectedOrder, itemDisplayName, baseEach, qty, eco: rate.eco, add: rate.add, shipProfile: rate.profile, matchedSku: matched?.sku || null, printing_method: matched?.printing_method || "", additionalCosts, totalAdditionalCost, status: "ok" };
         stagedItems.push(rec);
         const key = `${vendorId}::profile=${rate.profile}::eco=${rate.eco}::add=${rate.add}`;
         const g = groups.get(key) || { vendorId, shipProfile: rate.profile, items: [], economyMax: 0 };
@@ -1861,7 +1861,7 @@ async function calculateEtsyCost(order) {
         }
         perItemResults.push({
             transactionId: rec.transactionId, sku: rec.sku, configCode: rec.configCode, sizeValue: displaySizeValue, colorValue: displayColorValue, productTypeValue: rec.productTypeValue, selectedConfigBy: rec.selectedConfigBy,
-            vendorProductId: rec.vendorProductId, vendorId: rec.vendorId, matchedSku: rec.matchedSku, selectedOrder: rec.selectedOrder, itemDisplayName: rec.itemDisplayName,
+            vendorProductId: rec.vendorProductId, vendorId: rec.vendorId, matchedSku: rec.matchedSku, printing_method: rec.printing_method || "", selectedOrder: rec.selectedOrder, itemDisplayName: rec.itemDisplayName,
             base_cost_each: rec.baseEach, quantity: rec.qty,
             additional_costs_breakdown: rec.additionalCosts, total_additional_cost_per_item: rec.totalAdditionalCost * rec.qty,
             shipping_international_economy: 0, shipping_international_additional_units: 0, shipping_international_additional_rate: 0,

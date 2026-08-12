@@ -3688,7 +3688,7 @@ const computeBaseCostForOrder = async (req, res) => {
       })
         .select(
           "vendor_size vendor_color standard_size standard_color base_cost sku " +
-          "international priority additional_costs"
+          "international priority additional_costs printing_method"
         )
         .lean();
       _vccCache.set(k, docs);
@@ -4104,6 +4104,7 @@ const computeBaseCostForOrder = async (req, res) => {
         add,
         shipProfile,
         matchedSku: matched?.sku || null,
+        printing_method: matched?.printing_method || "",
         additionalCosts,
         totalAdditionalCost,
         status: "ok",
@@ -4149,6 +4150,7 @@ const computeBaseCostForOrder = async (req, res) => {
         vendorProductId: rec.vendorProductId,
         vendorId: rec.vendorId || null,
         matchedSku: rec.matchedSku,
+        printing_method: rec.printing_method || "",
         selectedOrder: rec.selectedOrder,
         itemDisplayName: rec.itemDisplayName,
         base_cost_each: rec.baseEach,
