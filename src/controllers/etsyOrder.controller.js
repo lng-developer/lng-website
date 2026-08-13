@@ -4026,9 +4026,22 @@ function computeEtsyOverallScaleStatus(items = []) {
 const toPlainFulfillmentFile = (value) => {
     if (!value) return {};
     if (value instanceof Map) return Object.fromEntries(value);
-    if (typeof value === "object" && !Array.isArray(value)) return value;
+    if (typeof value === "object" && !Array.isArray(value)) return toPlainObject(value);
     if (typeof value === "string") return { file: value };
     return {};
+};
+
+const toPlainObject = (value) => {
+    if (!value) return value;
+    if (value instanceof Map) return Object.fromEntries(value);
+    if (typeof value?.toObject === "function") {
+        return value.toObject({ depopulate: false, flattenMaps: true, virtuals: false });
+    }
+    if (Array.isArray(value)) return value.map(toPlainObject);
+    if (typeof value === "object") {
+        return Object.fromEntries(Object.entries(value).map(([key, objectValue]) => [key, toPlainObject(objectValue)]));
+    }
+    return value;
 };
 
 const hasAnyFulfillmentFile = (value) => Object.values(toPlainFulfillmentFile(value)).some(Boolean);
@@ -4174,6 +4187,9 @@ const toEtsyFullSizeImageUrl = (url) => {
 };
 
 const normalizeEtsyImageLinks = (value) => {
+    if (value instanceof Map || typeof value?.toObject === "function") {
+        return normalizeEtsyImageLinks(toPlainObject(value));
+    }
     if (typeof value === "string") return toEtsyFullSizeImageUrl(value);
     if (Array.isArray(value)) return value.map(normalizeEtsyImageLinks);
     if (value && typeof value === "object") {
@@ -4249,11 +4265,11 @@ const serializeEtsyOrderForFulfillmentPlatform = (order) => ({
             snapshotImageUrl,
             fulfillment_file: normalizeEtsyImageLinks(toPlainFulfillmentFile(item.fulfillment_file)),
             listingId: item.listingId || "",
-            cost_center: item.cost_breakdown || {},
+            cost_center: toPlainObject(item.cost_breakdown) || {},
             scale_status: item.scale_status || null,
             qc_note: item.qc_note || "",
             cs_note: item.cs_note || "",
-            customizations: item.customizations || null,
+            customizations: toPlainObject(item.customizations) || null,
             customFiles: normalizeEtsyImageLinks(item.customFiles || []),
         };
     }),
