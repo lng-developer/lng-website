@@ -7,6 +7,11 @@ const ExcelJS = require("exceljs");
 const User = db.user;
 const Shop = db.shop;
 const Team = db.Team;
+const {
+  AMAZON_FEE_RATE,
+  calcAmazonRevenue,
+  calcAmazonOrderProfit,
+} = require("../utils/amazonFinance");
 const AMZ_REPORT_TIMEZONE = "America/New_York";
 const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -277,8 +282,11 @@ const importReportFromFile = async (req, res) => {
       const shippingTax = num(r["shipping-tax"]);
       const discount = num(r["item-promotion-discount"]);
 
-      const revenue = itemPrice + shippingPrice + itemTax + shippingTax;
-      const fee = 0.17 * (itemPrice + shippingPrice);
+      const revenue = calcAmazonRevenue({
+        item_price: itemPrice,
+        shipping_price: shippingPrice,
+      });
+      const fee = AMAZON_FEE_RATE * revenue;
 
       const acc = bucket.get(orderId) || {
         orderId,
@@ -350,6 +358,7 @@ const importReportFromFile = async (req, res) => {
                             { $ifNull: ["$base_cost", 0] },
                             aft.fee,
                             aft.item_promotion_discount,
+                            aft.refund,
                           ],
                         },
                       ],
@@ -366,12 +375,7 @@ const importReportFromFile = async (req, res) => {
                     {
                       $subtract: [
                         "$amazon_finance_total.profit1",
-                        {
-                          $add: [
-                            { $ifNull: ["$amazon_finance_total.refund", 0] },
-                            { $ifNull: ["$amazon_finance_total.opCost", 0] },
-                          ],
-                        },
+                        { $ifNull: ["$amazon_finance_total.opCost", 0] },
                       ],
                     },
                     2,
@@ -919,10 +923,10 @@ const getReportMatrix = async (req, res) => {
           S.revenue[i] -
           (S.baseCost[i] +
             S.fee[i] +
-            S.ads[i] +
+            S.refund[i] +
             Math.abs(S.itemPromotionDiscount[i]));
 
-        const p2 = p1 - (S.opCost[i] + S.refund[i]);
+        const p2 = p1 - (S.ads[i] + S.opCost[i]);
 
         S.profit1[i] = +p1.toFixed(2);
         S.profit2[i] = +p2.toFixed(2);
@@ -1179,7 +1183,7 @@ const getOrderCostStatistics = async (req, res) => {
               {
                 $subtract: [
                   "$_rev",
-                  { $add: ["$_base", "$_fee", { $abs: "$_promo" }] },
+                  { $add: ["$_base", "$_fee", "$_ref", { $abs: "$_promo" }] },
                 ],
               },
               2,
@@ -1430,7 +1434,7 @@ const exportOrdersCostExcel = async (req, res) => {
 
       // Theo ảnh bạn gửi:
       // revenue, item_tax, shipping_tax, fee, item_promotion_discount, refund
-      const revenue = Number(f.revenue) || 0;
+      const revenue = calcAmazonRevenue(f);
       const tax = Number(f.item_tax) || 0;
       const sTax = Number(f.shipping_tax) || 0;
       const fee = Number(f.fee) || 0;
@@ -1441,7 +1445,10 @@ const exportOrdersCostExcel = async (req, res) => {
       const cost = Number(o.base_cost) || 0;
 
       // Profit: revenue trừ tất cả phần còn lại
-      const profit = revenue - (fee + refund + Math.abs(discount) + cost);
+      const { profit1: profit } = calcAmazonOrderProfit({
+        finance: f,
+        baseCost: cost,
+      });
 
       ws.addRow({
         orderId: o.orderId || "",

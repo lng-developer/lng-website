@@ -10,8 +10,8 @@ const { Schema } = mongoose;
  * - totalOrders: số đơn trong ngày
  * - orderAmount: tổng tiền của các đơn (có thể trùng với revenue nếu bạn dùng revenue làm doanh thu)
  * - items/revenue/baseCost/ads/fee/opCost/refund: các thành phần để tính profit
- * - profit1 = revenue - baseCost - fee
- * - profit2 = profit1 - ads - opCost - refund
+ * - profit1 = revenue - baseCost - fee - refund
+ * - profit2 = profit1 - ads - opCost
  * - roi = profit1 / (ads + baseCost)
  */
 const ReportDailySchema = new Schema(
@@ -44,8 +44,12 @@ ReportDailySchema.index({ seller: 1, day: 1 }, { unique: true });
 // Tự tính profit/roi nếu chưa set (hoặc bạn có thể luôn ghi đè khi upsert)
 ReportDailySchema.pre("save", function (next) {
   const r = this;
-  const profit1 = (r.revenue || 0) - (r.baseCost || 0) - (r.fee || 0);
-  const profit2 = profit1 - (r.ads || 0) - (r.opCost || 0) - (r.refund || 0);
+  const profit1 =
+    (r.revenue || 0) -
+    (r.baseCost || 0) -
+    (r.fee || 0) -
+    (r.refund || 0);
+  const profit2 = profit1 - (r.ads || 0) - (r.opCost || 0);
   const denom = (r.ads || 0) + (r.baseCost || 0);
   const roi = denom ? (profit1 / denom) * 100 : 0;
   r.profit1 = Number(profit1.toFixed(2));

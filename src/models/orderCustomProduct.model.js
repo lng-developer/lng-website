@@ -183,8 +183,8 @@ const amazonFinanceTotalSchema = new mongoose.Schema(
     shipping_tax: { type: Number, default: 0 }, // tổng shipping-tax
     item_promotion_discount: { type: Number, default: 0 }, // tổng item-promotion-discount
 
-    // Theo công thức bạn dùng khi import: fee = 17% * (item_price + shipping_price)
-    fee: { type: Number, default: 0 }, // tổng fee 17%
+    // Amazon fee estimate: 15% * (item_price + shipping_price)
+    fee: { type: Number, default: 0 },
     revenue: { type: Number, default: 0 },
     opCost: { type: Number, default: 0 },
     refund: { type: Number, default: 0 },

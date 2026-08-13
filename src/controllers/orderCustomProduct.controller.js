@@ -29,6 +29,9 @@ const {
   applyRulesToSku,
   buildRulesFromConfig,
 } = require("../utils/skuMigrate");
+const {
+  AMAZON_FEE_RATE,
+} = require("../utils/amazonFinance");
 
 const {
   validateIds,
@@ -997,8 +1000,8 @@ const updateOrdersFromXlsx = async (req, res) => {
       // revenue = item + shipping
       t.revenue = round2((t.revenue || 0) + delta.revenue);
 
-      // fee = 17% tổng revenue
-      t.fee = round2(0.17 * round2(t.revenue));
+      // fee = configured Amazon fee rate * revenue
+      t.fee = round2(AMAZON_FEE_RATE * round2(t.revenue));
     }
 
     // ✅ Pre-aggregate finance theo orderId từ FILE (unique theo order_item_id)
@@ -1139,7 +1142,7 @@ const updateOrdersFromXlsx = async (req, res) => {
       const itemTax = round2(row.item_tax);
       const shippingTax = round2(row.shipping_tax);
       const discount = round2(row.item_promotion_discount);
-      const fee = round2(0.17 * revenue);
+      const fee = round2(AMAZON_FEE_RATE * revenue);
 
       const basicData = {
         orderId,
@@ -1572,7 +1575,7 @@ const updateOrdersFromXlsx = async (req, res) => {
           shipping_tax: round2(t.shipping_tax),
           item_promotion_discount: round2(Math.abs(t.item_promotion_discount)),
           revenue: round2(t.revenue),
-          fee: round2(0.17 * round2(t.revenue)),
+          fee: round2(AMAZON_FEE_RATE * round2(t.revenue)),
           opCost: doc.amazon_finance_total?.opCost || 0,
           refund: doc.amazon_finance_total?.refund || 0,
         };
