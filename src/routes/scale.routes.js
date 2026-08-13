@@ -28,6 +28,13 @@ router.post(
 );
 
 // (Tuỳ chọn) Retry gửi toàn bộ order khi Ready/Failed
+router.get(
+  "/orders/:orderId/scale/providers",
+  authenticateToken,
+  authorizeRoles("Customer Service", "Admin", "Seller"),
+  scaleController.getScaleOrderProviders
+);
+
 router.post(
   "/orders/:orderId/scale/send",
   authenticateToken,

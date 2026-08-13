@@ -503,6 +503,67 @@ async function resolveProviderFromOrder(orderDoc, VendorProductModel) {
   return { providerKey: [...provSet][0], reasons: [] };
 }
 
+async function listProvidersFromOrder(orderDoc, VendorProductModel) {
+  const idObjs = [];
+
+  for (const it of orderDoc.items || []) {
+    const raw = it?.cost_breakdown?.vendorProductId;
+    if (!raw) continue;
+
+    if (
+      typeof raw === "object" &&
+      raw !== null &&
+      raw._bsontype === "ObjectID"
+    ) {
+      idObjs.push(raw);
+      continue;
+    }
+
+    const s = String(raw);
+    if (mongoose.isValidObjectId(s)) {
+      idObjs.push(new mongoose.Types.ObjectId(s));
+    }
+  }
+
+  if (idObjs.length === 0) {
+    return {
+      providers: [],
+      reasons: ["No valid vendorProductId found on items"],
+    };
+  }
+
+  const vps = await VendorProductModel.find({ _id: { $in: idObjs } })
+    .select("vendor_id")
+    .populate({ path: "vendor_id", select: "name fulfillment_type status" })
+    .lean();
+
+  if (!vps?.length) {
+    return {
+      providers: [],
+      reasons: ["No VendorProduct matched in DB"],
+    };
+  }
+
+  const providerMap = new Map();
+  for (const vp of vps) {
+    const key = normalizeProviderKey(vp?.vendor_id);
+    if (!key) continue;
+
+    if (!providerMap.has(key)) {
+      const name = String(vp?.vendor_id?.name || "").trim();
+      providerMap.set(key, {
+        key,
+        label: name || key[0].toUpperCase() + key.slice(1),
+      });
+    }
+  }
+
+  return {
+    providers: [...providerMap.values()],
+    reasons: [],
+  };
+}
+
 const isAddressInvalid = (order) =>
   order?.address_validation && order.address_validation.isValid === false;
 
@@ -750,9 +811,7 @@ const confirmScaleForItem = async (req, res) => {
 
     const computedOverallStatus = computeOverallScaleStatus(order);
     const shouldSendToVendor = computedOverallStatus === "Ready";
-    order.scale_overall_status = shouldSendToVendor
-      ? before.order_scale_overall_status
-      : computedOverallStatus;
+    order.scale_overall_status = computedOverallStatus;
 
     // Log approve item + (optional) change of overall status if any
     const approveChanges = [];
@@ -874,32 +933,63 @@ const confirmScaleForItem = async (req, res) => {
 
       // Resolve provider
       let providerKey = String(provider || "").trim().toLowerCase();
+      const availableProviderSet = new Set((FulfillmentService.PROVIDERS || []).map((p) => String(p?.key || "").toLowerCase()));
 
       try {
         if (!providerKey) {
           const resolved = await resolveProviderFromOrder(order, VendorProduct);
-          providerKey = resolved.providerKey || providerKey;
+          providerKey = String(resolved.providerKey || "").trim().toLowerCase();
+          if (!providerKey) {
+            if (before.order_scale_overall_status !== order.scale_overall_status) {
+              await order.save();
+            }
+            return res.status(409).json({
+              message: "Unable to auto-resolve provider for this order. Please choose a provider manually.",
+              code: "UNRESOLVED_PROVIDER",
+              reasons: resolved.reasons || [],
+              providers: resolved.providers || [],
+              hint: "Use retry button and select provider to continue sending.",
+            });
+          }
         }
       } catch (provErr) {
         const status = provErr.status || 409;
+        if (before.order_scale_overall_status !== order.scale_overall_status) {
+          await order.save();
+        }
         return res.status(status).json({
           message:
-            "Unable to auto-select provider because multiple vendors were detected for this order.",
+            "Unable to auto-select provider for this order.",
           error: provErr.message,
           providers: provErr.providers || [],
+          reasons: provErr.reasons || [],
           hint:
             'Please specify "provider" in request body, e.g., {"provider":"grabink"} or {"provider":"merchfox"} or {"provider":"merchize"}.',
         });
       }
 
-      if (!providerKey) providerKey = "grabink";
-      try {
-        const result = await FulfillmentService.send(order, providerKey);
-        if (result.alreadySent) {
-          order.scale_overall_status = "Sent";
-          order.status = "Fulfilled";
+      if (providerKey && availableProviderSet.size > 0 && !availableProviderSet.has(providerKey)) {
+        if (before.order_scale_overall_status !== order.scale_overall_status) {
           await order.save();
         }
+        return res.status(400).json({
+          message: `Unknown provider: ${providerKey}`,
+          code: "INVALID_PROVIDER",
+          hint: `Valid providers: ${(FulfillmentService.PROVIDERS || []).map((p) => p?.key).join(" | ")}`,
+        });
+      }
+
+      try {
+        const result = await FulfillmentService.send(order, providerKey);
+        const wasAlreadySent = !!result.alreadySent;
+        if (wasAlreadySent) {
+          order.scale_overall_status = "Sent";
+          order.status = "Fulfilled";
+        } else {
+          order.scale_overall_status = "Sent";
+          order.status = "Fulfilled";
+        }
+        await order.save();
 
         // Log vendor submit (success or alreadySent)
         await logOrderHistory({
@@ -1115,7 +1205,72 @@ const retrySendFulfillment = async (req, res) => {
     }
 
     // 5) Gửi lại
-    const result = await FulfillmentService.send(order, providerKey);
+    let result;
+    try {
+      result = await FulfillmentService.send(order, providerKey);
+    } catch (err) {
+      const prevOverall = order.scale_overall_status;
+
+      const prev = order.vendor_submissions?.[providerKey] || {};
+      const rec = {
+        ...(prev || {}),
+        sent: false,
+        attempt_count: (prev?.attempt_count || 0) + 1,
+        last_response: { error: err.message, at: new Date() },
+      };
+
+      order.vendor_submissions = order.vendor_submissions || {};
+      order.vendor_submissions[providerKey] = rec;
+      order.markModified("vendor_submissions");
+      if (providerKey === "grabink") {
+        order.grabink_submission = rec;
+      }
+      order.scale_overall_status = "Failed";
+      await order.save();
+
+      await logOrderHistory({
+        orderDoc: order,
+        action: "SEND_TO_VENDOR_FAILED",
+        description: `Retry sending order to ${providerKey} failed. Overall status set to Failed.`,
+        changes: [
+          { field: "scale_overall_status", from: prevOverall, to: "Failed" },
+          {
+            field: `vendor_submissions.${providerKey}.attempt_count`,
+            from: prev?.attempt_count || 0,
+            to: rec.attempt_count,
+          },
+          {
+            field: `vendor_submissions.${providerKey}.last_response.error`,
+            from: null,
+            to: err.message,
+          },
+        ],
+        user: req.user,
+        context: {
+          source: "SYSTEM",
+          ip: req.ip,
+          userAgent: req.headers["user-agent"],
+        },
+      });
+      await logOrderLifecycleEvent(buildOrderLifecyclePayload({
+        order,
+        req,
+        fallbackPlatform: "amazon",
+        stage: "VENDOR_PUSH",
+        eventType: "VENDOR_PUSH_FAILED",
+        status: "failed",
+        reason: err.message,
+        metadata: {
+          provider: providerKey,
+          attemptCount: rec.attempt_count,
+        },
+      }));
+
+      return res.status(502).json({
+        message: `Retry sending order to ${providerKey} failed. Overall status set to Failed.`,
+        error: err.message,
+      });
+    }
     await logOrderLifecycleEvent(buildOrderLifecyclePayload({
       order,
       req,
@@ -1142,6 +1297,61 @@ const retrySendFulfillment = async (req, res) => {
     return res
       .status(500)
       .json({ message: "Retry failed", error: err.message });
+  }
+};
+
+const getScaleOrderProviders = async (req, res) => {
+  try {
+    const { orderId } = req.params;
+    const order = await OrderCustomProduct.findOne({ orderId });
+    if (!order) return res.status(404).json({ message: "Order not found" });
+
+    const addressInvalid = isAddressInvalid(order);
+    const invalidAddressMessage = addressInvalid ? buildInvalidAddressMessage(order) : null;
+
+    const availableProviders = (FulfillmentService.PROVIDERS || []).map((p) => p.key);
+    const providerOptions = (FulfillmentService.PROVIDERS || []).map((provider) => ({
+      key: String(provider?.key || "").trim(),
+      label: String(provider?.label || provider?.name || provider?.key || "").trim() || String(provider?.key || "").trim(),
+    }));
+    const validSet = new Set(availableProviders);
+
+    const resolved = await listProvidersFromOrder(order, VendorProduct);
+    const providers = (resolved.providers || [])
+      .filter((item) => validSet.has(item.key))
+      .sort((a, b) => a.key.localeCompare(b.key));
+
+    const merged = [...providerOptions];
+    const seen = new Set(providerOptions.map((provider) => provider.key));
+
+    for (const provider of providers || []) {
+      const key = String(provider?.key || "").trim();
+      if (!key || seen.has(key)) continue;
+      merged.push({
+        key,
+        label: String(provider?.label || key).trim() || key,
+      });
+      seen.add(key);
+    }
+
+    const singleAuto = providers.length === 1 ? providers[0].key : "";
+
+    return res.json({
+      orderId: order.orderId,
+      scale_overall_status: order.scale_overall_status || null,
+      address_invalid: addressInvalid,
+      message: invalidAddressMessage,
+      providers: merged,
+      matched_providers: providers,
+      can_manual_override: merged.length > 1,
+      auto_provider: singleAuto || null,
+      can_auto_resolve: !!singleAuto,
+      reasons: resolved.reasons || [],
+    });
+  } catch (err) {
+    return res
+      .status(500)
+      .json({ message: "Get providers failed", error: err.message });
   }
 };
 
@@ -1245,7 +1455,7 @@ const getScaleList = async (req, res) => {
       initialMatch.sellerId = new mongoose.Types.ObjectId(sellerId);
     }
 
-    const activeScaleStatuses = ["Need Scale", "Pending", "Sent", "QC Rejected"];
+    const activeScaleStatuses = ["Need Scale", "Pending", "Ready", "Sent", "QC Rejected", "Failed"];
     let selectedScaleStatuses = activeScaleStatuses;
     let onlyPending = false;
     if (scale_status && String(scale_status).trim() !== "") {
@@ -1945,7 +2155,7 @@ const getScaleListForDesign = async (req, res) => {
         pipeline.push({
           $match: {
             overall_status_bucket: {
-              $in: ["Need Scale", "Pending", "Sent", "QC Rejected"],
+              $in: ["Need Scale", "Pending", "Ready", "Sent", "QC Rejected", "Failed"],
             },
           },
         });
@@ -1966,7 +2176,7 @@ const getScaleListForDesign = async (req, res) => {
       pipeline.push({
         $match: {
           overall_status_bucket: {
-            $in: ["Need Scale", "Pending", "Sent", "QC Rejected"],
+            $in: ["Need Scale", "Pending", "Ready", "Sent", "QC Rejected", "Failed"],
           },
         },
       });
@@ -3241,6 +3451,7 @@ module.exports = {
   uploadFulfillmentFileForItem,
   confirmScaleForItem,
   retrySendGrabink: retrySendFulfillment, // giờ đã hỗ trợ ?provider=
+  getScaleOrderProviders,
   updateCSNoteForItem,
   getScaleList,
   getScaleStatistics,
