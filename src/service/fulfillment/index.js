@@ -42,6 +42,14 @@ function writeSubmission(orderDoc, vendorKey, submission) {
     }
 }
 
+function compactError(error) {
+    return {
+        message: error?.response?.data?.message || error?.message || String(error || 'Unknown error'),
+        code: error?.code || error?.response?.status || null,
+        response: error?.response?.data || null,
+    };
+}
+
 /**
  * Gửi đơn tới vendor cụ thể.
  * @param {Document} orderDoc - Mongoose doc
@@ -60,13 +68,30 @@ async function sendToVendor(orderDoc, vendorKey) {
         return { alreadySent: true, response: prev?.last_response, vendorKey };
     }
 
-    const { data, externalId } = await provider.send(orderDoc);
+    let data;
+    let externalId;
+    try {
+        ({ data, externalId } = await provider.send(orderDoc));
+    } catch (error) {
+        writeSubmission(orderDoc, vendorKey, {
+            sent: false,
+            sent_at: null,
+            attempt_count: (prev?.attempt_count || 0) + 1,
+            last_response: error?.response?.data || null,
+            last_error: compactError(error),
+            external_id: prev?.external_id || null,
+            failed_at: new Date(),
+        });
+        await orderDoc.save();
+        throw error;
+    }
 
     const submission = {
         sent: true,
         sent_at: new Date(),
         attempt_count: (prev?.attempt_count || 0) + 1,
         last_response: data,
+        last_error: null,
         external_id: externalId || null,
     };
     writeSubmission(orderDoc, vendorKey, submission);

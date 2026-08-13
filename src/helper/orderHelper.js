@@ -548,6 +548,7 @@ function enrichOrder(order, listingMap, vendorMap) {
     case: order.case,
     address_validation: order.address_validation?.isValid,
     scale_overall_status: order.scale_overall_status,
+    vendor_submissions: order.vendor_submissions || null,
     seller: order.seller ? {
       _id: order.seller._id,
       full_name: order.seller.full_name,
