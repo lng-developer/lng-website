@@ -6593,6 +6593,58 @@ const retrySendEtsyFulfillment = async (req, res) => {
     }
 };
 
+const getEtsyScaleOrderProviders = async (req, res) => {
+    try {
+        const order = await EtsyOrder.findOne(buildEtsyOrderLookup(req));
+        if (!order) return res.status(404).json({ message: "Etsy order not found" });
+
+        const accessError = ensureSellerCanAccessEtsyOrder(req, order);
+        if (accessError) {
+            return res.status(accessError.startsWith("Invalid") ? 400 : 403).json({ message: accessError });
+        }
+
+        const addressInvalid = isEtsyAddressInvalid(order);
+        const availableProviders = (FulfillmentService.PROVIDERS || []).map((entry) => entry.key);
+        const providerOptions = (FulfillmentService.PROVIDERS || []).map((entry) => ({
+            key: String(entry?.key || "").trim(),
+            label: String(entry?.label || entry?.name || entry?.key || "").trim() || String(entry?.key || "").trim(),
+        }));
+
+        let matchedProviders = [];
+        let reasons = [];
+        try {
+            const resolved = await resolveEtsyProviderFromOrder(order);
+            reasons = resolved.reasons || [];
+            if (resolved.providerKey && availableProviders.includes(resolved.providerKey)) {
+                matchedProviders = [{ key: resolved.providerKey, label: resolved.providerKey }];
+            }
+        } catch (err) {
+            reasons = err.providers?.length
+                ? [`Multiple providers detected in order: ${err.providers.join(", ")}`]
+                : [err.message].filter(Boolean);
+            matchedProviders = (err.providers || [])
+                .filter((key) => availableProviders.includes(key))
+                .map((key) => ({ key, label: key }));
+        }
+
+        const singleAuto = matchedProviders.length === 1 ? matchedProviders[0].key : "";
+        return res.json({
+            orderId: order.orderId,
+            scale_overall_status: order.scale_overall_status || null,
+            address_invalid: addressInvalid,
+            message: addressInvalid ? buildEtsyInvalidAddressMessage(order) : null,
+            providers: providerOptions,
+            matched_providers: matchedProviders,
+            can_manual_override: providerOptions.length > 1,
+            auto_provider: singleAuto || null,
+            can_auto_resolve: !!singleAuto,
+            reasons,
+        });
+    } catch (err) {
+        return res.status(500).json({ message: "Get Etsy providers failed", error: err.message });
+    }
+};
+
 const pushEtsyPlatformOrders = async (req, res) => {
     let orders = [];
 
@@ -6811,6 +6863,7 @@ module.exports = {
     getEtsyQCStatistics,
     uploadEtsyFulfillmentFileForItem,
     confirmEtsyScaleForItem,
+    getEtsyScaleOrderProviders,
     retrySendEtsyFulfillment,
     reopenEtsyQc,
     pushEtsyPlatformOrders,

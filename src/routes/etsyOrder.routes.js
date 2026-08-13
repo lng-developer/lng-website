@@ -114,6 +114,12 @@ router.post(
     authorizeRoles("Customer Service", "Admin", "Seller"),
     etsyOrderController.confirmEtsyScaleForItem
 );
+router.get(
+    '/:orderId/scale/providers',
+    authenticateToken,
+    authorizeRoles("Customer Service", "Admin", "Seller"),
+    etsyOrderController.getEtsyScaleOrderProviders
+);
 router.post(
     '/:orderId/scale/send',
     authenticateToken,

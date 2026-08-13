@@ -1275,16 +1275,16 @@ const pushPlatformOrders = async (req, res) => {
       });
     }
 
-    const notFailedOrders = orders
-      .filter((order) => order.scale_overall_status !== "Failed")
+    const notPushableOrders = orders
+      .filter((order) => !["Ready", "Failed"].includes(order.scale_overall_status))
       .map((order) => ({
         orderId: order.orderId,
         scale_overall_status: order.scale_overall_status || null,
       }));
-    if (notFailedOrders.length > 0) {
+    if (notPushableOrders.length > 0) {
       return res.status(409).json({
-        message: "Only orders with scale_overall_status Failed can be pushed to Fulfillment Platform v2",
-        orders: notFailedOrders,
+        message: "Only orders with scale_overall_status Ready or Failed can be pushed to Fulfillment Platform v2",
+        orders: notPushableOrders,
       });
     }
 
