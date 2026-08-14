@@ -1,4 +1,4 @@
-// services/fulfillment/providers/printway.js
+// services/fulfillment/providers/lng.js
 const axios = require("axios");
 
 function splitName(full = "") {
@@ -75,32 +75,71 @@ function buildPayload(orderObj) {
   };
 }
 
+function buildPlatformPayload(orderObj) {
+  const legacyPayload = buildPayload(orderObj);
+
+  return {
+    data: [
+      {
+        ...legacyPayload,
+        source: "portal",
+        sourceChannel: "AMAZON",
+      },
+    ],
+  };
+}
+
+function getPlatformEndpoint() {
+  const baseUrl = String(process.env.FULFILLMENT_API_BASE_URL || "").trim();
+  if (!baseUrl) return "";
+  return `${baseUrl.replace(/\/+$/, "")}/api/portal/orders`;
+}
+
 /* -------------------------- Sender ------------------------- */
 async function send(orderDoc) {
     const orderObj = orderDoc.toObject
         ? orderDoc.toObject({ getters: false, virtuals: false })
         : orderDoc;
 
-    const payload = buildPayload(orderObj);
-    if (!payload.items?.length) {
+    const platformEndpoint = getPlatformEndpoint();
+    const tenantApiKey = String(process.env.FULFILLMENT_TENANT_API_KEY || "").trim();
+    const usePlatform = Boolean(platformEndpoint && tenantApiKey);
+    const payload = usePlatform ? buildPlatformPayload(orderObj) : buildPayload(orderObj);
+    const items = usePlatform ? payload.data?.[0]?.items : payload.items;
+    if (!items?.length) {
         const err = new Error("LNG: No line items to send.");
         err.code = "NO_LINE_ITEMS";
         throw err;
     }
 
-    const createEndpoint =
-        process.env.LNG_ENDPOINT;
-        
-    const headers = {
-        "Content-Type": "application/json",
-        "x-api-key": process.env.LNG_API_KEY,
-    };
+    const createEndpoint = usePlatform ? platformEndpoint : process.env.LNG_ENDPOINT;
+    const headers = usePlatform
+        ? {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${tenantApiKey}`,
+        }
+        : {
+            "Content-Type": "application/json",
+            "x-api-key": process.env.LNG_API_KEY,
+        };
 
     console.log("[LNG] Create order endpoint:", createEndpoint);
     console.log("[LNG] Sending payload:", JSON.stringify(payload, null, 2));
 
     // Create order
-    const resp = await axios.post(createEndpoint, payload, { headers });
+    let resp;
+    try {
+        resp = await axios.post(createEndpoint, payload, { headers });
+    } catch (error) {
+        const platformMessage =
+            error?.response?.data?.error?.message ||
+            error?.response?.data?.message ||
+            error?.response?.data?.errors?.[0]?.message ||
+            error?.message ||
+            "LNG request failed";
+        error.message = `LNG ${usePlatform ? "platform" : "legacy"} send failed: ${platformMessage}`;
+        throw error;
+    }
     const body = resp?.data;
 
     if (!body || typeof body !== "object") {

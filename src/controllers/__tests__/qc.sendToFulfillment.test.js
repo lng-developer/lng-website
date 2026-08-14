@@ -428,6 +428,9 @@ describe("pushPlatformOrders", () => {
           hasSnapshotImage: true,
           hasBaseImageUrl: true,
           fulfillmentFileKeys: ["front"],
+          vendorProductId: "vendor-product-1",
+          vendorKey: null,
+          vendorMappingOverride: false,
         },
       ]
     );
@@ -553,6 +556,7 @@ describe("pushPlatformOrders", () => {
         errors: [],
         orders: [],
       },
+      platformStatus: 409,
     });
   });
 
@@ -632,7 +636,7 @@ describe("pushPlatformOrders", () => {
     expect(res.status).not.toHaveBeenCalled();
   });
 
-  test("blocks production push when selected order is missing file and vendor mapping", async () => {
+  test("blocks production push when selected order is missing fulfillment file", async () => {
     const save = jest.fn().mockResolvedValue(undefined);
     const order = {
       orderId: "ORDER-MISSING-PREREQ",
@@ -664,9 +668,39 @@ describe("pushPlatformOrders", () => {
         orderId: "ORDER-MISSING-PREREQ",
         errors: [
           { itemId: "ITEM-1", code: "MISSING_FULFILLMENT_FILE", message: "Missing fulfillment file" },
-          { itemId: "ITEM-1", code: "MISSING_VENDOR_MAPPING", message: "Missing vendor mapping" },
         ],
       }],
     });
+  });
+
+  test("pushes production with LNG override when selected order is missing vendor mapping", async () => {
+    const save = jest.fn().mockResolvedValue(undefined);
+    const order = {
+      orderId: "ORDER-LNG-OVERRIDE",
+      status: "New",
+      scale_overall_status: "Ready",
+      case: [],
+      fulfillment_platform_v2_submission: { sent: false, attempt_count: 0 },
+      items: [{ orderItemId: "ITEM-1", fulfillment_file: { front: "https://cdn.example/front.png" }, cost_breakdown: {} }],
+      save,
+    };
+    mockFindChain([order]);
+    axios.post.mockResolvedValue({ data: { success: true, received: 1, inserted: 1, updated: 0, skipped: 0, errorsCount: 0, errors: [] } });
+
+    const req = {
+      body: { orderIds: ["ORDER-LNG-OVERRIDE"] },
+      user: { role: "Admin", _id: "user-1" },
+      ip: "127.0.0.1",
+      headers: { "user-agent": "jest" },
+    };
+    const res = makeRes();
+
+    await controller.pushPlatformOrders(req, res);
+
+    expect(axios.post.mock.calls[0][1].data[0].items[0].cost_center).toEqual(expect.objectContaining({
+      vendorKey: "lng",
+      vendor_mapping_override: true,
+    }));
+    expect(res.status).not.toHaveBeenCalled();
   });
 });

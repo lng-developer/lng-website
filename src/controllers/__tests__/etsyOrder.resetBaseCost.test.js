@@ -887,7 +887,7 @@ describe('pushEtsyPlatformOrders production gate', () => {
     });
   });
 
-  test('blocks Etsy production push when selected order is missing file and vendor mapping', async () => {
+  test('blocks Etsy production push when selected order is missing fulfillment file', async () => {
     const save = jest.fn().mockResolvedValue(undefined);
     const order = {
       orderId: 'ETSY-MISSING-PREREQ',
@@ -919,10 +919,44 @@ describe('pushEtsyPlatformOrders production gate', () => {
         orderId: 'ETSY-MISSING-PREREQ',
         errors: [
           { itemId: 'tx-1', code: 'MISSING_FULFILLMENT_FILE', message: 'Missing fulfillment file' },
-          { itemId: 'tx-1', code: 'MISSING_VENDOR_MAPPING', message: 'Missing vendor mapping' },
         ],
       }],
     });
+  });
+
+  test('pushes Etsy production with LNG override when selected order is missing vendor mapping', async () => {
+    const save = jest.fn().mockResolvedValue(undefined);
+    const order = {
+      orderId: 'ETSY-LNG-OVERRIDE',
+      status: 'New',
+      scale_overall_status: 'Ready',
+      case: [],
+      seller: {},
+      shopId: { _id: 'shop-1', name: 'Etsy Shop' },
+      buyer: {},
+      shipping: {},
+      items: [{ transactionId: 'tx-1', fulfillment_file: { front: 'https://cdn.example/front.png' }, cost_breakdown: {} }],
+      markModified: jest.fn(),
+      save,
+    };
+    mockFindChain([order]);
+    axios.post.mockResolvedValue({ data: { success: true, received: 1, inserted: 1, updated: 0, skipped: 0, errorsCount: 0, errors: [] } });
+
+    const req = {
+      body: { orderIds: ['ETSY-LNG-OVERRIDE'] },
+      user: { role: 'Admin', _id: 'user-1' },
+      ip: '127.0.0.1',
+      headers: { 'user-agent': 'jest' },
+    };
+    const res = makeRes();
+
+    await controller.pushEtsyPlatformOrders(req, res);
+
+    expect(axios.post.mock.calls[0][1].data[0].items[0].cost_center).toEqual(expect.objectContaining({
+      vendorKey: 'lng',
+      vendor_mapping_override: true,
+    }));
+    expect(res.status).not.toHaveBeenCalled();
   });
 });
 

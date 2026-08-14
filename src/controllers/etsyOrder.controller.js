@@ -4183,15 +4183,23 @@ const getFulfillmentFileKeys = (value) => {
 const hasEtsyProductionFile = (item) =>
     Boolean(item?.svgFile) || getFulfillmentFileKeys(item?.fulfillment_file || item?.fulfillmentFile).length > 0;
 
+const withEtsyProductionVendorOverride = (costBreakdown) => {
+    const costCenter = toPlainObject(costBreakdown);
+    if (costCenter.vendorProductId) return costCenter;
+    return {
+        ...costCenter,
+        vendorKey: "lng",
+        vendor_mapping_override: true,
+        vendor_mapping_override_reason: "missing portal vendor mapping",
+    };
+};
+
 const getEtsyProductionPrerequisiteErrors = (order) =>
     (Array.isArray(order?.items) ? order.items : []).flatMap((item) => {
         const errors = [];
         const itemId = item?.transactionId || item?.orderItemId || "";
         if (!hasEtsyProductionFile(item)) {
             errors.push({ itemId, code: "MISSING_FULFILLMENT_FILE", message: "Missing fulfillment file" });
-        }
-        if (!item?.cost_breakdown?.vendorProductId) {
-            errors.push({ itemId, code: "MISSING_VENDOR_MAPPING", message: "Missing vendor mapping" });
         }
         return errors;
     });
@@ -4281,7 +4289,7 @@ const serializeEtsyOrderForFulfillmentPlatform = (order) => ({
             snapshotImageUrl,
             fulfillment_file: normalizeEtsyImageLinks(toPlainFulfillmentFile(item.fulfillment_file)),
             listingId: item.listingId || "",
-            cost_center: toPlainObject(item.cost_breakdown) || {},
+            cost_center: withEtsyProductionVendorOverride(item.cost_breakdown),
             scale_status: item.scale_status || null,
             qc_note: item.qc_note || "",
             cs_note: item.cs_note || "",

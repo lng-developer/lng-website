@@ -23,6 +23,7 @@ const KNOWN = [
 
 // All = chỉ các trạng thái đang hoạt động trong quy trình QC
 const ACTIVE = ["Pending", "Sent", "QC Rejected", "Ready", "Address Invalid"];
+const PRODUCTION_VENDOR_OVERRIDE_KEY = "lng";
 
 const hasRole = (userRole, target) => {
   if (!userRole) return false;
@@ -62,6 +63,17 @@ const toPlainObject = (value) => {
 const normalizeFulfillmentFile = (value) => {
   const plain = toPlainObject(value);
   return plain && typeof plain === "object" ? plain : {};
+};
+
+const withProductionVendorOverride = (costBreakdown) => {
+  const costCenter = toPlainObject(costBreakdown);
+  if (costCenter.vendorProductId) return costCenter;
+  return {
+    ...costCenter,
+    vendorKey: PRODUCTION_VENDOR_OVERRIDE_KEY,
+    vendor_mapping_override: true,
+    vendor_mapping_override_reason: "missing portal vendor mapping",
+  };
 };
 
 const getFullSizeEtsyImageUrl = (src) => {
@@ -156,9 +168,7 @@ const buildPortalPayload = (orders) => ({
                 psd: listingDoc.psd || null,
               }
             : {},
-          cost_center: item.cost_breakdown
-            ? toPlainObject(item.cost_breakdown)
-            : {},
+          cost_center: withProductionVendorOverride(item.cost_breakdown),
           scale_status: "Pending",
           qc_note: "",
         };
@@ -323,8 +333,23 @@ const buildFulfillmentPlatformPayloadPreview = (payload) =>
       hasSnapshotImage: Boolean(item.snapshotImageUrl || item.snapshotImage),
       hasBaseImageUrl: Boolean(item.baseImageUrl),
       fulfillmentFileKeys: getFulfillmentFileKeys(item.fulfillment_file || item.fulfillmentFile),
+      vendorProductId: item.cost_center?.vendorProductId || null,
+      vendorKey: item.cost_center?.vendorKey || null,
+      vendorMappingOverride: item.cost_center?.vendor_mapping_override === true,
     }))
   );
+
+const parseAxiosRequestPayload = (data) => {
+  if (!data) return {};
+  if (typeof data === "string") {
+    try {
+      return JSON.parse(data);
+    } catch (_) {
+      return {};
+    }
+  }
+  return typeof data === "object" ? data : {};
+};
 
 const toSafeFulfillmentSummary = (data, fallbackSuccess = true) => {
   const source = data && typeof data === "object" ? data : {};
@@ -399,9 +424,6 @@ const getProductionPrerequisiteErrors = (order) =>
     const itemId = item?.orderItemId || item?.transactionId || "";
     if (!hasProductionFile(item)) {
       errors.push({ itemId, code: "MISSING_FULFILLMENT_FILE", message: "Missing fulfillment file" });
-    }
-    if (!item?.cost_breakdown?.vendorProductId) {
-      errors.push({ itemId, code: "MISSING_VENDOR_MAPPING", message: "Missing vendor mapping" });
     }
     return errors;
   });
@@ -1389,12 +1411,18 @@ const pushPlatformOrders = async (req, res) => {
   } catch (err) {
     if (err.response) {
       const fulfillment = toSafeFulfillmentSummary(err.response.data, false);
+      console.error("[QC][pushPlatformOrders] Fulfillment Platform error", {
+        status: err.response.status,
+        data: err.response.data,
+        payloadPreview: buildFulfillmentPlatformPayloadPreview(parseAxiosRequestPayload(err.config?.data)),
+      });
       await recordFulfillmentPlatformV2Failure(orders, fulfillment, "AMAZON", req);
 
       return res.status(err.response.status || 502).json({
         message: "Failed to push orders to Fulfillment Platform",
         attemptedCount: orderIds.length,
         fulfillment,
+        platformStatus: err.response.status,
       });
     }
 
