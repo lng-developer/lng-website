@@ -32,7 +32,14 @@ const createCase = async (req, res) => {
 
 
 const updateCase = async (req, res) => {
-    const caseData = await Case.findByIdAndUpdate(req.params.id, req.body, { new: true });
+    const update = {};
+    if (Object.prototype.hasOwnProperty.call(req.body || {}, 'name')) update.name = req.body.name;
+    if (Object.prototype.hasOwnProperty.call(req.body || {}, 'description')) update.description = req.body.description;
+    if (Object.prototype.hasOwnProperty.call(req.body || {}, 'blocksProduction')) {
+        update.blocksProduction = req.body.blocksProduction === true;
+    }
+    const caseData = await Case.findByIdAndUpdate(req.params.id, update, { new: true });
+    if (!caseData) return res.status(404).json({ message: 'Case not found' });
     res.json(caseData);
 };
 

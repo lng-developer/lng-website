@@ -882,7 +882,7 @@ const confirmScaleForItem = async (req, res) => {
       metadata: { orderItemId, note: note || "" },
     }));
 
-    // === If all items are complete, send to vendor before changing the order status ===
+    // === If all items are complete, stop at Ready. Production push is a separate action. ===
     if (shouldSendToVendor) {
       // Points
       const asin = item.asin;
@@ -931,171 +931,12 @@ const confirmScaleForItem = async (req, res) => {
         });
       }
 
-      // Resolve provider
-      let providerKey = String(provider || "").trim().toLowerCase();
-      const availableProviderSet = new Set((FulfillmentService.PROVIDERS || []).map((p) => String(p?.key || "").toLowerCase()));
-
-      try {
-        if (!providerKey) {
-          const resolved = await resolveProviderFromOrder(order, VendorProduct);
-          providerKey = String(resolved.providerKey || "").trim().toLowerCase();
-          if (!providerKey) {
-            if (before.order_scale_overall_status !== order.scale_overall_status) {
-              await order.save();
-            }
-            return res.status(409).json({
-              message: "Unable to auto-resolve provider for this order. Please choose a provider manually.",
-              code: "UNRESOLVED_PROVIDER",
-              reasons: resolved.reasons || [],
-              providers: resolved.providers || [],
-              hint: "Use retry button and select provider to continue sending.",
-            });
-          }
-        }
-      } catch (provErr) {
-        const status = provErr.status || 409;
-        if (before.order_scale_overall_status !== order.scale_overall_status) {
-          await order.save();
-        }
-        return res.status(status).json({
-          message:
-            "Unable to auto-select provider for this order.",
-          error: provErr.message,
-          providers: provErr.providers || [],
-          reasons: provErr.reasons || [],
-          hint:
-            'Please specify "provider" in request body, e.g., {"provider":"grabink"} or {"provider":"merchfox"} or {"provider":"merchize"}.',
-        });
-      }
-
-      if (providerKey && availableProviderSet.size > 0 && !availableProviderSet.has(providerKey)) {
-        if (before.order_scale_overall_status !== order.scale_overall_status) {
-          await order.save();
-        }
-        return res.status(400).json({
-          message: `Unknown provider: ${providerKey}`,
-          code: "INVALID_PROVIDER",
-          hint: `Valid providers: ${(FulfillmentService.PROVIDERS || []).map((p) => p?.key).join(" | ")}`,
-        });
-      }
-
-      try {
-        const result = await FulfillmentService.send(order, providerKey);
-        const wasAlreadySent = !!result.alreadySent;
-        if (wasAlreadySent) {
-          order.scale_overall_status = "Sent";
-          order.status = "Fulfilled";
-        } else {
-          order.scale_overall_status = "Sent";
-          order.status = "Fulfilled";
-        }
-        await order.save();
-
-        // Log vendor submit (success or alreadySent)
-        await logOrderHistory({
-          orderDoc: order,
-          action: "SEND_TO_VENDOR",
-          description: result.alreadySent
-            ? `Order already sent to ${result.vendorKey}.`
-            : `Order sent to ${result.vendorKey}.`,
-          changes: [{ field: "vendor", from: null, to: result.vendorKey }],
-          user,
-          context: {
-            source: "SYSTEM",
-            ip: req.ip,
-            userAgent: req.headers["user-agent"],
-          },
-        });
-        await logOrderLifecycleEvent(buildOrderLifecyclePayload({
-          order,
-          req,
-          fallbackPlatform: "amazon",
-          stage: "VENDOR_PUSH",
-          eventType: result.alreadySent ? "VENDOR_PUSH_SKIPPED" : "VENDOR_PUSH_SUCCESS",
-          status: result.alreadySent ? "info" : "success",
-          message: result.alreadySent
-            ? `Order already sent to ${result.vendorKey}.`
-            : `Order sent to ${result.vendorKey}.`,
-          metadata: {
-            provider: result.vendorKey,
-            alreadySent: !!result.alreadySent,
-          },
-        }));
-
-        return res.json({
-          message: result.alreadySent
-            ? `Order already sent to ${result.vendorKey}.`
-            : `Approved and order sent to ${result.vendorKey}.`,
-          item_scale_status: item.scale_status,
-          order_scale_overall_status: order.scale_overall_status,
-          submission_vendor: result.vendorKey,
-          submission_response: result.response,
-        });
-      } catch (e) {
-        const prevOverall = order.scale_overall_status;
-
-        const prev = order.vendor_submissions?.[providerKey] || {};
-        const rec = {
-          ...(prev || {}),
-          sent: false,
-          attempt_count: (prev?.attempt_count || 0) + 1,
-          last_response: { error: e.message, at: new Date() },
-        };
-
-        order.vendor_submissions = order.vendor_submissions || {};
-        order.vendor_submissions[providerKey] = rec;
-        order.markModified("vendor_submissions");
-
-        if (providerKey === "grabink") {
-          order.grabink_submission = rec;
-        }
-
-        order.scale_overall_status = "Failed";
-        await order.save();
-
-        await logOrderHistory({
-          orderDoc: order,
-          action: "SEND_TO_VENDOR_FAILED",
-          description: `Sending order to ${providerKey} failed. Overall status set to Failed.`,
-          changes: [
-            { field: "scale_overall_status", from: prevOverall, to: "Failed" },
-            {
-              field: `vendor_submissions.${providerKey}.attempt_count`,
-              from: prev?.attempt_count || 0,
-              to: rec.attempt_count,
-            },
-            {
-              field: `vendor_submissions.${providerKey}.last_response.error`,
-              from: null,
-              to: e.message,
-            },
-          ],
-          user,
-          context: {
-            source: "SYSTEM",
-            ip: req.ip,
-            userAgent: req.headers["user-agent"],
-          },
-        });
-        await logOrderLifecycleEvent(buildOrderLifecyclePayload({
-          order,
-          req,
-          fallbackPlatform: "amazon",
-          stage: "VENDOR_PUSH",
-          eventType: "VENDOR_PUSH_FAILED",
-          status: "failed",
-          reason: e.message,
-          metadata: {
-            provider: providerKey,
-            attemptCount: rec.attempt_count,
-          },
-        }));
-
-        return res.status(502).json({
-          message: `Approved but sending order to ${providerKey} failed. Overall status set to Failed.`,
-          error: e.message,
-        });
-      }
+      await order.save();
+      return res.json({
+        message: "Approved and order is ready for production.",
+        item_scale_status: item.scale_status,
+        order_scale_overall_status: order.scale_overall_status,
+      });
     }
 
     // Not ready yet

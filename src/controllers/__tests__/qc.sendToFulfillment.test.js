@@ -357,6 +357,7 @@ describe("pushPlatformOrders", () => {
           baseImage: { imageUrl: "https://cdn.example/product.png" },
           snapshotImage: "https://cdn.example/preview.jpg",
           fulfillment_file: new Map([["front", "https://cdn.example/front.png"]]),
+          cost_breakdown: { vendorProductId: "vendor-product-1" },
           tracking_info: { status: "New", tracking: "" },
         },
       ],
@@ -484,7 +485,11 @@ describe("pushPlatformOrders", () => {
       status: "New",
       scale_overall_status: "Failed",
       fulfillment_platform_v2_submission: { sent: false, attempt_count: 2 },
-      items: [{ orderItemId: "ITEM-1" }],
+      items: [{
+        orderItemId: "ITEM-1",
+        fulfillment_file: { front: "https://cdn.example/front.png" },
+        cost_breakdown: { vendorProductId: "vendor-product-1" },
+      }],
       save,
     };
     mockFindChain([order]);
@@ -548,6 +553,120 @@ describe("pushPlatformOrders", () => {
         errors: [],
         orders: [],
       },
+    });
+  });
+
+  test("blocks production push when order has a blocking case", async () => {
+    const save = jest.fn().mockResolvedValue(undefined);
+    const order = {
+      orderId: "ORDER-BLOCKED",
+      status: "New",
+      scale_overall_status: "Ready",
+      case: [{ _id: "case-1", name: "Customer Change Request", blocksProduction: true }],
+      fulfillment_platform_v2_submission: { sent: false, attempt_count: 0 },
+      items: [{
+        orderItemId: "ITEM-1",
+        fulfillment_file: { front: "https://cdn.example/front.png" },
+        cost_breakdown: { vendorProductId: "vendor-product-1" },
+      }],
+      save,
+    };
+    mockFindChain([order]);
+
+    const req = {
+      body: { orderIds: ["ORDER-BLOCKED"] },
+      user: { role: "Admin", _id: "user-1" },
+      ip: "127.0.0.1",
+      headers: { "user-agent": "jest" },
+    };
+    const res = makeRes();
+
+    await controller.pushPlatformOrders(req, res);
+
+    expect(axios.post).not.toHaveBeenCalled();
+    expect(save).not.toHaveBeenCalled();
+    expect(res.status).toHaveBeenCalledWith(409);
+    expect(res.json).toHaveBeenCalledWith({
+      message: "Some orders have blocking case(s) and cannot be pushed to production",
+      orders: [
+        {
+          orderId: "ORDER-BLOCKED",
+          cases: [{ id: "case-1", name: "Customer Change Request" }],
+        },
+      ],
+    });
+  });
+
+  test("allows production push when order has only non-blocking cases", async () => {
+    const save = jest.fn().mockResolvedValue(undefined);
+    const order = {
+      orderId: "ORDER-NON-BLOCKING",
+      status: "New",
+      scale_overall_status: "Ready",
+      case: [{ _id: "case-1", name: "Internal Note", blocksProduction: false }],
+      fulfillment_platform_v2_submission: { sent: false, attempt_count: 0 },
+      items: [{
+        orderItemId: "ITEM-1",
+        fulfillment_file: { front: "https://cdn.example/front.png" },
+        cost_breakdown: { vendorProductId: "vendor-product-1" },
+        tracking_info: {},
+      }],
+      save,
+    };
+    mockFindChain([order]);
+    axios.post.mockResolvedValue({ data: { success: true, received: 1, inserted: 1, updated: 0, skipped: 0, errors: [] } });
+
+    const req = {
+      body: { orderIds: ["ORDER-NON-BLOCKING"] },
+      user: { role: "Admin", _id: "user-1" },
+      ip: "127.0.0.1",
+      headers: { "user-agent": "jest" },
+    };
+    const res = makeRes();
+
+    await controller.pushPlatformOrders(req, res);
+
+    expect(axios.post).toHaveBeenCalledTimes(1);
+    expect(order.scale_overall_status).toBe("Sent");
+    expect(save).toHaveBeenCalledTimes(1);
+    expect(res.status).not.toHaveBeenCalled();
+  });
+
+  test("blocks production push when selected order is missing file and vendor mapping", async () => {
+    const save = jest.fn().mockResolvedValue(undefined);
+    const order = {
+      orderId: "ORDER-MISSING-PREREQ",
+      status: "New",
+      scale_overall_status: "Ready",
+      case: [],
+      fulfillment_platform_v2_submission: { sent: false, attempt_count: 0 },
+      items: [{ orderItemId: "ITEM-1", fulfillment_file: {}, cost_breakdown: {} }],
+      save,
+    };
+    mockFindChain([order]);
+
+    const req = {
+      body: { orderIds: ["ORDER-MISSING-PREREQ"] },
+      user: { role: "Admin", _id: "user-1" },
+      ip: "127.0.0.1",
+      headers: { "user-agent": "jest" },
+    };
+    const res = makeRes();
+
+    await controller.pushPlatformOrders(req, res);
+
+    expect(axios.post).not.toHaveBeenCalled();
+    expect(save).not.toHaveBeenCalled();
+    expect(res.status).toHaveBeenCalledWith(409);
+    expect(res.json).toHaveBeenCalledWith({
+      message: "Some orders are missing production prerequisites",
+      orders: [{
+        orderId: "ORDER-MISSING-PREREQ",
+        errors: [
+          { itemId: "ITEM-1", code: "MISSING_FULFILLMENT_FILE", message: "Missing fulfillment file" },
+          { itemId: "ITEM-1", code: "MISSING_VENDOR_MAPPING", message: "Missing vendor mapping" },
+        ],
+      }],
     });
   });
 });

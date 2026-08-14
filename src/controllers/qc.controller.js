@@ -380,6 +380,32 @@ const toSafeFulfillmentSummary = (data, fallbackSuccess = true) => {
 const buildFulfillmentPlatformUrl = (baseUrl) =>
   `${String(baseUrl || "").replace(/\/+$/, "")}/api/portal/orders`;
 
+const getBlockingProductionCases = (order) =>
+  (Array.isArray(order?.case) ? order.case : [])
+    .filter((caseDoc) => caseDoc && typeof caseDoc === "object" && caseDoc.blocksProduction === true)
+    .map((caseDoc) => ({
+      id: String(caseDoc._id || ""),
+      name: caseDoc.name || "",
+    }));
+
+const hasProductionFile = (item) => {
+  if (item?.svgFile) return true;
+  return Object.keys(normalizeFulfillmentFile(item?.fulfillment_file)).length > 0;
+};
+
+const getProductionPrerequisiteErrors = (order) =>
+  (Array.isArray(order?.items) ? order.items : []).flatMap((item) => {
+    const errors = [];
+    const itemId = item?.orderItemId || item?.transactionId || "";
+    if (!hasProductionFile(item)) {
+      errors.push({ itemId, code: "MISSING_FULFILLMENT_FILE", message: "Missing fulfillment file" });
+    }
+    if (!item?.cost_breakdown?.vendorProductId) {
+      errors.push({ itemId, code: "MISSING_VENDOR_MAPPING", message: "Missing vendor mapping" });
+    }
+    return errors;
+  });
+
 // ====== GET QC LIST ======
 const getQCList = async (req, res) => {
   try {
@@ -1264,6 +1290,7 @@ const pushPlatformOrders = async (req, res) => {
       .populate({ path: "shopId", select: "name" })
       .populate({ path: "sellerId", select: "full_name email" })
       .populate({ path: "scaleId", select: "full_name email" })
+      .populate({ path: "case", select: "name blocksProduction" })
       .populate({ path: "items.listingId", select: "asin_type product_image psd" });
 
     const foundOrderIds = new Set(orders.map((order) => order.orderId));
@@ -1285,6 +1312,32 @@ const pushPlatformOrders = async (req, res) => {
       return res.status(409).json({
         message: "Only orders with scale_overall_status Ready or Failed can be pushed to Fulfillment Platform v2",
         orders: notPushableOrders,
+      });
+    }
+
+    const blockedOrders = orders
+      .map((order) => ({
+        orderId: order.orderId,
+        cases: getBlockingProductionCases(order),
+      }))
+      .filter((entry) => entry.cases.length > 0);
+    if (blockedOrders.length > 0) {
+      return res.status(409).json({
+        message: "Some orders have blocking case(s) and cannot be pushed to production",
+        orders: blockedOrders,
+      });
+    }
+
+    const invalidProductionOrders = orders
+      .map((order) => ({
+        orderId: order.orderId,
+        errors: getProductionPrerequisiteErrors(order),
+      }))
+      .filter((entry) => entry.errors.length > 0);
+    if (invalidProductionOrders.length > 0) {
+      return res.status(409).json({
+        message: "Some orders are missing production prerequisites",
+        orders: invalidProductionOrders,
       });
     }
 

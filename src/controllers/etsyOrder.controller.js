@@ -1378,7 +1378,7 @@ const getListOrders = async (req, res) => {
                 .select(ETSY_LIST_SELECT_FIELDS)
                 .populate("shopId", "name store merchant")
                 .populate("seller.sellerId", "full_name email employee_id")
-                .populate("case", "name description")
+                .populate("case", "name description blocksProduction")
                 .sort({ [sortField]: sortDir })
                 .skip(skip)
                 .limit(limitNum)
@@ -4180,6 +4180,22 @@ const getFulfillmentFileKeys = (value) => {
     return Object.keys(fileMap).filter((key) => fileMap[key]);
 };
 
+const hasEtsyProductionFile = (item) =>
+    Boolean(item?.svgFile) || getFulfillmentFileKeys(item?.fulfillment_file || item?.fulfillmentFile).length > 0;
+
+const getEtsyProductionPrerequisiteErrors = (order) =>
+    (Array.isArray(order?.items) ? order.items : []).flatMap((item) => {
+        const errors = [];
+        const itemId = item?.transactionId || item?.orderItemId || "";
+        if (!hasEtsyProductionFile(item)) {
+            errors.push({ itemId, code: "MISSING_FULFILLMENT_FILE", message: "Missing fulfillment file" });
+        }
+        if (!item?.cost_breakdown?.vendorProductId) {
+            errors.push({ itemId, code: "MISSING_VENDOR_MAPPING", message: "Missing vendor mapping" });
+        }
+        return errors;
+    });
+
 const toEtsyFullSizeImageUrl = (url) => {
     const value = firstNonBlankString(url);
     if (!value) return "";
@@ -5722,50 +5738,11 @@ const confirmEtsyScaleForItem = async (req, res) => {
             }
 
             await order.save();
-
-            try {
-                const result = await sendEtsyReadyOrderAfterQc({
-                    order,
-                    req,
-                });
-
-                if (result.mode === "platform") {
-                    return res.json({
-                        message: "Approved and pushed Etsy order to Fulfillment Platform v2.",
-                        item_scale_status: item.scale_status,
-                        order_scale_overall_status: order.scale_overall_status,
-                        fulfillment: result.fulfillment,
-                    });
-                }
-
-                return res.json({
-                    message: result.alreadySent
-                        ? `Etsy order already sent to ${result.vendorKey}.`
-                        : `Approved and Etsy order sent to ${result.vendorKey}.`,
-                    item_scale_status: item.scale_status,
-                    order_scale_overall_status: order.scale_overall_status,
-                    submission_vendor: result.vendorKey,
-                    submission_response: result.response,
-                });
-            } catch (err) {
-                if (err.code === "MULTIPLE_VENDORS_IN_ORDER") {
-                    return res.status(err.status || 409).json({
-                        message: "Unable to auto-select provider because multiple vendors were detected for this Etsy order.",
-                        error: err.message,
-                        providers: err.providers || [],
-                        hint: err.hint,
-                    });
-                }
-                return res.status(err.status || 502).json({
-                    message: err.providerKey
-                        ? `Approved but sending Etsy order to ${err.providerKey} failed. Overall status set to Failed.`
-                        : "Approved but pushing/sending Etsy order failed.",
-                    error: err.message,
-                    fulfillment: err.fulfillment,
-                    errors: err.errors,
-                    hint: err.hint,
-                });
-            }
+            return res.json({
+                message: "Approved and Etsy order is ready for production.",
+                item_scale_status: item.scale_status,
+                order_scale_overall_status: order.scale_overall_status,
+            });
         }
 
         await order.save();
@@ -6680,6 +6657,7 @@ const pushEtsyPlatformOrders = async (req, res) => {
     try {
         orders = await EtsyOrder.find({ orderId: { $in: orderIds } })
             .populate({ path: "shopId", select: "name" })
+            .populate({ path: "case", select: "name blocksProduction" })
             .populate({ path: "seller.sellerId", select: "full_name email employee_id" });
 
         const foundOrderIds = new Set(orders.map((order) => order.orderId));
@@ -6726,6 +6704,37 @@ const pushEtsyPlatformOrders = async (req, res) => {
             return res.status(409).json({
                 message: "Only Etsy orders with scale_overall_status Ready or Failed can be pushed to Fulfillment Platform v2",
                 orders: notReadyOrders,
+            });
+        }
+
+        const blockedOrders = orders
+            .map((order) => ({
+                orderId: order.orderId,
+                cases: (Array.isArray(order.case) ? order.case : [])
+                    .filter((caseDoc) => caseDoc && typeof caseDoc === "object" && caseDoc.blocksProduction === true)
+                    .map((caseDoc) => ({
+                        id: String(caseDoc._id || ""),
+                        name: caseDoc.name || "",
+                    })),
+            }))
+            .filter((entry) => entry.cases.length > 0);
+        if (blockedOrders.length > 0) {
+            return res.status(409).json({
+                message: "Some Etsy orders have blocking case(s) and cannot be pushed to production",
+                orders: blockedOrders,
+            });
+        }
+
+        const invalidProductionOrders = orders
+            .map((order) => ({
+                orderId: order.orderId,
+                errors: getEtsyProductionPrerequisiteErrors(order),
+            }))
+            .filter((entry) => entry.errors.length > 0);
+        if (invalidProductionOrders.length > 0) {
+            return res.status(409).json({
+                message: "Some Etsy orders are missing production prerequisites",
+                orders: invalidProductionOrders,
             });
         }
 

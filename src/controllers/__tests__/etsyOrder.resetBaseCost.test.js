@@ -1,5 +1,5 @@
 jest.mock('../../models', () => ({
-  EtsyOrder: { findOne: jest.fn(), findOneAndUpdate: jest.fn(), findById: jest.fn(), updateOne: jest.fn(), aggregate: jest.fn() },
+  EtsyOrder: { find: jest.fn(), findOne: jest.fn(), findOneAndUpdate: jest.fn(), findById: jest.fn(), updateOne: jest.fn(), aggregate: jest.fn() },
   vendorProduct: { find: jest.fn() },
   user: {},
   role: {},
@@ -53,6 +53,16 @@ function mockVendorProvider(name, fulfillmentType = name) {
   const populate = jest.fn().mockReturnValue({ lean });
   const select = jest.fn().mockReturnValue({ populate });
   db.vendorProduct.find.mockReturnValue({ select });
+}
+
+function mockFindChain(result) {
+  const chain = {
+    populate: jest.fn(() => chain),
+    then: (resolve, reject) => Promise.resolve(result).then(resolve, reject),
+    catch: (reject) => Promise.resolve(result).catch(reject),
+  };
+  db.EtsyOrder.find.mockReturnValue(chain);
+  return chain;
 }
 
 describe('resetBaseCostForEtsyOrder', () => {
@@ -681,27 +691,9 @@ describe('confirmEtsyScaleForItem', () => {
 
     await controller.confirmEtsyScaleForItem(req, res);
 
-    expect(axios.post).toHaveBeenCalledWith(
-      'https://fulfillment.example/api/portal/orders',
-      expect.objectContaining({
-        data: [expect.objectContaining({ orderId: 'ETSY-1001', sourceChannel: 'ETSY' })],
-      }),
-      expect.objectContaining({
-        headers: expect.objectContaining({ Authorization: 'Bearer tenant-key' }),
-        timeout: 15000,
-      })
-    );
-    const sentPayload = axios.post.mock.calls[0][1];
-    const sentItem = sentPayload.data[0].items[0];
-    const fullSizeUrl = 'https://i.etsystatic.com/66742086/r/il/17d71c/8301789845/il_fullxfull.8301789845_hl6n.jpg';
-    expect(sentItem.baseImageUrl).toBe(fullSizeUrl);
-    expect(sentItem.snapshotImage).toBe(fullSizeUrl);
-    expect(sentItem.snapshotImageUrl).toBe(fullSizeUrl);
-    expect(sentItem.customized_url).toBe(fullSizeUrl);
-    expect(sentItem.fulfillment_file.front).toBe(fullSizeUrl);
-    expect(sentItem.customFiles[0].url).toBe(fullSizeUrl);
-    expect(order.scale_overall_status).toBe('Sent');
-    expect(order.status).toBe('Fulfilled');
+    expect(axios.post).not.toHaveBeenCalled();
+    expect(order.scale_overall_status).toBe('Ready');
+    expect(order.status).toBe('New');
     expect(FulfillmentService.send).not.toHaveBeenCalled();
     expect(logOrderLifecycleEvent).toHaveBeenCalledWith(expect.objectContaining({
       platform: 'etsy',
@@ -725,22 +717,13 @@ describe('confirmEtsyScaleForItem', () => {
       eventType: 'SCALE_ORDER_READY',
       status: 'success',
     }));
-    expect(logOrderLifecycleEvent).toHaveBeenCalledWith(expect.objectContaining({
-      platform: 'etsy',
-      orderId: 'ETSY-1001',
-      stage: 'VENDOR_PUSH',
-      eventType: 'VENDOR_PUSH_SUCCESS',
-      status: 'success',
-      metadata: expect.objectContaining({ provider: 'fulfillment-platform-v2' }),
-    }));
     expect(res.json).toHaveBeenCalledWith(expect.objectContaining({
-      message: 'Approved and pushed Etsy order to Fulfillment Platform v2.',
-      order_scale_overall_status: 'Sent',
-      fulfillment: expect.objectContaining({ success: true }),
+      message: 'Approved and Etsy order is ready for production.',
+      order_scale_overall_status: 'Ready',
     }));
   });
 
-  test('auto sends Merchize orders through the vendor provider when QC approval makes order ready', async () => {
+  test('does not auto send Merchize orders when QC approval makes order ready', async () => {
     mockVendorProvider('Merchize', 'merchize');
     FulfillmentService.send.mockResolvedValue({
       alreadySent: false,
@@ -781,19 +764,12 @@ describe('confirmEtsyScaleForItem', () => {
     await controller.confirmEtsyScaleForItem(req, res);
 
     expect(axios.post).not.toHaveBeenCalled();
-    expect(FulfillmentService.send).toHaveBeenCalledWith(order, 'merchize');
-    expect(logOrderLifecycleEvent).toHaveBeenCalledWith(expect.objectContaining({
-      platform: 'etsy',
-      orderId: 'ETSY-2002',
-      stage: 'VENDOR_PUSH',
-      eventType: 'VENDOR_PUSH_SUCCESS',
-      status: 'success',
-      metadata: expect.objectContaining({ provider: 'merchize' }),
-    }));
+    expect(FulfillmentService.send).not.toHaveBeenCalled();
+    expect(order.scale_overall_status).toBe('Ready');
+    expect(order.status).toBe('New');
     expect(res.json).toHaveBeenCalledWith(expect.objectContaining({
-      message: 'Approved and Etsy order sent to merchize.',
-      submission_vendor: 'merchize',
-      submission_response: { ok: true },
+      message: 'Approved and Etsy order is ready for production.',
+      order_scale_overall_status: 'Ready',
     }));
   });
 });
@@ -851,6 +827,101 @@ describe('updateEtsyOrderItemQuantity', () => {
         quantity: 4,
         numberOfItems: 6,
       },
+    });
+  });
+});
+
+describe('pushEtsyPlatformOrders production gate', () => {
+  const oldEnv = process.env;
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    process.env = {
+      ...oldEnv,
+      FULFILLMENT_API_BASE_URL: 'https://platform.example',
+      FULFILLMENT_TENANT_API_KEY: 'tenant-key',
+      FULFILLMENT_API_TIMEOUT_MS: '15000',
+    };
+  });
+
+  afterAll(() => {
+    process.env = oldEnv;
+  });
+
+  test('blocks Etsy production push when order has a blocking case', async () => {
+    const save = jest.fn().mockResolvedValue(undefined);
+    const order = {
+      orderId: 'ETSY-BLOCKED',
+      status: 'New',
+      scale_overall_status: 'Ready',
+      case: [{ _id: 'case-1', name: 'Customer Change Request', blocksProduction: true }],
+      seller: {},
+      items: [{
+        transactionId: 'tx-1',
+        fulfillment_file: { front: 'https://cdn.example/front.png' },
+        cost_breakdown: { vendorProductId: 'vendor-product-1' },
+      }],
+      save,
+    };
+    mockFindChain([order]);
+
+    const req = {
+      body: { orderIds: ['ETSY-BLOCKED'] },
+      user: { role: 'Admin', _id: 'user-1' },
+      ip: '127.0.0.1',
+      headers: { 'user-agent': 'jest' },
+    };
+    const res = makeRes();
+
+    await controller.pushEtsyPlatformOrders(req, res);
+
+    expect(axios.post).not.toHaveBeenCalled();
+    expect(save).not.toHaveBeenCalled();
+    expect(res.status).toHaveBeenCalledWith(409);
+    expect(res.json).toHaveBeenCalledWith({
+      message: 'Some Etsy orders have blocking case(s) and cannot be pushed to production',
+      orders: [{
+        orderId: 'ETSY-BLOCKED',
+        cases: [{ id: 'case-1', name: 'Customer Change Request' }],
+      }],
+    });
+  });
+
+  test('blocks Etsy production push when selected order is missing file and vendor mapping', async () => {
+    const save = jest.fn().mockResolvedValue(undefined);
+    const order = {
+      orderId: 'ETSY-MISSING-PREREQ',
+      status: 'New',
+      scale_overall_status: 'Failed',
+      case: [],
+      seller: {},
+      items: [{ transactionId: 'tx-1', fulfillment_file: {}, cost_breakdown: {} }],
+      save,
+    };
+    mockFindChain([order]);
+
+    const req = {
+      body: { orderIds: ['ETSY-MISSING-PREREQ'] },
+      user: { role: 'Admin', _id: 'user-1' },
+      ip: '127.0.0.1',
+      headers: { 'user-agent': 'jest' },
+    };
+    const res = makeRes();
+
+    await controller.pushEtsyPlatformOrders(req, res);
+
+    expect(axios.post).not.toHaveBeenCalled();
+    expect(save).not.toHaveBeenCalled();
+    expect(res.status).toHaveBeenCalledWith(409);
+    expect(res.json).toHaveBeenCalledWith({
+      message: 'Some Etsy orders are missing production prerequisites',
+      orders: [{
+        orderId: 'ETSY-MISSING-PREREQ',
+        errors: [
+          { itemId: 'tx-1', code: 'MISSING_FULFILLMENT_FILE', message: 'Missing fulfillment file' },
+          { itemId: 'tx-1', code: 'MISSING_VENDOR_MAPPING', message: 'Missing vendor mapping' },
+        ],
+      }],
     });
   });
 });
