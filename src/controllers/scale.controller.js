@@ -931,11 +931,63 @@ const confirmScaleForItem = async (req, res) => {
         });
       }
 
-      await order.save();
+      let providerKey = "";
+      try {
+        const resolved = await resolveProviderFromOrder(order, VendorProduct);
+        providerKey = String(resolved.providerKey || "").toLowerCase();
+      } catch {
+        providerKey = "";
+      }
+
+      if (!providerKey) {
+        await order.save();
+        return res.json({
+          message: "Approved and order is ready for production.",
+          item_scale_status: item.scale_status,
+          order_scale_overall_status: order.scale_overall_status,
+        });
+      }
+
+      try {
+        await FulfillmentService.send(order, providerKey);
+      } catch (err) {
+        const prevOverall = order.scale_overall_status;
+        order.scale_overall_status = "Failed";
+        await order.save();
+
+        await logOrderHistory({
+          orderDoc: order,
+          action: "SEND_TO_VENDOR_FAILED",
+          description: `Auto sending order to ${providerKey} failed.`,
+          changes: [
+            {
+              field: "scale_overall_status",
+              from: prevOverall,
+              to: "Failed",
+            },
+          ],
+          user,
+          context: {
+            source: "SYSTEM",
+            ip: req.ip,
+            userAgent: req.headers["user-agent"],
+          },
+        });
+
+        return res.status(502).json({
+          message: `Approved but auto sending order to ${providerKey} failed.`,
+          item_scale_status: item.scale_status,
+          order_scale_overall_status: order.scale_overall_status,
+          provider: providerKey,
+          error: err.message,
+        });
+      }
+
       return res.json({
-        message: "Approved and order is ready for production.",
+        message: `Approved and order sent to ${providerKey}.`,
         item_scale_status: item.scale_status,
         order_scale_overall_status: order.scale_overall_status,
+        provider: providerKey,
       });
     }
 

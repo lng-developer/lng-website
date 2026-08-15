@@ -152,11 +152,12 @@ describe("scale lifecycle hooks", () => {
     }));
   });
 
-  test("confirmScaleForItem marks final approval Ready without sending vendor", async () => {
+  test("confirmScaleForItem auto pushes vendor when final approval has one provider", async () => {
     const item = {
       orderItemId: "ITEM-1",
       scale_status: "Pending",
       fulfillment_file: { front: "https://cdn/front.png" },
+      cost_breakdown: { vendorProductId: "507f1f77bcf86cd799439011" },
       markModified: jest.fn(),
     };
     const order = {
@@ -171,6 +172,23 @@ describe("scale lifecycle hooks", () => {
       save: jest.fn().mockResolvedValue(undefined),
     };
     db.orderCustomProduct.findOne.mockResolvedValue(order);
+    db.vendorProduct.find.mockReturnValue({
+      select: jest.fn().mockReturnThis(),
+      populate: jest.fn().mockReturnThis(),
+      lean: jest.fn().mockResolvedValue([
+        { vendor_id: { name: "Merchize", fulfillment_type: "API", status: "Active" } },
+      ]),
+    });
+    FulfillmentService.PROVIDERS = [{ key: "merchize" }];
+    FulfillmentService.send.mockImplementation(async (sentOrder) => {
+      sentOrder.scale_overall_status = "Sent";
+      sentOrder.status = "Fulfilled";
+      return {
+        alreadySent: false,
+        vendorKey: "merchize",
+        response: { ok: true },
+      };
+    });
 
     const req = {
       params: { orderId: "ORDER-1", orderItemId: "ITEM-1" },
@@ -182,13 +200,13 @@ describe("scale lifecycle hooks", () => {
 
     await controller.confirmScaleForItem(req, res);
 
-    expect(order.scale_overall_status).toBe("Ready");
-    expect(order.status).toBe("New");
-    expect(FulfillmentService.send).not.toHaveBeenCalled();
+    expect(FulfillmentService.send).toHaveBeenCalledWith(order, "merchize");
+    expect(order.scale_overall_status).toBe("Sent");
+    expect(order.status).toBe("Fulfilled");
     expect(res.json).toHaveBeenCalledWith(expect.objectContaining({
-      message: "Approved and order is ready for production.",
+      message: "Approved and order sent to merchize.",
       item_scale_status: "Complete",
-      order_scale_overall_status: "Ready",
+      order_scale_overall_status: "Sent",
     }));
   });
 
