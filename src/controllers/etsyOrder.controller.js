@@ -1381,6 +1381,7 @@ const getListOrders = async (req, res) => {
                 .select(ETSY_LIST_SELECT_FIELDS)
                 .populate("shopId", "name store merchant")
                 .populate("seller.sellerId", "full_name email employee_id")
+                .populate("items.seller.sellerId", "full_name email employee_id")
                 .populate("case", "name description blocksProduction")
                 .sort({ [sortField]: sortDir })
                 .skip(skip)
@@ -1457,6 +1458,7 @@ const getListOrders = async (req, res) => {
                 shipping_type: order.shipping_type || "Standard",
                 case: order.case || [],
                 items: (order.items || []).map((item) => {
+                    const itemSellerPopulated = item.seller?.sellerId || null;
                     // Build cost_center
                     let cost_center = null;
                     if (item.cost_breakdown?.vendorProductId) {
@@ -1481,6 +1483,13 @@ const getListOrders = async (req, res) => {
                     return {
                         orderItemId: item.transactionId || "",
                         sku: item.sku || "",
+                        mapped_sku: item.mapped_sku || null,
+                        seller: itemSellerPopulated ? {
+                            _id: itemSellerPopulated._id || itemSellerPopulated,
+                            full_name: itemSellerPopulated.full_name || "",
+                            email: itemSellerPopulated.email || "",
+                            sellerCode: item.seller?.sellerCode || "",
+                        } : (item.seller?.sellerCode ? { sellerCode: item.seller.sellerCode } : null),
                         title: item.itemName || "",
                         quantity: item.quantity || 1,
                         version3Data,

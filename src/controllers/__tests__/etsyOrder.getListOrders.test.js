@@ -134,6 +134,26 @@ describe("getListOrders", () => {
     ]);
   });
 
+  test("returns the seller stored on each Etsy item", async () => {
+    mockFindLean([{
+      _id: new mongoose.Types.ObjectId("507f1f77bcf86cd799439011"),
+      orderId: "4134593115",
+      items: [{
+        transactionId: "5164584376",
+        sku: "J2512-NK-200726-H3",
+        seller: { sellerId: new mongoose.Types.ObjectId("68b93ed3f02eed8dec002eee"), sellerCode: "J2512" },
+      }],
+    }]);
+    db.EtsyOrder.countDocuments.mockResolvedValue(1);
+    const res = makeRes();
+
+    await controller.getListOrders({ query: { page: "1", limit: "10" } }, res);
+
+    expect(res.json.mock.calls[0][0].data[0].items[0].seller).toEqual(expect.objectContaining({
+      sellerCode: "J2512",
+    }));
+  });
+
   test("uses exact orderId search path before broad regex search", async () => {
     const req = {
       query: {
