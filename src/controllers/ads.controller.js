@@ -3,9 +3,11 @@ const { parse } = require("csv-parse/sync");
 const db = require("../models");
 const User = db.user;
 const AdsDailySummary = db.Ads;
+const SkuMappingConfig = db.SkuMappingConfig;
 const Shop = db.shop;
 const mongoose = require("mongoose");
 const { Types } = mongoose;
+const { resolveMappedSku } = require("../utils/skuMigrate");
 
 // ép số
 const toNum = (v) => {
@@ -120,7 +122,17 @@ const importAdsForDay = async (req, res) => {
     if (!rows.length) return res.json({ message: "Empty file", upserts: 0 });
 
     // ===== Map SKU -> Seller (ở đây bạn đang dùng cột Campaigns như "SKU/Key")=====
-    const allSkusOrNames = rows.map((r) => r.Campaigns).filter(Boolean);
+    const now = new Date();
+    const skuMappingConfigs = await SkuMappingConfig.find({
+      is_active: true,
+      $and: [
+        { $or: [{ valid_from: null }, { valid_from: { $lte: now } }] },
+        { $or: [{ valid_to: null }, { valid_to: { $gte: now } }] },
+      ],
+    }).sort({ priority: 1, updatedAt: -1 }).lean();
+    const allSkusOrNames = rows
+      .map((r) => resolveMappedSku(r.Campaigns, skuMappingConfigs))
+      .filter(Boolean);
     const sellerMap = await mapSellersBySku(allSkusOrNames);
 
     // ===== Tính spend theo seller cho SHOP hiện tại (thêm fallback) =====
@@ -133,7 +145,7 @@ const importAdsForDay = async (req, res) => {
       if (!campName) continue;
 
       // Thử map theo “SKU/Key” bạn đang dùng
-      const mappedSeller = sellerMap.getBySku(campName);
+      const mappedSeller = sellerMap.getBySku(resolveMappedSku(campName, skuMappingConfigs));
       let sellerId, sellerName;
 
       if (mappedSeller?._id) {

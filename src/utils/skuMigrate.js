@@ -117,4 +117,12 @@ function applyRulesToSku(sku, rules) {
     return { ok: true, changed: next !== sku, next };
 }
 
-module.exports = { mapLikeToPlain, buildRulesFromConfig, applyRulesToSku };
+function resolveMappedSku(sku, configs = []) {
+    for (const cfg of configs) {
+        const result = applyRulesToSku(sku, buildRulesFromConfig(cfg));
+        if (result.ok && result.changed) return result.next;
+    }
+    return sku;
+}
+
+module.exports = { mapLikeToPlain, buildRulesFromConfig, applyRulesToSku, resolveMappedSku };

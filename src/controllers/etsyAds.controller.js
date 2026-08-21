@@ -3,8 +3,10 @@ const db = require("../models");
 const EtsyAdsDailySummary = db.EtsyAdsDailySummary;
 const EtsyOrder = db.EtsyOrder;
 const User = db.user;
+const SkuMappingConfig = db.SkuMappingConfig;
 const EtsyListing = require("../models/etsyListing.model");
 const mongoose = require("mongoose");
+const { resolveMappedSku } = require("../utils/skuMigrate");
 
 const utcDay = (d) =>
   new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()));
@@ -284,6 +286,15 @@ const importEtsyAds = async (req, res) => {
       return res.status(400).json({ ok: false, message: "rows must be an array" });
     }
 
+    const now = new Date();
+    const skuMappingConfigs = await SkuMappingConfig.find({
+      is_active: true,
+      $and: [
+        { $or: [{ valid_from: null }, { valid_from: { $lte: now } }] },
+        { $or: [{ valid_to: null }, { valid_to: { $gte: now } }] },
+      ],
+    }).sort({ priority: 1, updatedAt: -1 }).lean();
+
     console.log("[ETSY_ADS_IMPORT][INCOMING]", {
       day,
       etsyShopId,
@@ -335,6 +346,7 @@ const importEtsyAds = async (req, res) => {
               ? listingMasterSkus
               : [];
         const finalSku = finalSkus[0] || "";
+        const mappedSku = resolveMappedSku(finalSku, skuMappingConfigs);
         const skuSource = rowSku
           ? "ads_row"
           : orderFallback?.skus?.length
@@ -343,8 +355,8 @@ const importEtsyAds = async (req, res) => {
               ? "listing_master"
               : "missing";
         const finalSeller = String(
-          r.seller ||
-            r.sellerName ||
+          (mappedSku !== finalSku ? deriveSellerFromSku(mappedSku) : r.seller) ||
+          r.sellerName ||
             orderFallback?.seller ||
             deriveSellerFromSku(finalSku)
         ).trim();
