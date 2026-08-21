@@ -76,20 +76,12 @@ function getSellerCodeFromSku(sku) {
     return first || null;
 }
 
-async function buildSellerUpdateFromSku(orderId, sku) {
+async function buildEtsyItemSellerFromSku(sku) {
     const sellerCode = getSellerCodeFromSku(sku);
     if (!orderId || !sellerCode || !User?.findOne) return null;
 
     const user = await User.findOne({ employee_id: sellerCode }).lean();
-    const $set = { "seller.sellerCode": sellerCode };
-    if (user?._id) $set["seller.sellerId"] = user._id;
-
-    return {
-        updateOne: {
-            filter: { orderId },
-            update: { $set },
-        },
-    };
+    return { sellerCode, sellerId: user?._id };
 }
 
 exports.previewWithConfig = async (req, res) => {
@@ -149,7 +141,6 @@ exports.applyConfigLogOnly = async (req, res) => {
             amazon: [],
             etsy: [],
         };
-        const etsySellerSkuByOrderId = new Map();
         const samples = [];
         const marketplaces = {
             amazon: { ordersTouched: 0, totalMapped: 0, orderOpsQueued: 0 },
@@ -207,18 +198,20 @@ exports.applyConfigLogOnly = async (req, res) => {
                             },
                         });
 
+                        const $set = { "items.$.mapped_sku": r.next };
+                        if (sourceInfo.marketplace === "etsy") {
+                            const itemSeller = await buildEtsyItemSellerFromSku(r.next);
+                            if (itemSeller) $set["items.$.seller"] = itemSeller;
+                        }
                         orderOpsByMarketplace[sourceInfo.marketplace].push({
                             updateOne: {
                                 filter: {
                                     orderId: ord.orderId,
                                     [`items.${sourceInfo.itemIdField}`]: orderItemId,
                                 },
-                                update: { $set: { "items.$.mapped_sku": r.next } },
+                                update: { $set },
                             },
                         });
-                        if (sourceInfo.marketplace === "etsy") {
-                            etsySellerSkuByOrderId.set(ord.orderId, r.next);
-                        }
                     }
                 }
 
@@ -233,11 +226,6 @@ exports.applyConfigLogOnly = async (req, res) => {
         marketplaces.amazon.orderOpsQueued = orderOpsByMarketplace.amazon.length;
         marketplaces.etsy.orderOpsQueued = orderOpsByMarketplace.etsy.length;
         const itemOrderOpsQueued = orderOpsByMarketplace.amazon.length + orderOpsByMarketplace.etsy.length;
-
-        for (const [orderId, sku] of etsySellerSkuByOrderId.entries()) {
-            const sellerUpdate = await buildSellerUpdateFromSku(orderId, sku);
-            if (sellerUpdate) orderOpsByMarketplace.etsy.push(sellerUpdate);
-        }
 
         let logResult = "skipped (dryRun=true)";
         let orderResult = "skipped (dryRun=true)";

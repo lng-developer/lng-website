@@ -56,6 +56,10 @@ const EtsyOrderItemEmbeddedSchema = new Schema(
         listingId: { type: String },
         sku: { type: String },
         mapped_sku: { type: String, default: null },
+        seller: {
+            sellerId: { type: Schema.Types.ObjectId, ref: "User", index: true },
+            sellerCode: { type: String, index: true },
+        },
         orderItemId: { type: String },
 
         itemName: { type: String },

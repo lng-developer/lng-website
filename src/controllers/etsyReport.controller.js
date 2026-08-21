@@ -101,11 +101,10 @@ const getEtsyReportMatrix = async (req, res) => {
     }
 
     if (isSeller) {
-      matchStage["seller.sellerId"] = new mongoose.Types.ObjectId(userId);
       sellerIdSet = new Set([String(userId)]);
     } else {
       if (teamUserObjectIds && teamUserObjectIds.length) {
-        matchStage["seller.sellerId"] = { $in: teamUserObjectIds };
+        sellerIdSet = new Set(teamUserObjectIds.map(String));
       }
       if (seller) {
         const ids = seller.split(",")
@@ -114,25 +113,18 @@ const getEtsyReportMatrix = async (req, res) => {
           .map((id) => new mongoose.Types.ObjectId(id));
 
         if (ids.length) {
-          if (matchStage["seller.sellerId"] && matchStage["seller.sellerId"].$in) {
+          if (sellerIdSet) {
             const sellerIdStrSet = new Set(ids.map(String));
-            const intersect = matchStage["seller.sellerId"].$in.filter((x) => sellerIdStrSet.has(String(x)));
-            matchStage["seller.sellerId"] = { $in: intersect };
+            const intersect = Array.from(sellerIdSet).filter((id) => sellerIdStrSet.has(String(id)));
             sellerIdSet = new Set(intersect.map(String));
           } else {
-            matchStage["seller.sellerId"] = ids.length === 1 ? ids[0] : { $in: ids };
             sellerIdSet = new Set(ids.map(String));
           }
         }
       }
 
       if (userNull === "true" && !(teamUserObjectIds && teamUserObjectIds.length)) {
-        if (matchStage["seller.sellerId"]) {
-          if (matchStage["seller.sellerId"].$in) matchStage["seller.sellerId"].$in.push(null, undefined);
-          else matchStage["seller.sellerId"] = { $in: [matchStage["seller.sellerId"], null, undefined] };
-        } else {
-          matchStage["seller.sellerId"] = { $in: [null, undefined] };
-        }
+        sellerIdSet = new Set([""]);
       }
     }
 
@@ -140,36 +132,75 @@ const getEtsyReportMatrix = async (req, res) => {
     const rows = await EtsyOrder.aggregate([
       { $match: matchStage },
       {
+        $addFields: {
+          orderItemAmount: { $sum: "$items.itemTotal" },
+          orderItemCount: { $size: "$items" },
+        },
+      },
+      { $unwind: "$items" },
+      {
         $lookup: {
           from: "users",
-          localField: "seller.sellerId",
+          localField: "items.seller.sellerId",
           foreignField: "_id",
           as: "sellerObj",
         },
       },
       {
         $addFields: {
-          sellerName: { $ifNull: [{ $first: "$sellerObj.full_name" }, "Unknown"] },
+          itemSellerId: { $ifNull: ["$items.seller.sellerId", "$seller.sellerId"] },
+          itemAmount: { $ifNull: ["$items.itemTotal", { $multiply: [{ $ifNull: ["$items.unitPrice", 0] }, { $ifNull: ["$items.quantity", 1] }] }] },
           day: {
             $dateTrunc: { date: "$saleDate", unit: "day", timezone: "UTC" },
           },
         },
       },
       {
+        $lookup: {
+          from: "users",
+          localField: "itemSellerId",
+          foreignField: "_id",
+          as: "resolvedSellerObj",
+        },
+      },
+      {
+        $addFields: {
+          sellerName: { $ifNull: [{ $first: "$resolvedSellerObj.full_name" }, "Unknown"] },
+        },
+      },
+      ...(sellerIdSet ? [{
+        $match: {
+          itemSellerId: {
+            $in: Array.from(sellerIdSet).map((id) => id ? new mongoose.Types.ObjectId(id) : null),
+          },
+        },
+      }] : []),
+      {
+        $addFields: {
+          allocationRatio: {
+            $cond: [
+              { $gt: ["$orderItemAmount", 0] },
+              { $divide: ["$itemAmount", "$orderItemAmount"] },
+              { $divide: [1, "$orderItemCount"] },
+            ],
+          },
+        },
+      },
+      {
         $group: {
-          _id: { sellerId: "$seller.sellerId", sellerName: "$sellerName", day: "$day" },
-          items: { $sum: { $cond: [{ $isArray: "$items" }, { $size: "$items" }, 1] } },
+          _id: { sellerId: "$itemSellerId", sellerName: "$sellerName", day: "$day" },
+          items: { $sum: 1 },
 
           // Based on newly added etsy_finance_total logic if available, otherwise fallback to totals
           // User requested: Revenue được lấy từ ordertotal
-          revenue: { $sum: { $ifNull: ["$etsy_finance_total.revenue", "$totals.orderTotal"] } },
-          fee: { $sum: { $ifNull: ["$etsy_finance_total.fee", "$totals.fee"] } },
-          item_tax: { $sum: { $ifNull: ["$etsy_finance_total.item_tax", "$totals.salesTax"] } },
-          shipping_tax: { $sum: { $ifNull: ["$etsy_finance_total.shipping_price", "$totals.shipping"] } }, // Mapped shipping to shipping_tax analogous slot for report shape
-          item_promotion_discount: { $sum: { $ifNull: ["$etsy_finance_total.item_promotion_discount", "$totals.discountAmount"] } },
+          revenue: { $sum: { $multiply: [{ $ifNull: ["$etsy_finance_total.revenue", "$totals.orderTotal"] }, "$allocationRatio"] } },
+          fee: { $sum: { $multiply: [{ $ifNull: ["$etsy_finance_total.fee", "$totals.fee"] }, "$allocationRatio"] } },
+          item_tax: { $sum: { $multiply: [{ $ifNull: ["$etsy_finance_total.item_tax", "$totals.salesTax"] }, "$allocationRatio"] } },
+          shipping_tax: { $sum: { $multiply: [{ $ifNull: ["$etsy_finance_total.shipping_price", "$totals.shipping"] }, "$allocationRatio"] } },
+          item_promotion_discount: { $sum: { $multiply: [{ $ifNull: ["$etsy_finance_total.item_promotion_discount", "$totals.discountAmount"] }, "$allocationRatio"] } },
 
-          baseCost: { $sum: { $ifNull: ["$base_cost", 0] } },
-          refund: { $sum: { $ifNull: ["$etsy_finance_total.refund", 0] } },
+          baseCost: { $sum: { $ifNull: ["$items.cost_breakdown.base_cost_total_for_item_including_shipping", { $multiply: [{ $ifNull: ["$base_cost", 0] }, "$allocationRatio"] }] } },
+          refund: { $sum: { $multiply: [{ $ifNull: ["$etsy_finance_total.refund", 0] }, "$allocationRatio"] } },
         }
       },
       { $sort: { "_id.day": 1 } },

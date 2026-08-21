@@ -2919,6 +2919,22 @@ const deriveSellerCodeFromItems = (items = []) => {
     return undefined;
 };
 
+const assignEtsyItemSellers = async (items = []) => {
+    const sellerCodes = Array.from(new Set(items
+        .map((item) => getSellerCodeFromSku(item?.mapped_sku || item?.sku))
+        .filter(Boolean)));
+    if (!sellerCodes.length) return;
+
+    const users = await User.find({ employee_id: { $in: sellerCodes } }, { _id: 1, employee_id: 1 }).lean();
+    const userByCode = new Map(users.map((user) => [String(user.employee_id).toUpperCase(), user]));
+    for (const item of items) {
+        const sellerCode = getSellerCodeFromSku(item?.mapped_sku || item?.sku);
+        if (!sellerCode) continue;
+        const user = userByCode.get(sellerCode.toUpperCase());
+        item.seller = { sellerCode, sellerId: user?._id };
+    }
+};
+
 const ETSY_ORDER_BACKFILL_WINDOW_DAYS = Number(process.env.ETSY_ORDER_BACKFILL_WINDOW_DAYS || 2);
 const isForceTrue = (value) => value === true || String(value || "").toLowerCase() === "true";
 const isExistingEtsyOrderTooOldForBackfill = (order) => {
@@ -3169,6 +3185,9 @@ const backfillExistingEtsyOrder = async (existing, payload) => {
         if (backfillField(current, incoming, "mapped_sku")) {
             itemChanged = true;
         }
+        if (backfillField(current, incoming, "seller")) {
+            itemChanged = true;
+        }
         if (backfillField(current, incoming, "listingId")) {
             listingIdBackfilled += 1;
             itemChanged = true;
@@ -3309,6 +3328,7 @@ const createOrder = async (req, res) => {
     try {
         const skuMappingConfigs = await loadActiveEtsySkuMappingConfigs();
         const payload = buildEtsyOrderPayload(req.body || {}, skuMappingConfigs);
+        await assignEtsyItemSellers(payload.items);
 
         const existing = await EtsyOrder.findOne({ orderId: payload.orderId, shopId: payload.shopId });
         if (existing) {
