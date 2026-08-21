@@ -1,6 +1,7 @@
 const db = require('../models');
 const mongoose = require('mongoose');
 const EtsyOrder = db.EtsyOrder;
+const OrderHistory = db.OrderHistory;
 const EtsyListing = require('../models/etsyListing.model');
 const User = db.user;
 const Role = db.role;
@@ -1357,6 +1358,8 @@ const getListOrders = async (req, res) => {
             status,
             isNoCostCenter,
             invalidAddress,
+            includeLogs,
+            logLimit,
             sortBy = "saleDate",
             sortOrder = "desc",
         } = req.query;
@@ -1384,6 +1387,22 @@ const getListOrders = async (req, res) => {
                 .limit(limitNum)
                 .lean(),
         ]);
+
+        const historyByOrder = new Map();
+        if (String(includeLogs).toLowerCase() === "true" && rawData.length) {
+            const limitLogs = Math.max(1, Math.min(parseInt(logLimit, 10) || 5, 50));
+            const logs = await OrderHistory.find({ order: { $in: rawData.map((order) => order._id) } })
+                .sort({ createdAt: -1 })
+                .select("order action description changes orderItemId userId userName userRole source createdAt")
+                .lean();
+
+            for (const log of logs) {
+                const key = String(log.order);
+                const events = historyByOrder.get(key) || [];
+                if (events.length < limitLogs) events.push(log);
+                historyByOrder.set(key, events);
+            }
+        }
 
         // ===== Collect vendorProductIds for cost_center =====
         const vpIdSet = new Set();
@@ -1489,6 +1508,7 @@ const getListOrders = async (req, res) => {
                     email: sellerPopulated.email,
                 } : null,
                 numberOfItems: order.numberOfItems || 0,
+                history: [...(historyByOrder.get(String(order._id)) || [])].reverse(),
             };
         });
 

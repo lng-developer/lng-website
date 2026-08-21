@@ -4,6 +4,7 @@ jest.mock("../../models", () => ({
     find: jest.fn(),
     aggregate: jest.fn(),
   },
+  OrderHistory: { find: jest.fn() },
   vendorProduct: { find: jest.fn() },
   vendor: { find: jest.fn() },
   user: {},
@@ -61,6 +62,16 @@ function mockSelectLean(findMock, rows = []) {
   return chain;
 }
 
+function mockHistoryFind(rows = []) {
+  const chain = {
+    sort: jest.fn().mockReturnThis(),
+    select: jest.fn().mockReturnThis(),
+    lean: jest.fn().mockResolvedValue(rows),
+  };
+  db.OrderHistory.find.mockReturnValue(chain);
+  return chain;
+}
+
 describe("getListOrders", () => {
   beforeEach(() => {
     jest.clearAllMocks();
@@ -102,6 +113,25 @@ describe("getListOrders", () => {
         totalCount: 0,
       })
     );
+  });
+
+  test("includes chronological history for the Etsy order when includeLogs=true", async () => {
+    const orderId = new mongoose.Types.ObjectId("507f1f77bcf86cd799439011");
+    mockFindLean([{ _id: orderId, orderId: "4105971529", items: [] }]);
+    mockHistoryFind([
+      { _id: "new", order: orderId, action: "UPDATE_STATUS", createdAt: new Date("2026-08-21T02:00:00.000Z") },
+      { _id: "old", order: orderId, action: "UPDATE_ADDRESS", createdAt: new Date("2026-08-21T01:00:00.000Z") },
+    ]);
+    db.EtsyOrder.countDocuments.mockResolvedValue(1);
+    const res = makeRes();
+
+    await controller.getListOrders({ query: { page: "1", limit: "10", includeLogs: "true", logLimit: "5" } }, res);
+
+    expect(db.OrderHistory.find).toHaveBeenCalledWith({ order: { $in: [orderId] } });
+    expect(res.json.mock.calls[0][0].data[0].history.map((event) => event.action)).toEqual([
+      "UPDATE_ADDRESS",
+      "UPDATE_STATUS",
+    ]);
   });
 
   test("uses exact orderId search path before broad regex search", async () => {
