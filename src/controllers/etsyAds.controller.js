@@ -1,6 +1,7 @@
 // src/controllers/etsyAds.controller.js
 const db = require("../models");
 const EtsyAdsDailySummary = db.EtsyAdsDailySummary;
+const { dedupeEtsyAdsDailySummaries } = require("../utils/etsyAds");
 const EtsyOrder = db.EtsyOrder;
 const User = db.user;
 const SkuMappingConfig = db.SkuMappingConfig;
@@ -650,10 +651,10 @@ const listEtsyAds = async (req, res) => {
       q.shopId = new mongoose.Types.ObjectId(shopId);
     }
 
-    const docs = await EtsyAdsDailySummary.find(q)
+    const docs = dedupeEtsyAdsDailySummaries(await EtsyAdsDailySummary.find(q)
       .select("-rows.rawStats -rows.rawListing")  // exclude raw để gọn
       .sort({ day: -1 })
-      .lean();
+      .lean());
 
     console.log("[ETSY_ADS_LIST][SKU_RESPONSE_CHECK]", {
       count: docs.length,
@@ -702,9 +703,9 @@ const listEtsyAdsByEmployee = async (req, res) => {
       q.shopId = new mongoose.Types.ObjectId(shopId);
     }
 
-    const docs = await EtsyAdsDailySummary.find(q)
+    const docs = dedupeEtsyAdsDailySummaries(await EtsyAdsDailySummary.find(q)
       .sort({ day: -1 })
-      .lean();
+      .lean());
 
     const sellerKeys = uniqueStrings(
       docs.flatMap((doc) => (doc.rows || []).map((row) => row?.seller))

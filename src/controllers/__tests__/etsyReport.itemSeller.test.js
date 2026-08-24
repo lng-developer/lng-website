@@ -92,6 +92,34 @@ test("filters a seller after unwinding items, so mixed orders retain that seller
   expect(pipeline[0].$match["seller.sellerId"]).toBeUndefined();
 });
 
+test("uses only the latest Etsy Ads snapshot for the same shop and day", async () => {
+  const day = new Date("2026-08-17T00:00:00.000Z");
+  db.EtsyOrder.aggregate.mockResolvedValue([]);
+  db.EtsyAdsDailySummary.find.mockReturnValue(chain([
+    {
+      day,
+      etsyShopId: "66742086",
+      lastImportedAt: new Date("2026-08-18T01:10:55.294Z"),
+      rows: [{ seller: "J2610", spend: 142.32 }],
+    },
+    {
+      day,
+      etsyShopId: "66742086",
+      lastImportedAt: new Date("2026-08-18T06:45:51.854Z"),
+      rows: [{ seller: "J2610", spend: 180.97 }],
+    },
+  ]));
+  db.user.find.mockReturnValue(chain());
+
+  const res = makeRes();
+  await controller.getEtsyReportMatrix({
+    query: { from: day.toISOString(), to: "2026-08-17T23:59:59.999Z" },
+    user: { role: "Admin" },
+  }, res);
+
+  expect(res.json.mock.calls[0][0].data.J2610.totals.ads).toBe(180.97);
+});
+
 test("keeps a mixed-seller order's revenue, base cost, and profit separate", async () => {
   const day = new Date("2026-08-03T00:00:00.000Z");
   db.EtsyOrder.aggregate.mockResolvedValue([

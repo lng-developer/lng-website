@@ -1,6 +1,7 @@
 const db = require("../models");
 const EtsyOrder = db.EtsyOrder;
 const EtsyAdsDailySummary = db.EtsyAdsDailySummary;
+const { dedupeEtsyAdsDailySummaries } = require("../utils/etsyAds");
 const User = db.user;
 const Team = db.Team;
 const mongoose = require("mongoose");
@@ -206,10 +207,10 @@ const getEtsyReportMatrix = async (req, res) => {
       { $sort: { "_id.day": 1 } },
     ]);
     // ===== 4) Fetch Ads from EtsyAdsDailySummary =====
-    const adsDocs = await EtsyAdsDailySummary.find(
+    const adsDocs = dedupeEtsyAdsDailySummaries(await EtsyAdsDailySummary.find(
       { day: { $gte: dayList[0], $lte: dayList[dayList.length - 1] } },
       { day: 1, rows: 1 },
-    ).lean();
+    ).lean());
 
     const adsSellerKeys = new Set();
     for (const doc of adsDocs) {
