@@ -209,7 +209,7 @@ const getEtsyReportMatrix = async (req, res) => {
     // ===== 4) Fetch Ads from EtsyAdsDailySummary =====
     const adsDocs = dedupeEtsyAdsDailySummaries(await EtsyAdsDailySummary.find(
       { day: { $gte: dayList[0], $lte: dayList[dayList.length - 1] } },
-      { day: 1, rows: 1 },
+      { day: 1, etsyShopId: 1, lastImportedAt: 1, updatedAt: 1, createdAt: 1, rows: 1 },
     ).lean());
 
     const adsSellerKeys = new Set();

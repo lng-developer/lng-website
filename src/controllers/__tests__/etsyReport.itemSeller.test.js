@@ -120,6 +120,15 @@ test("uses only the latest Etsy Ads snapshot for the same shop and day", async (
   expect(res.json.mock.calls[0][0].data.J2610.totals.ads).toBe(180.97);
 });
 
+test("loads Etsy Ads snapshot metadata needed for deduplication", async () => {
+  await reportPipeline();
+
+  expect(db.EtsyAdsDailySummary.find).toHaveBeenLastCalledWith(
+    expect.any(Object),
+    expect.objectContaining({ etsyShopId: 1, lastImportedAt: 1 }),
+  );
+});
+
 test("keeps a mixed-seller order's revenue, base cost, and profit separate", async () => {
   const day = new Date("2026-08-03T00:00:00.000Z");
   db.EtsyOrder.aggregate.mockResolvedValue([
