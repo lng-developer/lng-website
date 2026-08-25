@@ -81,5 +81,6 @@ const orderHistorySchema = new mongoose.Schema(
 );
 
 orderHistorySchema.index({ orderId: 1, createdAt: -1 });
+orderHistorySchema.index({ createdAt: 1 }, { expireAfterSeconds: 180 * 24 * 60 * 60 });
 
 module.exports = mongoose.model("OrderHistory", orderHistorySchema);
