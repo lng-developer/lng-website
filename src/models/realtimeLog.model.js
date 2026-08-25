@@ -14,10 +14,12 @@ const RealtimeLogSchema = new mongoose.Schema(
     },
 
     message: { type: String, required: true },
-    ts: { type: Date, default: Date.now, index: true },
+    ts: { type: Date, default: Date.now },
   },
   { versionKey: false }
 );
+
+RealtimeLogSchema.index({ ts: 1 }, { expireAfterSeconds: 30 * 24 * 60 * 60 });
 
 module.exports = mongoose.model(
   "RealtimeLog",

@@ -33,3 +33,4 @@ tmp_uploads/
 *.njsproj
 *.sln
 *.sw?
+backups

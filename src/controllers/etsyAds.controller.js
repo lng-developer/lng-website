@@ -378,8 +378,6 @@ const importEtsyAds = async (req, res) => {
           revenue: round2(toNum(r.revenue) / 100),
           roas: round2(r.roas),
           clickRate: round2(r.clickRate),
-          rawStats: r.rawStats || null,
-          rawListing: r.rawListing || null,
         };
       });
 
@@ -575,8 +573,6 @@ const importEtsyAds = async (req, res) => {
           totalsSource: saveTotals.totalsSource,
           overviewApiDate: saveTotals.overviewApiDate,
           overviewTotals: saveTotals.overviewTotals,
-          sourceMeta: sourceMeta || null,
-          rawOverview: raw?.overview || null,
           totalRows: normalized.length,
           lastImportedAt: new Date(),
         },
@@ -652,7 +648,7 @@ const listEtsyAds = async (req, res) => {
     }
 
     const docs = dedupeEtsyAdsDailySummaries(await EtsyAdsDailySummary.find(q)
-      .select("-rows.rawStats -rows.rawListing")  // exclude raw để gọn
+      .select("-rows.rawStats -rows.rawListing -sourceMeta -rawOverview")
       .sort({ day: -1 })
       .lean());
 
@@ -704,6 +700,7 @@ const listEtsyAdsByEmployee = async (req, res) => {
     }
 
     const docs = dedupeEtsyAdsDailySummaries(await EtsyAdsDailySummary.find(q)
+      .select("-rows.rawStats -rows.rawListing -sourceMeta -rawOverview")
       .sort({ day: -1 })
       .lean());
 
@@ -736,7 +733,7 @@ const listEtsyAdsByEmployee = async (req, res) => {
 
 /**
  * GET /api/etsy-ads/:id
- * Detail 1 doc đầy đủ kèm rawStats + rawListing cho từng row.
+ * Detail 1 daily summary đã normalize.
  */
 const getEtsyAdsDetail = async (req, res) => {
   try {

@@ -13,7 +13,7 @@ router.get("/", etsyAdsController.listEtsyAds);
 // Liệt kê theo mã nhân viên, dùng cùng query params với list API
 router.get("/by-employee", etsyAdsController.listEtsyAdsByEmployee);
 
-// Detail 1 doc kèm rawStats + rawListing
+// Detail 1 daily summary đã normalize
 router.get("/:id", etsyAdsController.getEtsyAdsDetail);
 
 module.exports = router;
