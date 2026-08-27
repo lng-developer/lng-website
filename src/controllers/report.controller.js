@@ -883,7 +883,7 @@ const getReportMatrix = async (req, res) => {
       result[sellerName].ads[idx] = +(val.spend || 0).toFixed(2);
     }
 
-    // ===== 6.5) Tính opCost theo start_seller / end_seller + loại trừ boss + inclusive start day =====
+    // ===== 6.5) Tính opCost theo start_seller / end_seller + loại trừ boss =====
     const fixedOpCost = Number(OPCOST_PER_PERSON_PER_DAY || 0);
 
     const today = new Date();
@@ -905,12 +905,12 @@ const getReportMatrix = async (req, res) => {
       }
 
       const { startDay, endDay } = sellerWorkMap.get(String(sellerIdStr));
-      const endInclusive = endDay || effectiveEndDay;
 
       for (let i = 0; i < dayList.length; i++) {
         const d = toAmzReportDayStart(dayList[i]);
         const inRange =
-          (!startDay || d >= startDay) && (!endInclusive || d <= endInclusive);
+          (!startDay || d >= startDay) &&
+          (endDay ? d < endDay : !effectiveEndDay || d <= effectiveEndDay);
         S.opCost[i] = inRange ? +fixedOpCost.toFixed(2) : 0;
       }
     }
