@@ -3627,6 +3627,8 @@ const computeBaseCostForOrder = async (req, res) => {
   try {
     ({ orderId } = req.body);
     if (!orderId) return res.status(400).json({ message: "Missing orderId" });
+    const ignoreManualMapping = req.body?.ignoreManualMapping === true;
+    const dryRun = req.body?.dryRun === true;
 
     order = await OrderCustomProduct.findOne({ orderId }).lean(false);
     if (!order) return res.status(404).json({ message: "Order not found" });
@@ -3720,7 +3722,7 @@ const computeBaseCostForOrder = async (req, res) => {
       }
 
       // (NEW) Check manual override first
-      if (item.manual_vendor_cost_center_id) {
+      if (!ignoreManualMapping && item.manual_vendor_cost_center_id) {
         const vcc = await VendorCostCenter.findById(
           item.manual_vendor_cost_center_id
         ).lean();
@@ -3870,7 +3872,7 @@ const computeBaseCostForOrder = async (req, res) => {
 
     // (CODE MỚI) — KHÔNG ÉP vendor nếu đơn chỉ có 1 item.
     // Nếu có từ 2 item trở lên: giao vendor và chọn theo vendor-rank (pfItems.order)
-    let preferredVendorId = order.forced_vendor_id ? String(order.forced_vendor_id) : null;
+    let preferredVendorId = !ignoreManualMapping && order.forced_vendor_id ? String(order.forced_vendor_id) : null;
     if (!preferredVendorId && preItems.length >= 2) {
       // inline buildVendorRank (cached)
       const vendorRank = new Map();
@@ -4398,7 +4400,9 @@ const computeBaseCostForOrder = async (req, res) => {
     order.base_cost = Number(orderTotalBaseCost.toFixed(2));
     order.base_cost_computed_at = new Date();
 
-    await order.save();
+    if (!dryRun) {
+      await order.save();
+    }
 
     const changes = buildBaseCostComputeChanges({
       oldBaseCost,
@@ -4411,7 +4415,7 @@ const computeBaseCostForOrder = async (req, res) => {
       items: order.items,
     });
 
-    if (changes.length > 0) {
+    if (!dryRun && changes.length > 0) {
       await logOrderHistory({
         orderDoc: order,
         action: "UPDATE_BASE_COST",
@@ -4435,37 +4439,41 @@ const computeBaseCostForOrder = async (req, res) => {
       failedItems[0]?.reason ||
       (Number(order.base_cost || 0) <= 0 ? "Computed base cost is 0" : "");
 
-    await logOrderLifecycleEvent(buildOrderLifecyclePayload({
-      order,
-      req,
-      fallbackPlatform: "amazon",
-      stage: "AUTO_COST",
-      eventType:
-        lifecycleStatus === "success"
-          ? "AUTO_COST_RETEST_SUCCESS"
-          : "AUTO_COST_RETEST_FAILED",
-      status: lifecycleStatus,
-      message: "Order base cost re-tested",
-      reason: firstFailureReason,
-      metadata: {
-        oldBaseCost,
-        newBaseCost: order.base_cost,
-        itemCount: Array.isArray(order.items) ? order.items.length : 0,
-        failedItemCount: failedItems.length,
-        shippingGroupCount: groupBreakdowns.length,
-        failedItems: failedItems.slice(0, 10).map((item) => ({
-          orderItemId: item.orderItemId,
-          sku: item.used_sku || item.sku || "",
-          configCode: item.configCode || "",
-          reason: item.reason || "",
-        })),
-      },
-    }));
+    if (!dryRun) {
+      await logOrderLifecycleEvent(buildOrderLifecyclePayload({
+        order,
+        req,
+        fallbackPlatform: "amazon",
+        stage: "AUTO_COST",
+        eventType:
+          lifecycleStatus === "success"
+            ? "AUTO_COST_RETEST_SUCCESS"
+            : "AUTO_COST_RETEST_FAILED",
+        status: lifecycleStatus,
+        message: "Order base cost re-tested",
+        reason: firstFailureReason,
+        metadata: {
+          oldBaseCost,
+          newBaseCost: order.base_cost,
+          itemCount: Array.isArray(order.items) ? order.items.length : 0,
+          failedItemCount: failedItems.length,
+          shippingGroupCount: groupBreakdowns.length,
+          failedItems: failedItems.slice(0, 10).map((item) => ({
+            orderItemId: item.orderItemId,
+            sku: item.used_sku || item.sku || "",
+            configCode: item.configCode || "",
+            reason: item.reason || "",
+          })),
+        },
+      }));
+    }
 
     return res.json({
       message:
         "Computed base cost with vendor-preference & consolidated shipping (priority for Expedited, international otherwise)",
       orderId,
+      dryRun,
+      ignore_manual_mapping: ignoreManualMapping,
       base_cost: order.base_cost,
       preferred_vendor_id: preferredVendorId || null,
       shipping_group_breakdowns: groupBreakdowns,
@@ -4490,6 +4498,16 @@ const computeBaseCostForOrder = async (req, res) => {
       .json({ message: "Compute failed", error: err.message });
   }
 };
+
+const autoMatchBaseCostForOrder = (req, res) =>
+  computeBaseCostForOrder({
+    ...req,
+    body: {
+      ...req.body,
+      ignoreManualMapping: true,
+      dryRun: req.body?.dryRun !== false,
+    },
+  }, res);
 
 /**
  * POST body: { limit?: number }
@@ -5328,6 +5346,7 @@ module.exports = {
   removeCaseFromOrder,
   updateBaseImageUrl,
   computeBaseCostForOrder,
+  autoMatchBaseCostForOrder,
   computeBaseCostForMany,
   updateItemTracking,
   createReplacementOrder,

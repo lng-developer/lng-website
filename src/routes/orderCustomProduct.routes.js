@@ -21,6 +21,12 @@ router.post(
   controller.computeBaseCostForOrder
 );
 
+router.post(
+  "/compute-base-cost/auto-match",
+  authenticateToken,
+  controller.autoMatchBaseCostForOrder
+);
+
 // Tính batch cho các đơn thiếu base_cost: body { limit: 50 } (tối đa 200)
 router.post(
   "/compute-base-cost/batch",

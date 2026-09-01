@@ -235,6 +235,92 @@ describe("order custom product lifecycle hooks", () => {
     }));
   });
 
+  test("autoMatchBaseCostForOrder previews auto mapping without overwriting manual mapping", async () => {
+    const order = {
+      _id: "order-object-id",
+      orderId: "113-9515230-9546657",
+      platform: "Amazon",
+      shopId: "shop-1",
+      shipping_type: "Standard",
+      forced_vendor_id: "manual-vendor",
+      base_cost: 13.89,
+      base_cost_shipping_groups: [],
+      items: [{
+        orderItemId: "item-1",
+        sku: "J2512-TS2S-201025-9014",
+        manual_vendor_cost_center_id: "manual-cost-center",
+        quantity: 1,
+        customizationData: {
+          children: [{
+            children: [{
+              children: [
+                { label: "Size", optionSelection: { label: "M" } },
+                { label: "Color", optionSelection: { label: "Maroon" } },
+                { label: "Product Type", optionSelection: { label: "Premium Sweatshirt" } },
+              ],
+            }],
+          }],
+        },
+        cost_breakdown: {
+          selectedConfigBy: "manual",
+          itemDisplayName: "Manual Selection",
+          vendorProductId: "manual-shirt-product",
+          matchedSku: "11975",
+        },
+      }],
+      save: jest.fn().mockResolvedValue(undefined),
+    };
+    db.orderCustomProduct.findOne.mockReturnValue(makeQuery(order));
+    db.configCostCenter.find.mockReturnValue(makeQuery([{
+      config_code: "TS2S",
+      product_type: "Premium Sweatshirt",
+      customize_size_key: ["Size"],
+      customize_color_key: ["Color"],
+      product_for_seller: {
+        items: [{
+          vendor_product: "sweatshirt-product",
+          vendor_id: "sweatshirt-vendor",
+          status: "Active",
+          order: 2,
+          display_name: "Unisex Crewneck Sweatshirt",
+        }],
+      },
+    }], ["populate", "lean"]));
+    db.configOptionMapping.find.mockReturnValue(makeQuery([], ["sort", "lean"]));
+    db.vendorCostCenter.find.mockReturnValue(makeQuery([{
+      sku: "SW-18000-MAN-M",
+      vendor_size: "M",
+      vendor_color: "Maroon",
+      base_cost: 11.09,
+    }], ["select", "lean"]));
+    db.vendorProduct.findById.mockReturnValue(makeQuery({ vendor_id: "sweatshirt-vendor" }, ["select", "lean"]));
+
+    const res = makeRes();
+    await controller.autoMatchBaseCostForOrder({
+      body: { orderId: order.orderId },
+      user: { _id: "user-1", email: "cs@example.com" },
+      ip: "127.0.0.1",
+      headers: { "user-agent": "jest" },
+    }, res);
+
+    expect(db.vendorCostCenter.findById).not.toHaveBeenCalled();
+    expect(order.save).not.toHaveBeenCalled();
+    expect(logOrderHistory).not.toHaveBeenCalled();
+    expect(logOrderLifecycleEvent).not.toHaveBeenCalled();
+    expect(res.json).toHaveBeenCalledWith(expect.objectContaining({
+      dryRun: true,
+      ignore_manual_mapping: true,
+      base_cost: 11.09,
+      preferred_vendor_id: null,
+      detail: [expect.objectContaining({
+        selectedConfigBy: "product_type_exact",
+        itemDisplayName: "Unisex Crewneck Sweatshirt",
+        vendorProductId: "sweatshirt-product",
+        matchedSku: "SW-18000-MAN-M",
+      })],
+    }));
+  });
+
   test("computeBaseCostForOrder logs AUTO_COST_RETEST_FAILED when retest cannot match cost", async () => {
     const order = {
       _id: "order-object-id",
