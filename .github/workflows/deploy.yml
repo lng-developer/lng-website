@@ -20,6 +20,12 @@ jobs:
         script: |
           set -euo pipefail
           cd ~/lng-website
+          if git ls-files --error-unmatch .env >/dev/null 2>&1; then
+            env_backup=$(mktemp)
+            cp .env "$env_backup"
+            trap 'cp "$env_backup" .env; rm -f "$env_backup"' EXIT
+            git restore --source=HEAD --worktree -- .env
+          fi
           git pull --ff-only origin main
           npm ci
           pm2 restart lng-be --update-env
