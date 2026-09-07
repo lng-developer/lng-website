@@ -104,6 +104,30 @@ describe("getScaleList query shape", () => {
     expect(JSON.stringify(pipeline)).toContain("availablePsdListings");
   });
 
+  test("does not hide a searched Need Scale order for an unavailable PSD", async () => {
+    const res = makeRes();
+
+    await controller.getScaleList(
+      makeReq({ scale_status: "Need Scale", search: "B0HC1RTX2P" }),
+      res
+    );
+
+    const pipeline = db.orderCustomProduct.aggregate.mock.calls[0][0];
+    expect(JSON.stringify(pipeline)).not.toContain("availablePsdListings");
+  });
+
+  test("searches ASIN and seller fields in one OR condition", async () => {
+    const res = makeRes();
+
+    await controller.getScaleList(makeReq({ search: "B0HC1RTX2P" }), res);
+
+    const pipeline = db.orderCustomProduct.aggregate.mock.calls[0][0];
+    const searchStages = pipeline.filter((stage) => stage.$match?.$or);
+    expect(searchStages).toHaveLength(1);
+    expect(JSON.stringify(searchStages[0])).toContain("items.asin");
+    expect(JSON.stringify(searchStages[0])).toContain("seller.full_name");
+  });
+
   test("matches sellerId and CS unassigned filters early", async () => {
     const res = makeRes();
 

@@ -1384,23 +1384,20 @@ const getScaleList = async (req, res) => {
       initialMatch.cs_assignment_status = String(cs_assignment_status).trim();
     }
 
-    let preLookupSearchOr = null;
-    let postLookupSearchOr = null;
+    let searchOr = null;
     if (search && search.trim()) {
       const rawSearch = search.trim();
       if (isAmazonOrderId(rawSearch)) {
         initialMatch.orderId = rawSearch;
       } else {
         const keyword = new RegExp(escapeRegExp(rawSearch), "i");
-        preLookupSearchOr = [
+        searchOr = [
           { orderId: keyword },
           { "items.asin": keyword },
           { "items.sku": keyword },
           { "items.orderItemId": keyword },
           { "customer_infor.email": keyword },
           { "customer_infor.name": keyword },
-        ];
-        postLookupSearchOr = [
           { "seller.full_name": keyword },
           { "seller.email": keyword },
         ];
@@ -1410,7 +1407,6 @@ const getScaleList = async (req, res) => {
     // ===== Base pipeline =====
     const pipeline = [
       { $match: initialMatch },
-      ...(preLookupSearchOr ? [{ $match: { $or: preLookupSearchOr } }] : []),
 
       // Join shop
       {
@@ -1456,7 +1452,7 @@ const getScaleList = async (req, res) => {
         ]
         : []),
 
-      ...(postLookupSearchOr ? [{ $match: { $or: postLookupSearchOr } }] : []),
+      ...(searchOr ? [{ $match: { $or: searchOr } }] : []),
     ];
 
     // ===== pngStatus filter =====
@@ -1518,7 +1514,7 @@ const getScaleList = async (req, res) => {
       pipeline.push({ $match: { hasPendingItem: true } });
     }
 
-    if (needsAvailablePsdFilter) {
+    if (needsAvailablePsdFilter && !(search && search.trim())) {
 
     /**
      * Need Scale chỉ hiện những Listing có psd.status = available
