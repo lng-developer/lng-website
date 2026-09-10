@@ -417,9 +417,13 @@ const markAddressValidByOrderId = async (req, res) => {
     const oldAddressValid = order.address_validation?.isValid ?? null;
     const oldScaleOverallStatus = order.scale_overall_status;
 
+    const allItemsComplete =
+      Array.isArray(order.items) &&
+      order.items.length > 0 &&
+      order.items.every((item) => item?.scale_status === "Complete");
     const nextScaleOverallStatus =
       oldScaleOverallStatus === "Address Invalid"
-        ? "Pending"
+        ? (allItemsComplete ? "Ready" : "Pending")
         : oldScaleOverallStatus;
 
     if (oldAddressValid === true && nextScaleOverallStatus === oldScaleOverallStatus) {

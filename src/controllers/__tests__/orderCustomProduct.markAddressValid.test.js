@@ -54,7 +54,7 @@ describe('markAddressValidByOrderId', () => {
 
     const order = await db.orderCustomProduct.findOne.mock.results[0].value;
     expect(order.address_validation).toEqual({ isValid: true, smartyResponse: null });
-    expect(order.scale_overall_status).toBe('Need Scale');
+    expect(order.scale_overall_status).toBe('Pending');
     expect(save).toHaveBeenCalledTimes(1);
     expect(logOrderHistory).toHaveBeenCalledWith(expect.objectContaining({
       action: 'MARK_ADDRESS_VALID',
@@ -67,7 +67,7 @@ describe('markAddressValidByOrderId', () => {
         expect.objectContaining({
           field: 'scale_overall_status',
           from: 'Address Invalid',
-          to: 'Need Scale',
+          to: 'Pending',
         }),
       ]),
     }));
@@ -76,7 +76,7 @@ describe('markAddressValidByOrderId', () => {
       message: 'Order address marked as valid successfully',
       orderId: '114-5065197-6682605',
       addressValid: true,
-      scale_overall_status: 'Need Scale',
+      scale_overall_status: 'Pending',
     });
   });
 
@@ -109,5 +109,33 @@ describe('markAddressValidByOrderId', () => {
       addressValid: true,
       scale_overall_status: 'Need Scale',
     });
+  });
+
+  test('restores Ready when every item already passed QC', async () => {
+    const save = jest.fn().mockResolvedValue(true);
+    db.orderCustomProduct.findOne.mockResolvedValue({
+      _id: 'oid-3',
+      orderId: '111-9837607-8147446',
+      address_validation: { isValid: false, smartyResponse: null },
+      scale_overall_status: 'Address Invalid',
+      items: [{ scale_status: 'Complete' }],
+      save,
+    });
+
+    const req = {
+      params: { orderId: '111-9837607-8147446' },
+      user: { _id: 'u1' },
+      ip: '127.0.0.1',
+      headers: { 'user-agent': 'jest' },
+    };
+    const res = makeRes();
+
+    await controller.markAddressValidByOrderId(req, res);
+
+    const order = await db.orderCustomProduct.findOne.mock.results[0].value;
+    expect(order.scale_overall_status).toBe('Ready');
+    expect(res.json).toHaveBeenCalledWith(expect.objectContaining({
+      scale_overall_status: 'Ready',
+    }));
   });
 });
