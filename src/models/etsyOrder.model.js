@@ -305,6 +305,7 @@ const EtsyOrderSchema = new Schema(
             ref: "Vendor",
             default: null,
         },
+        manual_vendor_required: { type: Boolean, default: false },
 
         numberOfItems: { type: Number, default: 0 },
         sumbittedoetsy: { type: Boolean, default: false },

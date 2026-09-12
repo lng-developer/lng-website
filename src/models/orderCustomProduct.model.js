@@ -330,6 +330,7 @@ const orderCustomProductSchema = new mongoose.Schema({
     ref: "Vendor",
     default: null,
   },
+  manual_vendor_required: { type: Boolean, default: false },
   csAssigneeId: {
     type: mongoose.Schema.Types.ObjectId,
     ref: "User",

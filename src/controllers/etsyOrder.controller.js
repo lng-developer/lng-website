@@ -66,6 +66,7 @@ const ETSY_LIST_SELECT_FIELDS = [
     "seller",
     "items",
     "base_cost",
+    "manual_vendor_required",
     "numberOfItems",
     "case",
     "address_validation",
@@ -1456,6 +1457,7 @@ const getListOrders = async (req, res) => {
                 shopId: shop._id ? String(shop._id) : String(order.shopId || ""),
                 shopName: shop.name || shop.store || "",
                 shipping_type: order.shipping_type || "Standard",
+                manual_vendor_required: order.manual_vendor_required === true,
                 case: order.case || [],
                 items: (order.items || []).map((item) => {
                     const itemSellerPopulated = item.seller?.sellerId || null;
@@ -1762,6 +1764,11 @@ async function calculateEtsyCost(order) {
                 continue;
             }
             logger.warn(`[calculateEtsyCost] Manual VCC ${item.manual_vendor_cost_center_id} not found or has 0 cost. Falling back to auto.`);
+        }
+
+        if (order.manual_vendor_required === true) {
+            stagedItems.push({ transactionId: itemId, sku: originalSku, mapped_sku: mappedSku, used_sku: usedSku, configCode, status: "failed", reason: "Manual vendor selection required" });
+            continue;
         }
 
         const labelValueMap = extractLabelValueMapFromEtsyItem(item);

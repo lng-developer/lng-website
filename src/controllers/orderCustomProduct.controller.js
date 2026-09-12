@@ -3756,6 +3756,19 @@ const computeBaseCostForOrder = async (req, res) => {
         }
       }
 
+      if (order.manual_vendor_required === true) {
+        stagedItems.push({
+          orderItemId: item.orderItemId,
+          sku: originalSku,
+          mapped_sku: mappedSku,
+          used_sku: usedSku,
+          configCode,
+          status: "failed",
+          reason: "Manual vendor selection required",
+        });
+        continue;
+      }
+
       const labelValueMap = extractLabelValueMapFromItem(item);
       const {
         cfg,
@@ -5026,7 +5039,7 @@ const updateTrackingByOrderId = async (req, res) => {
  */
 const applyManualVendorMapping = async (req, res) => {
   try {
-    const { orderId, forcedVendorId, items } = req.body;
+    const { orderId, forcedVendorId, items, manualVendorRequired } = req.body;
     if (!orderId) return res.status(400).json({ message: "orderId is required" });
 
     const order = await OrderCustomProduct.findOne({ orderId });
@@ -5035,6 +5048,21 @@ const applyManualVendorMapping = async (req, res) => {
       if (!etsyOrder) return res.status(404).json({ message: "Order not found" });
 
       const changes = [];
+      if (manualVendorRequired !== undefined) {
+        const nextManualVendorRequired = manualVendorRequired === true;
+        if (Boolean(etsyOrder.manual_vendor_required) !== nextManualVendorRequired) {
+          changes.push({ field: "manual_vendor_required", from: Boolean(etsyOrder.manual_vendor_required), to: nextManualVendorRequired });
+        }
+        etsyOrder.manual_vendor_required = nextManualVendorRequired;
+        if (nextManualVendorRequired && !etsyOrder.forced_vendor_id) {
+          for (const item of etsyOrder.items) {
+            if (!item.manual_vendor_cost_center_id && item.cost_breakdown) item.cost_breakdown = null;
+          }
+          etsyOrder.base_cost = null;
+          etsyOrder.base_cost_computed_at = null;
+          etsyOrder.base_cost_shipping_groups = [];
+        }
+      }
       const oldForcedVendorId = etsyOrder.forced_vendor_id
         ? String(etsyOrder.forced_vendor_id)
         : null;
@@ -5106,14 +5134,15 @@ const applyManualVendorMapping = async (req, res) => {
       }
 
       let computedResult = null;
-      const { computeBaseCostForEtsyOrder } = require("./etsyOrder.controller");
-      const mockReq = { body: { orderId } };
-      const mockRes = {
-        status: function () { return this; },
-        json: function (data) { computedResult = data; return this; }
-      };
-
-      await computeBaseCostForEtsyOrder(mockReq, mockRes);
+      if (Array.isArray(items) || forcedVendorId !== undefined) {
+        const { computeBaseCostForEtsyOrder } = require("./etsyOrder.controller");
+        const mockReq = { body: { orderId } };
+        const mockRes = {
+          status: function () { return this; },
+          json: function (data) { computedResult = data; return this; }
+        };
+        await computeBaseCostForEtsyOrder(mockReq, mockRes);
+      }
 
       return res.json({
         message: "Manual mapping applied successfully",
@@ -5124,6 +5153,21 @@ const applyManualVendorMapping = async (req, res) => {
     }
 
     const changes = [];
+    if (manualVendorRequired !== undefined) {
+      const nextManualVendorRequired = manualVendorRequired === true;
+      if (Boolean(order.manual_vendor_required) !== nextManualVendorRequired) {
+        changes.push({ field: "manual_vendor_required", from: Boolean(order.manual_vendor_required), to: nextManualVendorRequired });
+      }
+      order.manual_vendor_required = nextManualVendorRequired;
+      if (nextManualVendorRequired && !order.forced_vendor_id) {
+        for (const item of order.items) {
+          if (!item.manual_vendor_cost_center_id && item.cost_breakdown) item.cost_breakdown = null;
+        }
+        order.base_cost = null;
+        order.base_cost_computed_at = null;
+        order.base_cost_shipping_groups = [];
+      }
+    }
     const oldForcedVendorId = order.forced_vendor_id
       ? String(order.forced_vendor_id)
       : null;
@@ -5198,18 +5242,19 @@ const applyManualVendorMapping = async (req, res) => {
     // 👉 GỌI TRỰC TIẾP HÀM computeBaseCostForOrder ĐỂ TỰ ĐỘNG GOM NHÓM VÀ TÍNH SHIP CHUẨN XÁC DO MÌNH VỪA FIX
     // Tránh việc tự cộng dồn tay gộp shipping sai ở đây.
     let computedResult = null;
-    const mockReq = {
-      body: { orderId },
-      user: req.user,
-      ip: req.ip,
-      headers: req.headers,
-    };
-    const mockRes = {
-      status: function () { return this; },
-      json: function (data) { computedResult = data; return this; }
-    };
-
-    await computeBaseCostForOrder(mockReq, mockRes);
+    if (Array.isArray(items) || forcedVendorId !== undefined) {
+      const mockReq = {
+        body: { orderId },
+        user: req.user,
+        ip: req.ip,
+        headers: req.headers,
+      };
+      const mockRes = {
+        status: function () { return this; },
+        json: function (data) { computedResult = data; return this; }
+      };
+      await computeBaseCostForOrder(mockReq, mockRes);
+    }
 
     return res.json({
       message: "Manual mapping applied successfully",

@@ -545,6 +545,7 @@ function enrichOrder(order, listingMap, vendorMap) {
     shipping_type: order.shipping_type || null,
     items,
     base_cost: order.base_cost,
+    manual_vendor_required: order.manual_vendor_required === true,
     case: order.case,
     address_validation: order.address_validation?.isValid,
     scale_overall_status: order.scale_overall_status,

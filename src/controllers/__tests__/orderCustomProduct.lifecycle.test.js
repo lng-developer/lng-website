@@ -235,6 +235,41 @@ describe("order custom product lifecycle hooks", () => {
     }));
   });
 
+  test("computeBaseCostForOrder leaves manual-vendor-required orders unmapped", async () => {
+    const order = {
+      _id: "order-object-id",
+      orderId: "113-1524195-6858656",
+      platform: "Amazon",
+      shopId: "shop-1",
+      manual_vendor_required: true,
+      shipping_type: "Standard",
+      base_cost: 0,
+      base_cost_shipping_groups: [],
+      items: [{
+        orderItemId: "item-1",
+        sku: "J2614-NK-180626-06",
+        quantity: 1,
+        customizationData: {
+          children: [{ children: [{ children: [
+            { label: "Size", optionSelection: { label: "4.8x4.8 INCHES" } },
+            { label: "Color", optionSelection: { label: "15 pcs" } },
+          ] }] }],
+        },
+      }],
+      save: jest.fn().mockResolvedValue(undefined),
+    };
+    db.orderCustomProduct.findOne.mockReturnValue(makeQuery(order));
+
+    const res = makeRes();
+    await controller.computeBaseCostForOrder({ body: { orderId: order.orderId } }, res);
+
+    expect(order.base_cost).toBe(0);
+    expect(order.items[0].cost_breakdown).toBeUndefined();
+    expect(res.json).toHaveBeenCalledWith(expect.objectContaining({
+      detail: [expect.objectContaining({ reason: "Manual vendor selection required" })],
+    }));
+  });
+
   test("autoMatchBaseCostForOrder previews auto mapping without overwriting manual mapping", async () => {
     const order = {
       _id: "order-object-id",
