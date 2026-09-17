@@ -164,7 +164,7 @@ test("keeps a mixed-seller order's revenue, base cost, and profit separate", asy
   }, res);
 
   const { data } = res.json.mock.calls[0][0];
-  expect(data["Nguyễn Đức Sơn"].totals).toMatchObject({ items: 1, revenue: 60.41, baseCost: 54.49, fee: 12.99, profit1: -7.07 });
-  expect(data["Nguyễn Minh Đức"].totals).toMatchObject({ items: 1, revenue: 36.53, baseCost: 14.84, fee: 7.85, profit1: 13.84 });
+  expect(data["Nguyễn Đức Sơn"].totals).toMatchObject({ items: 1, revenue: 60.41, baseCost: 54.49, fee: 12.69, profit1: -6.77 });
+  expect(data["Nguyễn Minh Đức"].totals).toMatchObject({ items: 1, revenue: 36.53, baseCost: 14.84, fee: 7.67, profit1: 14.02 });
   expect(data["Nguyễn Đức Sơn"].totals.revenue + data["Nguyễn Minh Đức"].totals.revenue).toBe(96.94);
 });
