@@ -52,9 +52,27 @@ describe('importVendorProductFromExcel', () => {
     expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ productsUpserted: 1, variantsUpserted: 2 }));
   });
 
-  it('rejects an incomplete variant before writing any records', async () => {
+  it('accepts a one-size variant with only a SKU', async () => {
     XLSX.utils.sheet_to_json.mockReturnValue([
-      { product_id: 'G5000', product_name: 'Gildan 5000', sku: 'G5000-BLK-S', vendor_size: 'S' },
+      { product_id: 'ASOM', product_name: 'Acrylic Shape Ornament', sku: 'LNGASOM', base_cost: 1.33 },
+    ]);
+    db.vendorProduct.findOneAndUpdate.mockResolvedValue({ _id: 'product-1' });
+    const res = response();
+
+    await importVendorProductFromExcel({ body: { vendor_id: 'vendor-1' }, file: { path: 'upload.xlsx' } }, res);
+
+    expect(db.vendorProduct.findOneAndUpdate).toHaveBeenCalledTimes(1);
+    expect(db.vendorCostCenter.findOneAndUpdate).toHaveBeenCalledWith(
+      { vendor_product: 'product-1', sku: 'LNGASOM', vendor_size: '', vendor_color: '' },
+      expect.any(Object),
+      { upsert: true, new: true, setDefaultsOnInsert: true },
+    );
+    expect(res.status).toHaveBeenCalledWith(201);
+  });
+
+  it('rejects a variant field without a SKU before writing any records', async () => {
+    XLSX.utils.sheet_to_json.mockReturnValue([
+      { product_id: 'G5000', product_name: 'Gildan 5000', vendor_size: 'S' },
     ]);
     const res = response();
 

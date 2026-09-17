@@ -57,9 +57,12 @@ const importVendorProductFromExcel = async (req, res) => {
             const sku = value(row.sku || row.product_code);
             const vendorSize = value(row.vendor_size);
             const vendorColor = value(row.vendor_color);
-            const hasVariant = [sku, vendorSize, vendorColor, row.standard_size, row.standard_color].some(value);
-            if (hasVariant && (!sku || !vendorSize || !vendorColor)) {
-                const error = new Error(`Row ${index + 2}: sku, vendor_size and vendor_color are required for a variant`);
+            const hasVariant = [
+                sku, vendorSize, vendorColor, row.standard_size, row.standard_color, row.base_cost,
+                row.domestic_economy, row.domestic_additional, row.international_economy, row.international_additional,
+            ].some(value);
+            if (hasVariant && !sku) {
+                const error = new Error(`Row ${index + 2}: sku is required for a variant`);
                 error.statusCode = 400;
                 throw error;
             }
