@@ -1,5 +1,7 @@
 const db = require('../models');
 const VendorProduct = db.vendorProduct;
+const VendorCostCenter = db.vendorCostCenter;
+const Vendor = db.vendor;
 const XLSX = require('xlsx');
 const multer = require('multer');
 const path = require('path');
@@ -7,7 +9,19 @@ const fs = require('fs');
 
 const upload = multer({ dest: 'uploads/' }); // Tạm thời lưu file Excel
 
+const value = (input) => String(input ?? '').trim();
+const amount = (input) => {
+    const parsed = Number.parseFloat(value(input).replace(/[, ]/g, ''));
+    return Number.isFinite(parsed) ? parsed : 0;
+};
+const status = (input) => value(input).toLowerCase() === 'inactive' ? 'Inactive' : 'Active';
+const printingMethod = (input) => ['DTF', 'DTG'].includes(value(input).toUpperCase()) ? value(input).toUpperCase() : '';
+const removeUpload = (filePath) => {
+    if (filePath && fs.existsSync(filePath)) fs.unlinkSync(filePath);
+};
+
 const importVendorProductFromExcel = async (req, res) => {
+    const filePath = req.file?.path && path.resolve(req.file.path);
     try {
         const vendorId = req.body.vendor_id;
         if (!vendorId) {
@@ -18,31 +32,107 @@ const importVendorProductFromExcel = async (req, res) => {
             return res.status(400).json({ message: 'No file uploaded' });
         }
 
-        const filePath = path.resolve(req.file.path);
+        const vendor = await Vendor.findById(vendorId);
+        if (!vendor) {
+            return res.status(404).json({ message: 'Vendor not found' });
+        }
+
         const workbook = XLSX.readFile(filePath);
         const sheetName = workbook.SheetNames[0];
-        const rawData = XLSX.utils.sheet_to_json(workbook.Sheets[sheetName]);
+        const rawData = XLSX.utils.sheet_to_json(workbook.Sheets[sheetName], { defval: '' });
 
         if (rawData.length === 0) {
-            fs.unlinkSync(filePath);
             return res.status(400).json({ message: 'Excel file is empty' });
         }
 
-        const dataToInsert = rawData.map(row => ({
-            vendor_id: vendorId,
-            image: row.image || '',
-            product_id: row.product_id || '',
-            product_name: row.product_name || '',
-            status: row.status || 'Active',
-            product_type_design: row.product_type_design || ''
-        }));
+        const rows = rawData.map((row, index) => {
+            const productId = value(row.product_id);
+            const productName = value(row.product_name);
+            if (!productId || !productName) {
+                const error = new Error(`Row ${index + 2}: product_id and product_name are required`);
+                error.statusCode = 400;
+                throw error;
+            }
 
-        const inserted = await VendorProduct.insertMany(dataToInsert);
+            const sku = value(row.sku || row.product_code);
+            const vendorSize = value(row.vendor_size);
+            const vendorColor = value(row.vendor_color);
+            const hasVariant = [sku, vendorSize, vendorColor, row.standard_size, row.standard_color].some(value);
+            if (hasVariant && (!sku || !vendorSize || !vendorColor)) {
+                const error = new Error(`Row ${index + 2}: sku, vendor_size and vendor_color are required for a variant`);
+                error.statusCode = 400;
+                throw error;
+            }
 
-        fs.unlinkSync(filePath); // Xoá file sau khi xử lý
-        res.status(201).json({ message: 'Import successful', insertedCount: inserted.length });
+            return {
+                productId,
+                product: {
+                    vendor_id: vendorId,
+                    product_id: productId,
+                    product_name: productName,
+                    image: value(row.image),
+                    product_type_design: value(row.product_type_design),
+                    status: status(row.product_status || row.status),
+                },
+                variant: hasVariant && {
+                    sku,
+                    vendor_size: vendorSize,
+                    vendor_color: vendorColor,
+                    standard_size: value(row.standard_size) || vendorSize,
+                    standard_color: value(row.standard_color) || vendorColor,
+                    base_cost: amount(row.base_cost),
+                    dosmetic: { economy: amount(row.domestic_economy), additional: amount(row.domestic_additional) },
+                    international: { economy: amount(row.international_economy), additional: amount(row.international_additional) },
+                    priority: { economy: amount(row.priority_economy), additional: amount(row.priority_additional) },
+                    additional_costs: {
+                        embroidery: amount(row.embroidery_cost),
+                        two_sided_print: amount(row.two_sided_print_cost),
+                        two_position_print: amount(row.two_position_print_cost),
+                    },
+                    printing_method: printingMethod(row.printing_method),
+                    product_type_design: value(row.product_type_design),
+                    status: status(row.variant_status || row.status),
+                },
+            };
+        });
+
+        const productRows = new Map();
+        rows.forEach((row) => {
+            if (!productRows.has(row.productId)) productRows.set(row.productId, row.product);
+        });
+        const products = new Map();
+        for (const [productId, product] of productRows) {
+            products.set(productId, await VendorProduct.findOneAndUpdate(
+                { vendor_id: vendorId, product_id: productId },
+                { $set: product },
+                { upsert: true, new: true, setDefaultsOnInsert: true },
+            ));
+        }
+
+        const variants = rows.filter((row) => row.variant);
+        for (const row of variants) {
+            const vendorProduct = products.get(row.productId);
+            await VendorCostCenter.findOneAndUpdate(
+                {
+                    vendor_product: vendorProduct._id,
+                    sku: row.variant.sku,
+                    vendor_size: row.variant.vendor_size,
+                    vendor_color: row.variant.vendor_color,
+                },
+                { $set: { ...row.variant, vendor_product: vendorProduct._id } },
+                { upsert: true, new: true, setDefaultsOnInsert: true },
+            );
+        }
+
+        return res.status(201).json({
+            message: 'Import successful',
+            productsUpserted: products.size,
+            variantsUpserted: variants.length,
+        });
     } catch (error) {
-        res.status(500).json({ message: 'Failed to import vendor products', error: error.message });
+        return res.status(error.statusCode || 500).json({ message: 'Failed to import vendor products', error: error.message });
+    } finally {
+        removeUpload(filePath);
     }
 };
 
