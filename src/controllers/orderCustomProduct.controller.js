@@ -5054,9 +5054,13 @@ const applyManualVendorMapping = async (req, res) => {
           changes.push({ field: "manual_vendor_required", from: Boolean(etsyOrder.manual_vendor_required), to: nextManualVendorRequired });
         }
         etsyOrder.manual_vendor_required = nextManualVendorRequired;
-        if (nextManualVendorRequired && !etsyOrder.forced_vendor_id) {
+        if (nextManualVendorRequired) {
+          if (etsyOrder.forced_vendor_id) changes.push({ field: "forced_vendor_id", from: String(etsyOrder.forced_vendor_id), to: null });
+          etsyOrder.forced_vendor_id = null;
           for (const item of etsyOrder.items) {
-            if (!item.manual_vendor_cost_center_id && item.cost_breakdown) item.cost_breakdown = null;
+            if (item.manual_vendor_cost_center_id) changes.push({ field: `items[transactionId=${item.transactionId}].manual_vendor_cost_center_id`, from: String(item.manual_vendor_cost_center_id), to: null });
+            item.manual_vendor_cost_center_id = null;
+            item.cost_breakdown = null;
           }
           etsyOrder.base_cost = null;
           etsyOrder.base_cost_computed_at = null;
@@ -5159,9 +5163,13 @@ const applyManualVendorMapping = async (req, res) => {
         changes.push({ field: "manual_vendor_required", from: Boolean(order.manual_vendor_required), to: nextManualVendorRequired });
       }
       order.manual_vendor_required = nextManualVendorRequired;
-      if (nextManualVendorRequired && !order.forced_vendor_id) {
+      if (nextManualVendorRequired) {
+        if (order.forced_vendor_id) changes.push({ field: "forced_vendor_id", from: String(order.forced_vendor_id), to: null });
+        order.forced_vendor_id = null;
         for (const item of order.items) {
-          if (!item.manual_vendor_cost_center_id && item.cost_breakdown) item.cost_breakdown = null;
+          if (item.manual_vendor_cost_center_id) changes.push({ field: `items[orderItemId=${item.orderItemId}].manual_vendor_cost_center_id`, from: String(item.manual_vendor_cost_center_id), to: null });
+          item.manual_vendor_cost_center_id = null;
+          item.cost_breakdown = null;
         }
         order.base_cost = null;
         order.base_cost_computed_at = null;

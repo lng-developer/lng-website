@@ -270,6 +270,35 @@ describe("order custom product lifecycle hooks", () => {
     }));
   });
 
+  test("require manual vendor clears every existing vendor mapping", async () => {
+    const order = {
+      _id: "order-object-id",
+      orderId: "113-1524195-6858656",
+      forced_vendor_id: "forced-vendor",
+      manual_vendor_required: false,
+      base_cost: 12,
+      base_cost_computed_at: new Date(),
+      base_cost_shipping_groups: [{ group_key: "old" }],
+      items: [{
+        orderItemId: "item-1",
+        manual_vendor_cost_center_id: "manual-cost-center",
+        cost_breakdown: { vendorProductId: "vendor-product" },
+      }],
+      save: jest.fn().mockResolvedValue(undefined),
+    };
+    db.orderCustomProduct.findOne.mockResolvedValue(order);
+
+    await controller.applyManualVendorMapping({
+      body: { orderId: order.orderId, manualVendorRequired: true },
+      user: { _id: "user-1" }, ip: "127.0.0.1", headers: {},
+    }, makeRes());
+
+    expect(order.forced_vendor_id).toBeNull();
+    expect(order.items[0].manual_vendor_cost_center_id).toBeNull();
+    expect(order.items[0].cost_breakdown).toBeNull();
+    expect(order.base_cost).toBeNull();
+  });
+
   test("autoMatchBaseCostForOrder previews auto mapping without overwriting manual mapping", async () => {
     const order = {
       _id: "order-object-id",
