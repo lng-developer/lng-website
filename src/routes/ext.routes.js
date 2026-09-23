@@ -27,7 +27,7 @@ router.get("/tasks/:taskId", authenticateToken, extController.getExtensionTask);
 router.post("/task-result", extController.taskResultRest);
 
 // Test connection với specific client
-router.post("/test-connection/:machineId", extController.testConnection);
+router.post("/test-connection/:machineId", authenticateToken, extController.testConnection);
 
 // Broadcast message tới tất cả clients trong shop
 router.post("/broadcast", extController.broadcastMessage);

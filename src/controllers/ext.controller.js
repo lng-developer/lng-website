@@ -3026,35 +3026,33 @@ const getClientOnline = async (req, res) => {
 // Test connection với client
 const testConnection = async (req, res) => {
   try {
-    const { machineId } = req.params;
+    const machineId = String(req.params.machineId || "").trim();
     const io = req.app.get("io");
-    
-    if (!io) {
-      return res.status(500).json({ ok: false, message: "Socket.IO not available" });
-    }
+    const presence = req.app.get("presence");
+    if (!io) return res.status(500).json({ ok: false, message: "Socket.IO not available" });
+    if (!machineId || machineId.length > 128) return res.status(400).json({ ok: false, message: "machineId không hợp lệ" });
 
-    const testId = `test_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-    const timestamp = Date.now();
+    const liveSocketIds = new Set(io.of("/").sockets.keys());
+    const client = (presence?.snapshot() || []).find((entry) =>
+      String(entry?.machineId) === machineId && liveSocketIds.has(entry.socketId)
+    );
+    if (!client) return res.status(409).json({ ok: false, message: "Extension chưa online nên không thể test" });
 
-    console.log(`🏓 [TEST-CONNECTION] Sending ping to machine: ${machineId}`);
-
-    // Gửi ping test tới client
-    io.to(`machine:${machineId}`).emit("server:ping", {
-      testId,
-      timestamp,
-      message: "Connection test from server"
+    const task = await emitTaskToMachine(io, {
+      type: "CONNECTION_TEST",
+      shopId: client.shopId,
+      machineId,
+      payload: { source: "manual" },
     });
 
     return res.json({
       ok: true,
-      testId,
-      message: `Ping sent to machine ${machineId}`,
-      timestamp
+      taskId: task.taskId,
+      message: "Đã gửi task kiểm tra tới extension"
     });
-
   } catch (e) {
     console.error("testConnection error:", e);
-    return res.status(500).json({ ok: false, message: e.message });
+    return res.status(500).json({ ok: false, message: "Không thể gửi task kiểm tra" });
   }
 };
 
