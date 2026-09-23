@@ -15,7 +15,7 @@ const { buildOrderLifecyclePayload } = require("../service/orderLifecycleContext
 const mongoose = require("mongoose");
 const axios = require("axios").default;
 const qs = require("querystring");
-
+const { resolveTrackingReceivedAt } = require("../lib/trackingReceivedAt");
 // Fallback khi db không export
 const VendorProduct = db.vendorProduct || mongoose.model("VendorProduct");
 const Vendor = db.vendor || mongoose.model("Vendor");
@@ -68,6 +68,20 @@ const {
 } = process.env;
 
 const DEBUG = VENDOR_SYNC_DEBUG === "1";
+
+const getExtensionTask = async (req, res) => {
+  try {
+    const task = await ExtensionTask.findOne({ taskId: req.params.taskId })
+      .select("taskId type shopId machineId status sentAt ackedAt completedAt lastError resendCount lastResentAt createdAt updatedAt")
+      .lean();
+
+    if (!task) return res.status(404).json({ ok: false, message: "Không tìm thấy task" });
+    return res.json({ ok: true, data: task });
+  } catch (error) {
+    console.error("getExtensionTask error:", error);
+    return res.status(500).json({ ok: false, message: "Không thể tải lịch sử task" });
+  }
+};
 
 // Tách host/baseUrl từ endpoint có sẵn trong .env
 // MangoTee: from ".../api/public/v1/orders" -> base ".../api/public/v1"
@@ -1729,20 +1743,24 @@ function applyToItemsOfVendor(
     const ti = it.tracking_info || {};
     const prevTracking = norm(ti.tracking);
     const thePrevStatus = norm(ti.status);
+    const nextTracking = tracking || prevTracking;
+    const trackingReceivedAt = resolveTrackingReceivedAt(ti.trackingReceivedAt, prevTracking, nextTracking);
 
     const nextTI = {
       ...ti,
       fulfillment: getVendorFulfillmentName(vendorKey) || norm(ti.fulfillment),
-      tracking: tracking || prevTracking,
+      tracking: nextTracking,
+      carrier: norm(carrier) || norm(ti.carrier),
+      ...(trackingReceivedAt ? { trackingReceivedAt } : {}),
       status: shipped ? "Shipped" : thePrevStatus || "New",
       updated_at: new Date(),
-      note: [norm(ti.note), carrier && `carrier:${carrier}`]
-        .filter(Boolean)
-        .join(" | "),
+      note: buildTrackingNote(ti.note, carrier),
     };
 
     if (
       nextTI.tracking !== prevTracking ||
+      nextTI.carrier !== norm(ti.carrier) ||
+      String(nextTI.trackingReceivedAt || "") !== String(ti.trackingReceivedAt || "") ||
       nextTI.status !== thePrevStatus ||
       nextTI.fulfillment !== ti.fulfillment ||
       nextTI.note !== ti.note
@@ -1922,6 +1940,37 @@ async function updateOrderByVendors(orderId, vpidToVendorPrefetched = null) {
   return { updatedItems: totalChanged, orderStatusChanged };
 }
 
+async function previewOrderVendorTracking(orderId) {
+  const doc = await OrderCustomProduct.findOne({ orderId: String(orderId || "").trim() }).lean();
+  if (!doc) throw new Error("Order not found in DB");
+
+  const vpidSet = new Set((doc.items || []).map((item) => item?.cost_breakdown?.vendorProductId).filter(Boolean).map(String));
+  doc.__vpidToVendor = await buildVendorMapsFromVpidSet(vpidSet);
+  const vendorKeys = getSentTrackingVendorKeys(doc);
+  if (!vendorKeys.length) throw new Error("No sent vendor submission found for tracking preview");
+
+  const vendors = [];
+  for (const vendorKey of vendorKeys) {
+    try {
+      const result = await fetchTrackingByVendorKey(vendorKey, doc.orderId, doc);
+      const raw = result?.raw && typeof result.raw === "object" ? result.raw : {};
+      vendors.push({
+        vendorKey,
+        normalized: {
+          hasTracking: Boolean(norm(result?.tracking)),
+          hasCarrier: Boolean(norm(result?.carrier)),
+          shipped: Boolean(result?.shipped),
+        },
+        rawFields: Object.keys(raw).sort(),
+      });
+    } catch (error) {
+      const status = String(error?.message || "").match(/\b([45]\d\d)\b/)?.[1];
+      vendors.push({ vendorKey, error: status ? `Vendor request failed (HTTP ${status})` : "Vendor request failed" });
+    }
+  }
+  return { orderId: doc.orderId, vendors };
+}
+
 async function runBatch({ max = 1100, dryRun = false, sentAfter = null, sentWithinDays = null } = {}) {
   const trackingSentAfter = getTrackingSentAfter({ sentAfter, sentWithinDays });
   const candidates = await OrderCustomProduct.find({
@@ -2006,10 +2055,14 @@ function applyToEtsyItemsOfVendor(doc, vendorKey, { tracking, carrier, shipped, 
     const ti = it.tracking_info || {};
     const prevTracking = norm(ti.tracking);
     const prevStatus = norm(ti.status);
+    const nextTracking = tracking || prevTracking;
+    const trackingReceivedAt = resolveTrackingReceivedAt(ti.trackingReceivedAt, prevTracking, nextTracking);
     const nextTI = {
       ...ti,
       fulfillment: fulfillment || norm(ti.fulfillment),
-      tracking: tracking || prevTracking,
+      tracking: nextTracking,
+      carrier: norm(carrier) || norm(ti.carrier),
+      ...(trackingReceivedAt ? { trackingReceivedAt } : {}),
       status: shipped ? "Shipped" : prevStatus || "New",
       updated_at: new Date(),
       note: buildTrackingNote(ti.note, carrier),
@@ -2017,6 +2070,8 @@ function applyToEtsyItemsOfVendor(doc, vendorKey, { tracking, carrier, shipped, 
 
     if (
       nextTI.tracking !== prevTracking ||
+      nextTI.carrier !== norm(ti.carrier) ||
+      String(nextTI.trackingReceivedAt || "") !== String(ti.trackingReceivedAt || "") ||
       nextTI.status !== prevStatus ||
       nextTI.fulfillment !== ti.fulfillment ||
       nextTI.note !== ti.note
@@ -2387,26 +2442,11 @@ const etsyVendorSyncBatch = async (req, res) => {
 
 const pullAllOrder = async (req, res) => {
   const { action = "click", label = null, type, payload } = req.body || {};
-
   const io = req.app.get("io");
   if (!io) return res.status(500).json({ ok: false, message: "io missing" });
-
-  // Broadcast — không persist vì không có machineId cụ thể.
-  // Extension nhận sẽ self-generate eventId từ taskId+status.
-  const broadcastTaskId = buildTaskId({
-    type,
-    shopId: "broadcast",
-    payload,
-  });
-  const task = {
-    taskId: broadcastTaskId,
-    type,
-    payload: { ...(payload || {}), taskId: broadcastTaskId },
-    sentAt: new Date().toISOString(),
-  };
-
+  const broadcastTaskId = buildTaskId({ type, shopId: "broadcast", payload });
+  const task = { taskId: broadcastTaskId, type, payload: { ...(payload || {}), taskId: broadcastTaskId }, sentAt: new Date().toISOString() };
   io.emit("server:task", task);
-
   const recipients = io.of("/").sockets.size || 0;
 
   await RealtimeLog.create({
@@ -2463,15 +2503,11 @@ async function requestExtension(req, res) {
     }
 
     const io = req.app.get("io");
-    if (!io) {
-      console.error(`❌ [REQUEST-EXT] Socket.IO not available`);
-      return res.status(500).json({ ok: false, message: "io missing" });
-    }
+    if (!io) return res.status(500).json({ ok: false, message: "io missing" });
 
     const taskId = providedTaskId || buildTaskId({ type, shopId, machineId, payload });
     console.log(`📤 [REQUEST-EXT] Sending task ${taskId} to machine:${machineId}`, { type, payload });
 
-    // Emit task (persist + send) — payload tự động chèn taskId
     const emitted = await emitTaskToMachine(io, {
       taskId,
       type,
@@ -2555,7 +2591,6 @@ const taskResultRest = async (req, res) => {
     if (!payload.status) {
       return res.status(400).json({ ok: false, message: "status is required" });
     }
-
     const result = await taskStatusService.upsertByEventId({
       eventId: payload.eventId,
       taskId: payload.taskId,
@@ -2943,107 +2978,44 @@ const getClientOnline = async (req, res) => {
   try {
     const presence = req.app.get("presence");
     const io = req.app.get("io");
-    if (!io || !presence) return res.json({ ok: true, clients: [] });
-
-    const {
-      shopId: filterShopId,
-      machineId: filterMachineId,
-      q,
-    } = req.query || {};
-    const now = Date.now();
-    const TTL_MS = Number(process.env.PRESENCE_TTL_MS || 45000);
-
-    const liveSocketIds = new Set(io.of("/").sockets.keys());
-
-    const snap = presence.snapshot() || [];
-
-    const latestByMachine = new Map();
-    for (const c of snap) {
-      if (!c?.machineId) continue;
-      if (filterShopId && String(c.shopId) !== String(filterShopId)) continue;
-      if (filterMachineId && String(c.machineId) !== String(filterMachineId))
-        continue;
-
-      const prev = latestByMachine.get(String(c.machineId));
-      if (!prev || (c.lastSeen || 0) > (prev.lastSeen || 0)) {
-        latestByMachine.set(String(c.machineId), c);
-      }
+    const { shopId: filterShopId, machineId: filterMachineId, q } = req.query || {};
+    const liveSocketIds = io ? new Set(io.of("/").sockets.keys()) : new Set();
+    const liveByShop = new Map();
+    for (const client of presence?.snapshot() || []) {
+      if (!client?.shopId || !client.socketId || !liveSocketIds.has(client.socketId)) continue;
+      const previous = liveByShop.get(String(client.shopId));
+      if (!previous || (client.lastSeen || 0) > (previous.lastSeen || 0)) liveByShop.set(String(client.shopId), client);
     }
-
-    const roomMap = io.of("/").adapter.rooms;
-    const candidates = [];
-    for (const c of latestByMachine.values()) {
-      let sid = c.socketId && liveSocketIds.has(c.socketId) ? c.socketId : null;
-
-      if (!sid && roomMap) {
-        const room = roomMap.get(`machine:${c.machineId}`);
-        if (room && room.size) {
-          for (const anySid of room) {
-            if (liveSocketIds.has(anySid)) {
-              sid = anySid;
-              break;
-            }
-          }
-        }
-      }
-
-      if (!sid) continue;
-
-      if (q) {
-        const hay = `${c.label || ""} ${c.ua || ""}`.toLowerCase();
-        if (!hay.includes(String(q).toLowerCase())) continue;
-      }
-
-      candidates.push({ ...c, socketId: sid });
-    }
-
-    if (!candidates.length) return res.json({ ok: true, clients: [] });
-
-    const uniqueShopIds = [
-      ...new Set(candidates.map((c) => String(c.shopId)).filter(Boolean)),
-    ];
     const shops = await Shop.find(
-      { _id: { $in: uniqueShopIds } },
-      { _id: 1, name: 1, store: 1 }
+      { status: "Active", ...(filterShopId ? { _id: filterShopId } : {}) },
+      { _id: 1, name: 1, store: 1, merchant: 1, clients: 1 }
     ).lean();
-    const shopMap = new Map(shops.map((s) => [String(s._id), s]));
-
-    const out = candidates.map((c) => {
-      const shop = shopMap.get(String(c.shopId));
-      const lastSeenMs = c.lastSeen || now;
-      const staleMs = now - lastSeenMs;
-      const stale = staleMs > TTL_MS;
-
+    const out = shops.map((shop) => {
+      const live = liveByShop.get(String(shop._id));
+      const saved = live
+        ? shop.clients?.find((client) => client.clientId === live.machineId)
+        : [...(shop.clients || [])].sort((a, b) => new Date(b.lastSeen || 0) - new Date(a.lastSeen || 0))[0];
+      const machineId = live?.machineId || saved?.clientId || null;
+      if (filterMachineId && String(machineId) !== String(filterMachineId)) return null;
+      if (q && !`${shop.name} ${shop.store} ${live?.label || saved?.label || ""}`.toLowerCase().includes(String(q).toLowerCase())) return null;
       return {
-        socketId: c.socketId || null,
-        clientId: c.machineId || null,
-
-        machineId: c.machineId || null,
-        label: c.label || shop?.name || shop?.store || `Client ${c.machineId}`,
-        version: c.version || "",
-        ua: c.ua || "",
-        ip: c.ip || "",
-
-        shopId: String(c.shopId || ""),
-        shopName: shop?.name || shop?.store || String(c.shopId || ""),
-
-        id: `${String(c.shopId)}:${String(c.machineId)}`,
-
-        connectedAt: lastSeenMs,
-        lastSeen: lastSeenMs,
-
-        // Include system stats if available
-        stats: c.stats || null,
-
-        status: stale ? "maybe-online" : "online",
-        statusSummary: {
-          overall: stale ? "warning" : "success",
-          lastSeenAgo: staleMs,
-          stale,
-        },
+        socketId: live?.socketId || null,
+        clientId: machineId,
+        machineId,
+        label: live?.label || saved?.label || "Chưa đăng ký extension",
+        version: live?.version || saved?.version || "",
+        ua: live?.ua || "",
+        ip: live?.ip || "",
+        shopId: String(shop._id),
+        shopName: shop.name || shop.store,
+        merchant: shop.merchant,
+        id: String(shop._id),
+        connectedAt: live?.connectedAt || null,
+        lastSeen: live?.lastSeen || saved?.lastSeen || null,
+        disconnectedAt: live?.disconnectedAt || saved?.disconnectedAt || null,
+        status: live ? "online" : saved ? "offline" : "never-connected",
       };
-    });
-
+    }).filter(Boolean);
     return res.json({ ok: true, clients: out });
   } catch (e) {
     console.error("getClientOnline error:", e);
@@ -3128,6 +3100,7 @@ const broadcastMessage = async (req, res) => {
 };
 
 module.exports = {
+  getExtensionTask,
   requestExtension,
   getClientOnline,
   pullAllOrder,
@@ -3141,6 +3114,7 @@ module.exports = {
   vendorSyncOne,
   vendorSyncList,
   vendorSyncBatch,
+  previewOrderVendorTracking,
   etsyVendorSyncOne,
   etsyVendorSyncList,
   etsyVendorSyncBatch,

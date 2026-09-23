@@ -2,7 +2,8 @@
 const map = new Map(); // machineId -> {shopId, machineId, socketId, lastSeen, ...}
 
 function online(info) {
-  map.set(info.machineId, { ...info, lastSeen: Date.now(), status: "online" });
+  const now = Date.now();
+  map.set(info.machineId, { ...info, connectedAt: now, lastSeen: now, status: "online" });
 }
 
 function heartbeat(machineId, patch = {}) {
@@ -16,12 +17,12 @@ function heartbeat(machineId, patch = {}) {
   });
 }
 
-function offline(machineId) {
+function offline(machineId, socketId) {
   const cur = map.get(machineId);
-  if (!cur) return;
+  if (!cur || (socketId && cur.socketId !== socketId)) return;
   map.set(machineId, {
     ...cur,
-    lastSeen: Date.now(),
+    disconnectedAt: Date.now(),
     status: "offline",
     socketId: null,
   });

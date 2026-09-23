@@ -8,6 +8,7 @@ const clientSubSchema = new mongoose.Schema(
     status: { type: String, enum: ["online", "offline"], default: "online" },
     firstSeen: { type: Date, default: Date.now },
     lastSeen: { type: Date, default: Date.now },
+    disconnectedAt: { type: Date, default: null },
   },
   { _id: false }
 );

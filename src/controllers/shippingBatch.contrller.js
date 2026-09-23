@@ -480,6 +480,25 @@ function normalizeField(value) {
     .replace(/,+$/g, ""); // bỏ dấu phẩy ở cuối (case "9214...,")
 }
 
+function carrierFromTrackingInfo(info = {}) {
+  const structuredCarrier = normalizeField(info.carrier);
+  if (structuredCarrier) return structuredCarrier;
+  const legacyCarrier = normalizeField(info.note)
+    .split("|")
+    .map(part => normalizeField(part))
+    .reverse()
+    .find(part => /^carrier:/i.test(part));
+  return legacyCarrier ? normalizeField(legacyCarrier.replace(/^carrier:/i, "")) : "";
+}
+
+function amazonUsDate(date = new Date()) {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/Los_Angeles", year: "numeric", month: "2-digit", day: "2-digit",
+  }).formatToParts(date);
+  const byType = Object.fromEntries(parts.map(part => [part.type, part.value]));
+  return `${byType.year}-${byType.month}-${byType.day}`;
+}
+
 function buildCompletedShippingFile(completed, options = {}) {
   const {
     carrierCode = "USPS",
@@ -487,19 +506,32 @@ function buildCompletedShippingFile(completed, options = {}) {
     shipDate, // đã build sẵn ở ngoài
   } = options;
 
-  let content =
-    "order-id\tship-date\tcarrier-code\ttracking-number\tship-method\n";
+  const headers = [
+    "order-id", "order-item-id", "quantity", "ship-date", "carrier-code",
+    "carrier-name", "tracking-number", "ship-method", "transparency_code",
+    "ship_from_address_name", "ship_from_address_line1", "ship_from_address_line2",
+    "ship_from_address_line3", "ship_from_address_city", "ship_from_address_county",
+    "ship_from_address_state_or_region", "ship_from_address_postalcode",
+    "ship_from_address_countrycode", "ship_from_supply_source_id",
+  ];
+  let content = `${headers.join("\t")}\n`;
 
   for (const item of completed) {
     if (!item.orderId || !item.tracking) continue;
 
     const orderId = normalizeField(item.orderId);
     const tracking = normalizeField(item.tracking);
+    const itemShipDate = normalizeField(item.shipDate) || shipDate;
 
     if (!orderId || !tracking) continue;
 
     let finalCarrierCode = carrierCode;
     let finalShipMethod = shipMethod;
+
+    if (tracking.startsWith("4PX")) {
+      finalCarrierCode = "4PX";
+      finalShipMethod = "4PX-Global Express";
+    }
 
     if (tracking.startsWith("UK")) {
       finalCarrierCode = "Yanwen";
@@ -522,11 +554,8 @@ function buildCompletedShippingFile(completed, options = {}) {
     }
 
     content += [
-      orderId,
-      shipDate,
-      finalCarrierCode,
-      tracking,
-      finalShipMethod,
+      orderId, "", "", itemShipDate, finalCarrierCode, "", tracking, finalShipMethod,
+      "", "", "", "", "", "", "", "", "", "", "",
     ].join("\t");
 
     content += "\n";
@@ -1311,9 +1340,6 @@ const manualUploadTask = async (req, res, next) => {
       batchId,
       machineId,
       shopId,
-      carrierCode = "USPS",
-      shipMethod = "USPS First Class",
-      shipDate,
       force = false
     } = req.body;
 
@@ -1321,9 +1347,6 @@ const manualUploadTask = async (req, res, next) => {
       batchId,
       machineId,
       shopId,
-      carrierCode,
-      shipMethod,
-      shipDate,
       force
     });
 
@@ -1363,6 +1386,10 @@ const manualUploadTask = async (req, res, next) => {
       });
     }
 
+    if (!batch.review?.approvedAt || !batch.review.confirmedSingleShipment || !batch.review.confirmedNoTransparency) {
+      return res.status(409).json({ ok: false, message: "Batch must be reviewed before sending to Amazon" });
+    }
+
     // Kiểm tra batch đã được gửi chưa (trừ khi force = true)
     if (!force && batch.uploadTaskSent) {
       return res.status(400).json({
@@ -1383,26 +1410,10 @@ const manualUploadTask = async (req, res, next) => {
 
     console.log(`🚀 [MANUAL] Target machineId determined: ${targetMachineId}`);
 
-    // ✅ Tạo file content
-    let shipDateBase;
-    if (shipDate) {
-      const d = new Date(shipDate);
-      if (isNaN(d.getTime())) {
-        return res.status(400).json({
-          ok: false,
-          message: "shipDate is invalid date format"
-        });
-      }
-      shipDateBase = d;
-    } else {
-      // Dùng ngày tạo batch hoặc ngày hiện tại
-      shipDateBase = batch.createdAt ? new Date(batch.createdAt) : new Date();
-    }
-
-    const shipDateStr = buildShipDateString(shipDateBase);
+    const shipDateStr = batch.review.shipDate;
     const fileContent = buildCompletedShippingFile(batch.completed, {
-      carrierCode,
-      shipMethod,
+      carrierCode: "USPS",
+      shipMethod: "USPS First Class",
       shipDate: shipDateStr,
     });
 
@@ -1460,8 +1471,8 @@ const manualUploadTask = async (req, res, next) => {
       },
 
       uploadParams: {
-        carrierCode,
-        shipMethod,
+        carrierCode: "USPS",
+        shipMethod: "USPS First Class",
         shipDate: shipDateStr
       },
 
@@ -1535,8 +1546,8 @@ const manualUploadTask = async (req, res, next) => {
       filename,
       fileSize: Buffer.byteLength(fileContent, 'utf8'),
       uploadParams: {
-        carrierCode,
-        shipMethod,
+        carrierCode: "USPS",
+        shipMethod: "USPS First Class",
         shipDate: shipDateStr
       },
       manual: true,
@@ -1544,6 +1555,33 @@ const manualUploadTask = async (req, res, next) => {
       message: `Manual upload tracking task sent successfully for batch ${batch._id}`
     });
 
+  } catch (err) {
+    next(err);
+  }
+};
+
+const approveTrackingReview = async (req, res, next) => {
+  try {
+    const { batchId } = req.params;
+    const { shipDate, confirmedSingleShipment, confirmedNoTransparency } = req.body || {};
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(String(shipDate || "")) || Number.isNaN(new Date(`${shipDate}T00:00:00Z`).getTime())) {
+      return res.status(400).json({ ok: false, message: "shipDate must be YYYY-MM-DD" });
+    }
+    if (shipDate > amazonUsDate()) {
+      return res.status(400).json({ ok: false, message: "shipDate cannot be in the future for Amazon US" });
+    }
+    if (confirmedSingleShipment !== true || confirmedNoTransparency !== true) {
+      return res.status(400).json({ ok: false, message: "Single-shipment and Transparency checks are required" });
+    }
+    const batch = await ShippingBatch.findById(batchId);
+    if (!batch) return res.status(404).json({ ok: false, message: "Batch not found" });
+    if (batch.uploadTaskSent) return res.status(409).json({ ok: false, message: "Batch has already been sent" });
+    if ((batch.tracking_fakes || []).length || !(batch.completed || []).length) {
+      return res.status(400).json({ ok: false, message: "Only complete orders with real tracking can be reviewed" });
+    }
+    batch.review = { approvedAt: new Date(), shipDate, confirmedSingleShipment, confirmedNoTransparency };
+    await batch.save();
+    return res.json({ ok: true, batchId: batch._id, review: batch.review });
   } catch (err) {
     next(err);
   }
@@ -1642,7 +1680,7 @@ const createBatchFromOrders = async (req, res, next) => {
       label,
       carrierCode = "USPS",
       shipMethod = "USPS First Class",
-      autoUpload = true
+      autoUpload = false
     } = req.body;
 
     if (!machineId) {
@@ -1721,10 +1759,14 @@ const createBatchFromOrders = async (req, res, next) => {
 
           // Tìm tracking hợp lệ đầu tiên trong tất cả items
           let realTracking = null;
+          let realCarrier = "";
+          let realTrackingReceivedAt = null;
           for (const item of order.items || []) {
             const t = item?.tracking_info?.tracking;
             if (t && t.trim() && t !== '-' && t !== '---') {
               realTracking = t.trim();
+              realCarrier = carrierFromTrackingInfo(item.tracking_info);
+              realTrackingReceivedAt = item.tracking_info?.trackingReceivedAt || null;
               break;
             }
           }
@@ -1734,6 +1776,9 @@ const createBatchFromOrders = async (req, res, next) => {
             completed.push({
               orderId,
               tracking: realTracking,
+              carrier: realCarrier,
+              trackingReceivedAt: realTrackingReceivedAt,
+              shipDate: realTrackingReceivedAt ? amazonUsDate(realTrackingReceivedAt) : "",
               isFake: false,
               source: "system",
               createdAt: new Date()
@@ -1774,9 +1819,10 @@ const createBatchFromOrders = async (req, res, next) => {
 
         console.log(`✅ [CREATE_BATCH] Created batch ${batch._id} for shop ${shopId} with ${completed.length} orders (${totalReal} real, ${totalFake} fake)`);
 
-        // ✅ Tự động gửi upload task nếu có real tracking và autoUpload = true
+        // Shipping confirmation changes the seller account; dispatch only after review.
         let autoTaskSent = false;
-        if (autoUpload && totalReal > 0) {
+        const canAutoDispatch = false;
+        if (canAutoDispatch && autoUpload && totalReal > 0) {
           try {
             const io = req.app.get("io");
             if (io) {
@@ -1882,6 +1928,9 @@ const createBatchFromOrders = async (req, res, next) => {
           orders: completed.map(item => ({
             orderId: item.orderId,
             tracking: item.tracking,
+            carrier: item.carrier || "",
+            trackingReceivedAt: item.trackingReceivedAt || null,
+            shipDate: item.shipDate || "",
             isFake: item.isFake,
             source: item.source
           }))
@@ -1933,7 +1982,8 @@ const _extractOrderDetails = (orders) =>
           tracking: itemTracking,
           fulfillment: item.tracking_info?.fulfillment || "",
           status: item.tracking_info?.status || "",
-          carrier: item.tracking_info?.note || "",
+          carrier: carrierFromTrackingInfo(item.tracking_info),
+          trackingReceivedAt: item.tracking_info?.trackingReceivedAt || null,
           updated_at: item.tracking_info?.updated_at || null,
         };
         break;
@@ -2031,7 +2081,7 @@ async function checkOrdersStatusRealTime(machineId, options) {
   const shop = await Shop.findById(machineId).select('name store').lean();
 
   const allOrders = await OrderCustomProduct.find(orderFilter)
-    .select('orderId shopId status createdAt updatedAt items.tracking_info.tracking items.tracking_info.fulfillment items.tracking_info.status items.tracking_info.note items.tracking_info.updated_at customer.email total_amount')
+    .select('orderId shopId status createdAt updatedAt items.tracking_info.tracking items.tracking_info.carrier items.tracking_info.trackingReceivedAt items.tracking_info.fulfillment items.tracking_info.status items.tracking_info.note items.tracking_info.updated_at customer.email total_amount')
     .sort({ createdAt: -1 })
     .limit(Number(limit))
     .lean();
@@ -2103,6 +2153,7 @@ module.exports = {
   exportOrdersWithTracking,
   checkOrdersStatus,
   manualUploadTask,
+  approveTrackingReview,
   getUploadableBatches,
   createBatchFromOrders,
 };

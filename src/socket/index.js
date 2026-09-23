@@ -1,7 +1,49 @@
 // src/socket/index.js
 const presence = require("../lib/presence");
+const Shop = require("../models/shop.model");
 const taskStatusService = require("../service/taskStatus.service");
 const { upsertEtsyMessageThreads } = require("../service/etsyMessage.service");
+
+async function saveClientPresence({ shopId, machineId, label, version, status, touchLastSeen }) {
+  const now = new Date();
+  const update = {
+    "clients.$.label": label || "",
+    "clients.$.version": version || "",
+    "clients.$.status": status,
+  };
+  if (touchLastSeen) update["clients.$.lastSeen"] = now;
+  if (status === "online") update["clients.$.disconnectedAt"] = null;
+  if (status === "offline") update["clients.$.disconnectedAt"] = now;
+
+  const result = await Shop.updateOne(
+    { _id: shopId, "clients.clientId": machineId },
+    { $set: update }
+  );
+  if (result.matchedCount) return;
+
+  await Shop.updateOne(
+    { _id: shopId },
+    {
+      $push: {
+        clients: {
+          clientId: machineId,
+          label: label || "",
+          version: version || "",
+          status,
+          firstSeen: now,
+          lastSeen: now,
+          disconnectedAt: status === "offline" ? now : null,
+        },
+      },
+    }
+  );
+}
+
+function persistClientPresence(data) {
+  saveClientPresence(data).catch((error) =>
+    console.error("[SOCKET] Could not persist client presence:", error.message)
+  );
+}
 
 module.exports = function registerSocketHandlers({ app, io }) {
   app.set("io", io);
@@ -52,6 +94,7 @@ module.exports = function registerSocketHandlers({ app, io }) {
       ua,
       ip,
     });
+    persistClientPresence({ shopId, machineId, label, version, status: "online", touchLastSeen: true });
 
     io.to(`shop:${shopId}`).emit("presence:update", {
       kind: "online",
@@ -85,6 +128,14 @@ module.exports = function registerSocketHandlers({ app, io }) {
           version: p.version,
           ua: p.ua,
           ip: p.ip,
+        });
+        persistClientPresence({
+          shopId,
+          machineId,
+          label: p.label || label,
+          version: p.version || version,
+          status: "online",
+          touchLastSeen: true,
         });
         io.to(`shop:${shopId}`).emit("presence:update", {
           kind: "heartbeat",
@@ -183,7 +234,7 @@ module.exports = function registerSocketHandlers({ app, io }) {
         });
 
         console.log(
-          `📨 [SOCKET] client:task ${payload.status} taskId=${payload.taskId} eventId=${payload.eventId} deduped=${result.deduped}`
+          `📨 [TASK_REPLY] status=${payload.status} taskId=${payload.taskId} machineId=${machineId} deduped=${result.deduped}${payload.error ? ` error=${String(payload.error).slice(0, 200)}` : ""}`
         );
 
         // Broadcast cho monitor dashboard
@@ -391,7 +442,10 @@ module.exports = function registerSocketHandlers({ app, io }) {
 
     // OFFLINE
     socket.on("disconnect", (reason) => {
-      presence.offline(machineId);
+      const currentClient = presence.getByMachine(machineId);
+      if (currentClient?.socketId !== socket.id) return;
+      presence.offline(machineId, socket.id);
+      persistClientPresence({ shopId, machineId, label, version, status: "offline", touchLastSeen: false });
       io.to(`shop:${shopId}`).emit("presence:update", {
         kind: "offline",
         at: Date.now(),

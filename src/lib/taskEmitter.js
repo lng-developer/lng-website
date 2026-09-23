@@ -92,6 +92,7 @@ async function emitTaskToMachine(io, { taskId, type, shopId, machineId, payload 
   }
 
   io.to(`machine:${machineId}`).emit("server:task", taskMessage);
+  console.info(`[TASK_EMIT] sent taskId=${finalTaskId} type=${type} shopId=${shopId || "-"} machineId=${machineId}`);
   return taskMessage;
 }
 

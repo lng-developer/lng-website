@@ -15,6 +15,14 @@ const autoConfigSchema = new mongoose.Schema(
       type: Number, // phút
       required: true,
     },
+    scheduleHours: {
+      type: [Number],
+      default: [],
+      validate: {
+        validator: (hours) => Array.isArray(hours) && new Set(hours).size === hours.length && hours.every((hour) => Number.isInteger(hour) && hour >= 0 && hour <= 23),
+        message: "scheduleHours must contain unique whole hours from 0 to 23",
+      },
+    },
     shopId: {
       type: String,
       required: true,
@@ -31,6 +39,12 @@ const autoConfigSchema = new mongoose.Schema(
       type: String,
       default: "",
     },
+    nextRunAt: { type: Date, default: null },
+    lastDispatchedAt: { type: Date, default: null },
+    lastTaskId: { type: String, default: "" },
+    lastTaskStatus: { type: String, default: "" },
+    lastTaskFinishedAt: { type: Date, default: null },
+    lastTaskError: { type: String, default: "" },
   },
   { timestamps: { createdAt: "created_at", updatedAt: "updated_at" } }
 );

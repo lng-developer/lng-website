@@ -15,6 +15,9 @@ const CompletedItemSchema = new mongoose.Schema(
   {
     orderId: { type: String, required: true },
     tracking: { type: String, required: true },
+    carrier: { type: String, default: "" },
+    trackingReceivedAt: { type: Date, default: null },
+    shipDate: { type: String, default: "" },
 
     isFake: { type: Boolean, default: false },
     source: {
@@ -36,6 +39,16 @@ const StatsSchema = new mongoose.Schema(
     totalOrders: { type: Number, default: 0 },
     totalFake: { type: Number, default: 0 },
     totalReal: { type: Number, default: 0 },
+  },
+  { _id: false }
+);
+
+const TrackingReviewSchema = new mongoose.Schema(
+  {
+    approvedAt: { type: Date },
+    shipDate: { type: String },
+    confirmedSingleShipment: { type: Boolean, default: false },
+    confirmedNoTransparency: { type: Boolean, default: false },
   },
   { _id: false }
 );
@@ -65,6 +78,9 @@ const ShippingBatchSchema = new mongoose.Schema(
     tracking_fakes: [FakeItemSchema],
 
     stats: { type: StatsSchema, default: () => ({}) },
+
+    // Shipping confirmations require an explicit human review before dispatch.
+    review: { type: TrackingReviewSchema, default: () => ({}) },
 
     // ✅ Thêm field tracking upload task
     uploadTaskSent: { type: Boolean, default: false },

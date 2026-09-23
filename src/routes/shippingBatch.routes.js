@@ -42,24 +42,34 @@ router.post(
 // ✅ Route mới: Kiểm tra trạng thái orders
 router.get(
   "/check-orders-status",
+  authenticateToken,
   shippingBatchController.checkOrdersStatus
 );
 
 // ✅ Route mới: FE gửi task UPLOAD_TRACKING thủ công
 router.post(
   "/manual-upload-task",
+  authenticateToken,
   shippingBatchController.manualUploadTask
+);
+
+router.post(
+  "/:batchId/review",
+  authenticateToken,
+  shippingBatchController.approveTrackingReview
 );
 
 // ✅ Route mới: FE lấy danh sách batch có thể upload
 router.get(
   "/uploadable",
+  authenticateToken,
   shippingBatchController.getUploadableBatches
 );
 
 // ✅ Route mới: FE tạo batch từ danh sách orders
 router.post(
   "/create-from-orders",
+  authenticateToken,
   shippingBatchController.createBatchFromOrders
 );
 

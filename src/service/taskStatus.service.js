@@ -1,5 +1,6 @@
 const TaskStatusEvent = require("../models/taskStatusEvent.model");
 const ExtensionTask = require("../models/extensionTask.model");
+const AutoConfig = require("../models/autoConfig.model");
 
 async function upsertByEventId(payload) {
   const now = new Date();
@@ -65,6 +66,14 @@ async function upsertByEventId(payload) {
     }
     if (Object.keys(update.$set).length > 0) {
       await ExtensionTask.updateOne({ taskId: payload.taskId }, update);
+      const task = await ExtensionTask.findOne({ taskId: payload.taskId }).lean();
+      const configId = task?.payload?.autoConfigId;
+      if (configId) {
+        const configUpdate = { lastTaskStatus: payload.status };
+        if (payload.status === "completed" || payload.status === "failed") configUpdate.lastTaskFinishedAt = now;
+        if (payload.status === "failed") configUpdate.lastTaskError = String(payload.error || "Task failed");
+        await AutoConfig.updateOne({ _id: configId }, { $set: configUpdate });
+      }
     }
   } catch (e) {
     console.error("[TASK_STATUS] sync ExtensionTask failed:", e.message);

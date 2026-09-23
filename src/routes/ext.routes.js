@@ -2,6 +2,7 @@
 const express = require("express");
 const router = express.Router();
 const { extController } = require("../controllers");
+const { authenticateToken } = require("../middlewares/auth.middleware");
 const multer = require("multer");
 const upload = multer({ storage: multer.memoryStorage() });
 
@@ -15,6 +16,9 @@ router.post("/pull-all", extController.pullAllOrder);
 
 // List client online
 router.get("/online", extController.getClientOnline);
+
+// Lifecycle an toàn của task: không trả payload/raw extension logs.
+router.get("/tasks/:taskId", authenticateToken, extController.getExtensionTask);
 
 // ================= TWO-WAY COMMUNICATION =================
 
