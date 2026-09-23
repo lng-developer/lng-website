@@ -74,16 +74,6 @@ async function mapSellersBySku(skus) {
 
 // ... các import/helper khác như cũ (utcDay, detectDelimiter, norm, toNum, mapSellersBySku, AdsDailySummary)
 
-// Theo yêu cầu nghiệp vụ: mọi ads không match được SKU/employee_id đều
-// thuộc Nguyễn Huy Hoàng (anh ấy phụ trách toàn bộ campaign generic).
-// CẢNH BÁO: nếu sau này có user khác chưa cấu hình employee_id, ads của họ
-// cũng sẽ bị fallback về Hoàng → cần đảm bảo mọi user đều có employee_id.
-const FALLBACK_USER_ID_RAW = "68b93ed3f02eed8dec002ee3";
-const FALLBACK_USER_ID = Types.ObjectId.isValid(FALLBACK_USER_ID_RAW)
-  ? new Types.ObjectId(FALLBACK_USER_ID_RAW)
-  : FALLBACK_USER_ID_RAW;
-const FALLBACK_USER_NAME = "Nguyễn Huy Hoàng";
-
 const importAdsForDay = async (req, res) => {
   try {
     // ===== Validate =====
@@ -122,6 +112,20 @@ const importAdsForDay = async (req, res) => {
     }).map(norm);
     if (!rows.length) return res.json({ message: "Empty file", upserts: 0 });
 
+    const spendRows = rows.filter(
+      (row) => toNum(row.Spend) > 0 && String(row.Campaigns || "").trim()
+    );
+    if (!spendRows.length) {
+      return res.json({
+        ok: true,
+        dryRun,
+        skipped: true,
+        message: "No positive-spend rows; existing Ads data was not changed.",
+        day: dayUTC,
+        shopId: shopIdStr,
+      });
+    }
+
     // ===== Map SKU -> Seller (ở đây bạn đang dùng cột Campaigns như "SKU/Key")=====
     const now = new Date();
     const skuMappingConfigs = await SkuMappingConfig.find({
@@ -131,49 +135,39 @@ const importAdsForDay = async (req, res) => {
         { $or: [{ valid_to: null }, { valid_to: { $gte: now } }] },
       ],
     }).sort({ priority: 1, updatedAt: -1 }).lean();
-    const allSkusOrNames = rows
+    const allSkusOrNames = spendRows
       .map((r) => resolveMappedSku(r.Campaigns, skuMappingConfigs))
       .filter(Boolean);
     const sellerMap = await mapSellersBySku(allSkusOrNames);
 
-    // ===== Tính spend theo seller cho SHOP hiện tại (thêm fallback) =====
+    // ===== Tính spend theo seller cho SHOP hiện tại =====
     // perSeller: sellerId -> { seller: {_id, full_name}, spend }
     const perSeller = new Map();
-    let unmatchedCount = 0;
     const dryRunRows = [];
+    const unmappedRows = [];
 
-    for (const r of rows) {
+    for (const r of spendRows) {
       const campName = (r.Campaigns || "").trim();
-      if (!campName) continue;
-
-      // Thử map theo “SKU/Key” bạn đang dùng
       const mappedSku = resolveMappedSku(campName, skuMappingConfigs);
       const mappedSeller = sellerMap.getBySku(mappedSku);
-      let sellerId, sellerName;
-
-      if (mappedSeller?._id) {
-        sellerId = String(mappedSeller._id);
-        sellerName = mappedSeller.full_name || "Unknown";
-      } else {
-        // Không map được -> kiểm tra có phải campaign generic không (không bắt buộc)
-        // Dù có match hay không, yêu cầu của bạn là "không lọc được ra seller" -> gán fallback
-        sellerId = String(FALLBACK_USER_ID);
-        sellerName = FALLBACK_USER_NAME;
-        unmatchedCount++;
-      }
-
       const spend = toNum(r.Spend);
-      if (dryRun && spend > 0) {
-        dryRunRows.push({
-          campaignName: campName,
-          mappedSku,
-          spend,
-          seller: mappedSeller
-            ? { id: String(mappedSeller._id), name: mappedSeller.full_name || "Unknown" }
-            : null,
-          status: mappedSeller ? "mapped" : "unmapped",
-        });
+      const rowResult = {
+        campaignName: campName,
+        mappedSku,
+        spend,
+        seller: mappedSeller
+          ? { id: String(mappedSeller._id), name: mappedSeller.full_name || "Unknown" }
+          : null,
+        status: mappedSeller ? "mapped" : "unmapped",
+      };
+      dryRunRows.push(rowResult);
+      if (!mappedSeller?._id) {
+        unmappedRows.push(rowResult);
+        continue;
       }
+
+      const sellerId = String(mappedSeller._id);
+      const sellerName = mappedSeller.full_name || "Unknown";
       if (!perSeller.has(sellerId)) {
         perSeller.set(sellerId, {
           seller: {
@@ -198,6 +192,16 @@ const importAdsForDay = async (req, res) => {
         totalSpend: +dryRunRows.reduce((total, row) => total + row.spend, 0).toFixed(2),
         mappedRows: dryRunRows.filter((row) => row.status === "mapped"),
         unmappedRows: dryRunRows.filter((row) => row.status === "unmapped"),
+      });
+    }
+
+    if (unmappedRows.length) {
+      return res.status(422).json({
+        ok: false,
+        message: "Ads import blocked: positive-spend campaigns are missing seller mapping.",
+        day: dayUTC,
+        shopId: shopIdStr,
+        unmappedRows,
       });
     }
 
@@ -285,13 +289,13 @@ const importAdsForDay = async (req, res) => {
     );
 
     return res.json({
-      message: "Ads imported (merged by shopId with overwrite + fallback boss)",
+      message: "Ads imported (merged by shopId)",
       day: dayUTC,
       sellersAffected: perSeller.size,
       total_spend,
       shopId: shopIdStr,
-      fallbackAssignedRows: unmatchedCount, // cho bạn biết có bao nhiêu dòng gán về boss
-      fallbackUserId: FALLBACK_USER_ID_RAW,
+      importedRows: spendRows.length,
+      skippedZeroSpendRows: rows.length - spendRows.length,
     });
   } catch (e) {
     console.error(e);
