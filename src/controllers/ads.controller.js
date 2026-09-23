@@ -91,6 +91,7 @@ const importAdsForDay = async (req, res) => {
       return res.status(400).json({ message: "Send form-data 'file'." });
 
     const { day, shopId } = req.body;
+    const dryRun = String(req.body?.dryRun || "").toLowerCase() === "true";
     if (!day)
       return res.status(400).json({ message: "form-data 'day' is required." });
     if (!shopId)
@@ -139,13 +140,15 @@ const importAdsForDay = async (req, res) => {
     // perSeller: sellerId -> { seller: {_id, full_name}, spend }
     const perSeller = new Map();
     let unmatchedCount = 0;
+    const dryRunRows = [];
 
     for (const r of rows) {
       const campName = (r.Campaigns || "").trim();
       if (!campName) continue;
 
       // Thử map theo “SKU/Key” bạn đang dùng
-      const mappedSeller = sellerMap.getBySku(resolveMappedSku(campName, skuMappingConfigs));
+      const mappedSku = resolveMappedSku(campName, skuMappingConfigs);
+      const mappedSeller = sellerMap.getBySku(mappedSku);
       let sellerId, sellerName;
 
       if (mappedSeller?._id) {
@@ -160,6 +163,17 @@ const importAdsForDay = async (req, res) => {
       }
 
       const spend = toNum(r.Spend);
+      if (dryRun && spend > 0) {
+        dryRunRows.push({
+          campaignName: campName,
+          mappedSku,
+          spend,
+          seller: mappedSeller
+            ? { id: String(mappedSeller._id), name: mappedSeller.full_name || "Unknown" }
+            : null,
+          status: mappedSeller ? "mapped" : "unmapped",
+        });
+      }
       if (!perSeller.has(sellerId)) {
         perSeller.set(sellerId, {
           seller: {
@@ -172,6 +186,19 @@ const importAdsForDay = async (req, res) => {
         });
       }
       perSeller.get(sellerId).spend += spend;
+    }
+
+    if (dryRun) {
+      return res.json({
+        ok: true,
+        dryRun: true,
+        day: dayUTC,
+        shopId: shopIdStr,
+        rowsWithSpend: dryRunRows.length,
+        totalSpend: +dryRunRows.reduce((total, row) => total + row.spend, 0).toFixed(2),
+        mappedRows: dryRunRows.filter((row) => row.status === "mapped"),
+        unmappedRows: dryRunRows.filter((row) => row.status === "unmapped"),
+      });
     }
 
     if (!perSeller.size) {
