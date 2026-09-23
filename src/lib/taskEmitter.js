@@ -32,7 +32,7 @@ function buildTaskId({ type, shopId, machineId, payload }) {
       key = safeKey(payload?.date || todayStr());
       break;
     case "IMPORT_ADS_SPEND":
-      key = safeKey(payload?.date || todayStr());
+      key = safeKey(payload?.runKey || [payload?.startDate, payload?.endDate].filter(Boolean).join("_") || payload?.date || todayStr());
       break;
     case "SYNC_ETSY_LISTINGS":
     case "ETSY_SYNC_LISTINGS":

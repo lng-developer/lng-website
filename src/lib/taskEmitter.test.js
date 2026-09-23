@@ -89,6 +89,17 @@ describe("taskEmitter", () => {
       expect(buildTaskId(input)).toBe(buildTaskId(input));
     });
 
+    test("IMPORT_ADS_SPEND keeps separate scheduled runs for the same data day", () => {
+      const common = {
+        type: "IMPORT_ADS_SPEND",
+        shopId: "shop-1",
+        payload: { startDate: "2026-09-22", endDate: "2026-09-22" },
+      };
+
+      expect(buildTaskId({ ...common, payload: { ...common.payload, runKey: "2026-09-23T03:30:00.000Z" } }))
+        .not.toBe(buildTaskId({ ...common, payload: { ...common.payload, runKey: "2026-09-23T11:30:00.000Z" } }));
+    });
+
     test("unknown type uses timestamp key and is not idempotent", () => {
       jest.spyOn(Date, "now")
         .mockReturnValueOnce(1779300000000)
