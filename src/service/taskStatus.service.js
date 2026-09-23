@@ -2,6 +2,19 @@ const TaskStatusEvent = require("../models/taskStatusEvent.model");
 const ExtensionTask = require("../models/extensionTask.model");
 const AutoConfig = require("../models/autoConfig.model");
 
+function compactAdsResult(result) {
+  if (!result || typeof result !== "object" || !Array.isArray(result.days) || result.days.length > 31) return undefined;
+  const days = result.days.map((item) => ({
+    day: typeof item?.day === "string" ? item.day.slice(0, 10) : null,
+    importedRows: Number.isFinite(item?.importedRows) ? item.importedRows : 0,
+    sellersAffected: Number.isFinite(item?.sellersAffected) ? item.sellersAffected : 0,
+    shopSpend: Number.isFinite(item?.shopSpend) ? item.shopSpend : 0,
+    skipped: item?.skipped === true,
+    message: typeof item?.message === "string" ? item.message.slice(0, 240) : "",
+  }));
+  return { startDate: String(result.startDate || "").slice(0, 10), endDate: String(result.endDate || "").slice(0, 10), days };
+}
+
 async function upsertByEventId(payload) {
   const now = new Date();
   if (!payload || !payload.eventId) {
@@ -14,6 +27,7 @@ async function upsertByEventId(payload) {
     throw new Error("status is required");
   }
 
+  const result = payload.type === "IMPORT_ADS_SPEND" ? compactAdsResult(payload.result) : undefined;
   let deduped = false;
   let doc;
 
@@ -25,7 +39,7 @@ async function upsertByEventId(payload) {
       status: payload.status,
       shopId: payload.shopId,
       machineId: payload.machineId,
-      result: payload.result,
+      result,
       error: payload.error,
       source: payload.source || "unknown",
       reportedAt: payload.reportedAt ? new Date(payload.reportedAt) : now,
@@ -59,6 +73,7 @@ async function upsertByEventId(payload) {
     } else if (payload.status === "completed") {
       update.$set.status = "completed";
       update.$set.completedAt = now;
+      if (result) update.$set.result = result;
     } else if (payload.status === "failed") {
       update.$set.status = "failed";
       update.$set.completedAt = now;

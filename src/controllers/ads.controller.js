@@ -217,6 +217,7 @@ const importAdsForDay = async (req, res) => {
 
     // Làm tròn 2 số
     for (const v of perSeller.values()) v.spend = +v.spend.toFixed(2);
+    const shopSpend = +[...perSeller.values()].reduce((total, value) => total + value.spend, 0).toFixed(2);
 
     // ===== Lấy summary ngày (nếu có) =====
     const existed = await AdsDailySummary.findOne({ day: dayUTC }).lean();
@@ -293,6 +294,7 @@ const importAdsForDay = async (req, res) => {
       day: dayUTC,
       sellersAffected: perSeller.size,
       total_spend,
+      shopSpend,
       shopId: shopIdStr,
       importedRows: spendRows.length,
       skippedZeroSpendRows: rows.length - spendRows.length,

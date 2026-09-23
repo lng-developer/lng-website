@@ -72,7 +72,7 @@ const DEBUG = VENDOR_SYNC_DEBUG === "1";
 const getExtensionTask = async (req, res) => {
   try {
     const task = await ExtensionTask.findOne({ taskId: req.params.taskId })
-      .select("taskId type shopId machineId status sentAt ackedAt completedAt lastError resendCount lastResentAt createdAt updatedAt")
+      .select("taskId type shopId machineId status sentAt ackedAt completedAt result lastError resendCount lastResentAt createdAt updatedAt")
       .lean();
 
     if (!task) return res.status(404).json({ ok: false, message: "Không tìm thấy task" });

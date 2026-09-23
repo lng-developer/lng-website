@@ -16,6 +16,7 @@ const extensionTaskSchema = new mongoose.Schema(
     sentAt: { type: Date, default: Date.now },
     ackedAt: { type: Date },
     completedAt: { type: Date },
+    result: { type: mongoose.Schema.Types.Mixed },
     lastError: { type: mongoose.Schema.Types.Mixed },
     resendCount: { type: Number, default: 0 },
     lastResentAt: { type: Date },
