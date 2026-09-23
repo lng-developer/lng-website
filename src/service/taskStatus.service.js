@@ -82,7 +82,7 @@ async function upsertByEventId(payload) {
   return { deduped, doc };
 }
 
-async function findPendingTasks({ shopId, machineId, statuses }) {
+async function findPendingTasks({ shopId, machineId, statuses, sentAfter }) {
   const q = {
     machineId,
     status: {
@@ -90,6 +90,7 @@ async function findPendingTasks({ shopId, machineId, statuses }) {
     },
   };
   if (shopId) q.shopId = shopId;
+  if (sentAfter) q.sentAt = { $gte: sentAfter };
   return ExtensionTask.find(q).sort({ createdAt: 1 }).limit(200).lean();
 }
 

@@ -259,7 +259,8 @@ module.exports = function registerSocketHandlers({ app, io }) {
       }
     });
 
-    // client:pull_pending_tasks — Resend tasks chưa hoàn tất khi extension reconnect
+    // Only resend a fresh task that has not been acknowledged. A received task
+    // may already be executing, so replaying it on reconnect can duplicate work.
     socket.on("client:pull_pending_tasks", async (payload = {}, ack) => {
       try {
         const targetMachineId = payload.machineId || machineId;
@@ -268,7 +269,8 @@ module.exports = function registerSocketHandlers({ app, io }) {
         const pending = await taskStatusService.findPendingTasks({
           shopId: targetShopId,
           machineId: targetMachineId,
-          statuses: ["sent", "received"],
+          statuses: ["sent"],
+          sentAfter: new Date(Date.now() - 5 * 60 * 1000),
         });
 
         for (const t of pending) {
