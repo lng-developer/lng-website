@@ -134,6 +134,7 @@ describe("portal critical routes require authenticateToken", () => {
   test("shipping batch portal actions are authenticated", () => {
     const router = require("../shippingBatch.routes");
     [
+      ["get", "/"],
       ["post", "/"],
       ["post", "/:batchId/update-from-system"],
       ["post", "/export-orders-with-tracking"],

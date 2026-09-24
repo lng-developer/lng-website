@@ -15,7 +15,7 @@ router.post(
   upload.single("file"),
   shippingBatchController.createBatchFromFile
 );
-router.get("/", shippingBatchController.listShippingBatches);
+router.get("/", authenticateToken, shippingBatchController.listShippingBatches);
 router.post(
   "/:batchId/update-from-system",
   authenticateToken,
