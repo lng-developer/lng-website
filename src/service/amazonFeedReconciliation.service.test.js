@@ -37,6 +37,17 @@ describe("reconcileAmazonFeed", () => {
     expect(result.terminal).toBe(true);
   });
 
+  test("records a submission failure before Amazon assigns a Batch ID", () => {
+    const result = reconcileAmazonFeed({
+      current: {},
+      expectedRows: 1,
+      event: { status: "failed", failureReason: "Seller Central session expired" },
+    });
+
+    expect(result.next.status).toBe("failed");
+    expect(result.next.amazonBatchId).toBeUndefined();
+  });
+
   test("requires review when Done cannot reconcile all submitted rows", () => {
     const result = reconcileAmazonFeed({
       current: {},

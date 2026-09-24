@@ -20,7 +20,7 @@ function reconcileAmazonFeed({ current = {}, expectedRows, event = {}, now = new
   }
 
   const amazonBatchId = String(event.amazonBatchId || current.amazonBatchId || "").trim();
-  if (!amazonBatchId && status !== "submitted") {
+  if (!amazonBatchId && status !== "submitted" && status !== "failed") {
     return { accepted: false, terminal: false, reason: "AMAZON_BATCH_ID_REQUIRED", next: current };
   }
   if (current.amazonBatchId && amazonBatchId && current.amazonBatchId !== amazonBatchId) {
