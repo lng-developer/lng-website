@@ -1129,6 +1129,9 @@ const checkOrdersStatus = async (req, res, next) => {
       vendor,
       carrier,
       carrierHandoff = "all",
+      shipBy = "all",
+      shipByFrom,
+      shipByTo,
       page = 1,
       status = ACTIVE_TRACKING_ORDER_STATUSES,
     } = req.query;
@@ -1138,7 +1141,7 @@ const checkOrdersStatus = async (req, res, next) => {
     }
 
     const result = await checkOrdersStatusRealTime(machineId, {
-      limit, page, fromDate, toDate, search, tracking, amazon, vendor, carrier, carrierHandoff, status,
+      limit, page, fromDate, toDate, search, tracking, amazon, vendor, carrier, carrierHandoff, shipBy, shipByFrom, shipByTo, status,
     });
 
     return res.json(result);
@@ -2007,7 +2010,7 @@ function validTrackingMatcher() {
   return { $regex: "^(?!-+$).*\\S" };
 }
 
-function buildCheckOrdersQuery(machineId, { status, fromDate, toDate, search, tracking, vendor, carrier, carrierHandoff } = {}) {
+function buildCheckOrdersQuery(machineId, { status, fromDate, toDate, search, tracking, vendor, carrier, carrierHandoff, shipBy, shipByFrom, shipByTo } = {}) {
   const requestedStatuses = Array.isArray(status)
     ? status
     : String(status || "").split(",");
@@ -2042,6 +2045,18 @@ function buildCheckOrdersQuery(machineId, { status, fromDate, toDate, search, tr
   if (carrierHandoff === "no") itemFilter["tracking_info.actualShipAt"] = null;
   if (tracking === "yes") {
     itemFilter["tracking_info.tracking"] = validTrackingMatcher();
+  }
+
+  const shipByStart = parseYmd(shipByFrom);
+  const shipByEnd = parseYmd(shipByTo, true);
+  if (shipBy === "missing") {
+    orderFilter.shipByDate = null;
+  } else if (shipBy === "overdue" && shipByStart) {
+    orderFilter.shipByDate = { $lt: shipByStart };
+  } else if (shipByStart || shipByEnd) {
+    orderFilter.shipByDate = {};
+    if (shipByStart) orderFilter.shipByDate.$gte = shipByStart;
+    if (shipByEnd) orderFilter.shipByDate.$lt = shipByEnd;
   }
   if (Object.keys(itemFilter).length) {
     orderFilter.items = { $elemMatch: itemFilter };
@@ -2198,14 +2213,14 @@ const _calcStats = (orders, filteredCount) => {
 // ─────────────────────────────────────────────────────────────────────────────
 
 async function checkOrdersStatusRealTime(machineId, options) {
-  const { limit, page, fromDate, toDate, search, tracking, amazon, vendor, carrier, carrierHandoff, status } = options;
+  const { limit, page, fromDate, toDate, search, tracking, amazon, vendor, carrier, carrierHandoff, shipBy, shipByFrom, shipByTo, status } = options;
 
   console.log(`⚡ [REAL_TIME] Using real-time query for shop: ${machineId}`);
 
   const safeLimit = Math.min(Math.max(Math.floor(Number(limit)) || 20, 1), CHECK_ORDERS_MAX_LIMIT);
   const safePage = Math.max(Math.floor(Number(page)) || 1, 1);
   const baseOrderFilter = buildCheckOrdersQuery(machineId, { status, fromDate, toDate, search, tracking: "all" });
-  const orderFilter = buildCheckOrdersQuery(machineId, { status, fromDate, toDate, search, tracking, vendor, carrier, carrierHandoff });
+  const orderFilter = buildCheckOrdersQuery(machineId, { status, fromDate, toDate, search, tracking, vendor, carrier, carrierHandoff, shipBy, shipByFrom, shipByTo });
 
   if (amazon === "yes" || amazon === "no") {
     const successfulTasks = await ExtensionTask.find({
@@ -2260,7 +2275,7 @@ async function checkOrdersStatusRealTime(machineId, options) {
       pageSize: safeLimit,
       filterOptions,
       dataSource: 'real-time',
-      filter: { machineId, limit: safeLimit, page: safePage, fromDate, toDate, search, tracking, amazon, vendor, carrier, carrierHandoff, status },
+      filter: { machineId, limit: safeLimit, page: safePage, fromDate, toDate, search, tracking, amazon, vendor, carrier, carrierHandoff, shipBy, shipByFrom, shipByTo, status },
     };
   }
 
@@ -2300,7 +2315,7 @@ async function checkOrdersStatusRealTime(machineId, options) {
       totalWithoutTracking: Math.max(totalScanned - totalWithTracking, 0),
     },
     dataSource: 'real-time',
-    filter: { machineId, limit: safeLimit, page: safePage, fromDate, toDate, search, tracking, amazon, vendor, carrier, carrierHandoff, status },
+    filter: { machineId, limit: safeLimit, page: safePage, fromDate, toDate, search, tracking, amazon, vendor, carrier, carrierHandoff, shipBy, shipByFrom, shipByTo, status },
   };
 }
 
