@@ -3,6 +3,7 @@ const ShippingBatch = db.ShippingBatch;
 const OrderCustomProduct = db.orderCustomProduct;
 const Shop = db.shop;
 const ExtensionTask = db.ExtensionTask;
+const RealtimeLog = db.RealtimeLog;
 const { emitTaskToMachine, buildTaskId } = require("../lib/taskEmitter");
 
 async function getRealTrackingForOrder(orderId) {
