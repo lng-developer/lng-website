@@ -108,6 +108,8 @@ const itemTrackingSchema = new mongoose.Schema(
     tracking: { type: String, trim: true, default: "" }, // mã tracking
     carrier: { type: String, trim: true, default: "" }, // carrier returned by the fulfillment provider
     trackingReceivedAt: { type: Date, default: null }, // first time this system received a real tracking number
+    actualShipAt: { type: Date, default: null }, // first carrier-confirmed handoff timestamp
+    shipEvidence: { type: Object, default: null },
     status: {
       type: String,
       enum: ["New", "Fulfilled", "Shipping", "Shipped", "Canceled", "Cancelled"], // Cancelled = legacy

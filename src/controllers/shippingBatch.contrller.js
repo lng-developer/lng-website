@@ -1770,7 +1770,7 @@ const createBatchFromOrders = async (req, res, next) => {
               tracking: shipment.tracking,
               carrier: shipment.trackingInfo?.carrier || "",
               trackingReceivedAt: shipment.trackingInfo?.trackingReceivedAt || null,
-              shipDate: shipment.trackingInfo?.trackingReceivedAt ? amazonUsDate(shipment.trackingInfo.trackingReceivedAt) : "",
+              shipDate: shipment.trackingInfo?.actualShipAt ? amazonUsDate(shipment.trackingInfo.actualShipAt) : "",
               isFake: false,
               source: "system",
               createdAt: new Date()
@@ -2063,6 +2063,8 @@ function getOrderShipmentSnapshot(order = {}) {
       carrier: carrierFromTrackingInfo(item?.tracking_info),
       fulfillment: item?.tracking_info?.fulfillment || "",
       trackingReceivedAt: item?.tracking_info?.trackingReceivedAt || null,
+      actualShipAt: item?.tracking_info?.actualShipAt || null,
+      shipEvidence: item?.tracking_info?.shipEvidence || null,
       updatedAt: item?.tracking_info?.updated_at || null,
     });
   }
@@ -2078,9 +2080,11 @@ function getOrderShipmentSnapshot(order = {}) {
       ? "MISSING_TRACKING"
       : !trackingItem.carrier
         ? "MISSING_CARRIER"
-      : isSplitShipment
-        ? "SPLIT_SHIPMENT"
-        : "";
+        : isSplitShipment
+          ? "SPLIT_SHIPMENT"
+          : !trackingItem.actualShipAt
+            ? "MISSING_ACTUAL_SHIP_DATE"
+            : "";
   return {
     hasTracking: !!trackingItem,
     tracking: trackingItem?.tracking || "",
@@ -2090,6 +2094,8 @@ function getOrderShipmentSnapshot(order = {}) {
       status: "",
       carrier: trackingItem.carrier,
       trackingReceivedAt: trackingItem.trackingReceivedAt,
+      actualShipAt: trackingItem.actualShipAt,
+      shipEvidence: trackingItem.shipEvidence,
       updated_at: trackingItem.updatedAt,
     } : null,
     items,
@@ -2198,7 +2204,7 @@ async function checkOrdersStatusRealTime(machineId, options) {
 
   const [allOrders, totalCount, totalScanned, totalWithTracking] = await Promise.all([
     OrderCustomProduct.find(orderFilter)
-    .select('orderId shopId status createdAt updatedAt shipByDate earliestShipDate buyerRequestedCancellation buyerRequestedCancelReason items.orderItemId items.quantity items.tracking_info.tracking items.tracking_info.carrier items.tracking_info.trackingReceivedAt items.tracking_info.fulfillment items.tracking_info.status items.tracking_info.note items.tracking_info.updated_at customer.email total_amount')
+    .select('orderId shopId status createdAt updatedAt shipByDate earliestShipDate buyerRequestedCancellation buyerRequestedCancelReason items.orderItemId items.quantity items.tracking_info.tracking items.tracking_info.carrier items.tracking_info.trackingReceivedAt items.tracking_info.actualShipAt items.tracking_info.shipEvidence items.tracking_info.fulfillment items.tracking_info.status items.tracking_info.note items.tracking_info.updated_at customer.email total_amount')
     .sort({ createdAt: -1 })
     .skip((safePage - 1) * safeLimit)
     .limit(safeLimit)

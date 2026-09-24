@@ -4996,13 +4996,13 @@ const updateScaleOrder = async (req, res) => {
 
 /**
  * POST /update-tracking
- * Body: { orderId: string, tracking: string, carrier?: string, fulfillment?: string }
+ * Body: { orderId: string, tracking: string, carrier?: string, fulfillment?: string, actualShipAt?: ISO, shipEvidence?: object }
  * Tìm order theo orderId → duyệt tất cả items → cập nhật tracking_info.tracking
  * Nếu tracking có giá trị → tự động set status = "Shipped"
  */
 const updateTrackingByOrderId = async (req, res) => {
   try {
-    const { orderId, tracking, carrier, fulfillment } = req.body;
+    const { orderId, tracking, carrier, fulfillment, actualShipAt, shipEvidence } = req.body;
 
     if (!orderId) {
       return res.status(400).json({ message: "orderId is required" });
@@ -5014,6 +5014,14 @@ const updateTrackingByOrderId = async (req, res) => {
     const tTracking = String(tracking).trim();
     const tCarrier = normalizeTrackingCallbackField(carrier, "carrier");
     const tFulfillment = normalizeTrackingCallbackField(fulfillment, "fulfillment");
+    const tActualShipAt = normalizeActualShipAt(actualShipAt);
+    if (actualShipAt !== undefined && !tActualShipAt) {
+      return res.status(400).json({ message: "actualShipAt must be a valid ISO date" });
+    }
+    const tShipEvidence = normalizeShipEvidence(shipEvidence);
+    if (shipEvidence !== undefined && !tShipEvidence) {
+      return res.status(400).json({ message: "shipEvidence must be an object" });
+    }
 
     // Nếu có tracking → auto set status Shipped
     const nextItemStatus = tTracking.length > 0 ? "Shipped" : undefined;
@@ -5032,6 +5040,10 @@ const updateTrackingByOrderId = async (req, res) => {
       if (nextItemStatus) trackingInfo.status = nextItemStatus;
       if (tCarrier) trackingInfo.carrier = tCarrier;
       if (tFulfillment) trackingInfo.fulfillment = tFulfillment;
+      if (tActualShipAt && !trackingInfo.actualShipAt) {
+        trackingInfo.actualShipAt = tActualShipAt;
+        trackingInfo.shipEvidence = tShipEvidence || null;
+      }
       if (tTracking && !trackingInfo.trackingReceivedAt) {
         trackingInfo.trackingReceivedAt = now;
       }
@@ -5440,8 +5452,20 @@ module.exports = {
   updateTrackingByOrderId,
   applyManualVendorMapping,
   updateOrderItemQuantity,
-  _test: { parseAmazonReportDate, amazonOrderMetadataFromRow, normalizeTrackingCallbackField }
+  _test: { parseAmazonReportDate, amazonOrderMetadataFromRow, normalizeTrackingCallbackField, normalizeActualShipAt }
 };
+
+function normalizeActualShipAt(value) {
+  if (value === undefined || value === null || value === "") return null;
+  if (typeof value !== "string") return null;
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? null : date;
+}
+
+function normalizeShipEvidence(value) {
+  if (value === undefined || value === null) return null;
+  return typeof value === "object" && !Array.isArray(value) ? value : null;
+}
 
 function normalizeTrackingCallbackField(value, field) {
   if (value === undefined || value === null) return "";
