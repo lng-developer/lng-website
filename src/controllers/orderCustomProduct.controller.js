@@ -816,6 +816,21 @@ const num = (v) => {
 
 const round2 = (v) => Number(num(v).toFixed(2));
 
+function parseAmazonReportDate(value) {
+  const date = new Date(String(value || "").trim());
+  return Number.isNaN(date.getTime()) ? null : date;
+}
+
+function amazonOrderMetadataFromRow(row = {}) {
+  return {
+    shipByDate: parseAmazonReportDate(row.latest_ship_date),
+    earliestShipDate: parseAmazonReportDate(row.earliest_ship_date),
+    buyerRequestedCancellation: String(row.is_buyer_requested_cancellation || "").trim().toLowerCase() === "true",
+    buyerRequestedCancelReason: String(row.buyer_requested_cancel_reason || "").trim(),
+    amazonOrderReportUpdatedAt: new Date(),
+  };
+}
+
 const updateOrdersFromXlsx = async (req, res) => {
   try {
     const filePath = req.file.path;
@@ -1152,6 +1167,7 @@ const updateOrdersFromXlsx = async (req, res) => {
         orderId,
         shopId: bodyShopId, // mặc định gán theo body khi tạo mới
         purchase_date: row.purchase_date,
+        ...amazonOrderMetadataFromRow(row),
         customer_infor: {
           email: row.buyer_email,
           name: row.recipient_name,
@@ -1187,6 +1203,12 @@ const updateOrdersFromXlsx = async (req, res) => {
       let skipProcessingZip = false;
 
       if (existing) {
+        const amazonMetadata = amazonOrderMetadataFromRow(row);
+        existing.shipByDate = amazonMetadata.shipByDate;
+        existing.earliestShipDate = amazonMetadata.earliestShipDate;
+        existing.buyerRequestedCancellation = amazonMetadata.buyerRequestedCancellation;
+        existing.buyerRequestedCancelReason = amazonMetadata.buyerRequestedCancelReason;
+        existing.amazonOrderReportUpdatedAt = amazonMetadata.amazonOrderReportUpdatedAt;
         if (normalizeImportedItemScaleStatuses(existing)) {
           await existing.save();
         }
@@ -1362,6 +1384,9 @@ const updateOrdersFromXlsx = async (req, res) => {
           ) {
             ordersToCompute.add(orderId);
           }
+
+          // The report can change Amazon's deadline/cancellation fields even when no item changes.
+          await existing.save();
         }
       } else {
         // NEW ORDER
@@ -4971,13 +4996,13 @@ const updateScaleOrder = async (req, res) => {
 
 /**
  * POST /update-tracking
- * Body: { orderId: string, tracking: string }
+ * Body: { orderId: string, tracking: string, carrier?: string, fulfillment?: string }
  * Tìm order theo orderId → duyệt tất cả items → cập nhật tracking_info.tracking
  * Nếu tracking có giá trị → tự động set status = "Shipped"
  */
 const updateTrackingByOrderId = async (req, res) => {
   try {
-    const { orderId, tracking } = req.body;
+    const { orderId, tracking, carrier, fulfillment } = req.body;
 
     if (!orderId) {
       return res.status(400).json({ message: "orderId is required" });
@@ -4987,38 +5012,39 @@ const updateTrackingByOrderId = async (req, res) => {
     }
 
     const tTracking = String(tracking).trim();
+    const tCarrier = normalizeTrackingCallbackField(carrier, "carrier");
+    const tFulfillment = normalizeTrackingCallbackField(fulfillment, "fulfillment");
 
     // Nếu có tracking → auto set status Shipped
     const nextItemStatus = tTracking.length > 0 ? "Shipped" : undefined;
 
-    const $set = {
-      "items.$[].tracking_info.tracking": tTracking,
-      "items.$[].tracking_info.updated_at": new Date(),
-    };
-
-    if (nextItemStatus) {
-      $set["items.$[].tracking_info.status"] = nextItemStatus;
-    }
-
-    const order = await OrderCustomProduct.findOneAndUpdate(
-      { orderId },
-      { $set },
-      { new: true }
-    );
+    const order = await OrderCustomProduct.findOne({ orderId });
 
     if (!order) {
       return res.status(404).json({ message: "Order not found" });
     }
 
+    const now = new Date();
+    for (const item of order.items || []) {
+      const trackingInfo = item.tracking_info || {};
+      trackingInfo.tracking = tTracking;
+      trackingInfo.updated_at = now;
+      if (nextItemStatus) trackingInfo.status = nextItemStatus;
+      if (tCarrier) trackingInfo.carrier = tCarrier;
+      if (tFulfillment) trackingInfo.fulfillment = tFulfillment;
+      if (tTracking && !trackingInfo.trackingReceivedAt) {
+        trackingInfo.trackingReceivedAt = now;
+      }
+      item.tracking_info = trackingInfo;
+    }
+    order.markModified("items");
+
     // Sync order-level status
     const newOrderStatus = computeOrderStatusFromItems(order.items);
     if (newOrderStatus !== order.status) {
-      await OrderCustomProduct.updateOne(
-        { _id: order._id },
-        { $set: { status: newOrderStatus } }
-      );
       order.status = newOrderStatus;
     }
+    await order.save();
 
     return res.json({
       message: "Tracking updated for all items",
@@ -5413,5 +5439,18 @@ module.exports = {
   validateInvalidAddressesBatch,
   updateTrackingByOrderId,
   applyManualVendorMapping,
-  updateOrderItemQuantity
+  updateOrderItemQuantity,
+  _test: { parseAmazonReportDate, amazonOrderMetadataFromRow, normalizeTrackingCallbackField }
 };
+
+function normalizeTrackingCallbackField(value, field) {
+  if (value === undefined || value === null) return "";
+  if (typeof value !== "string") {
+    throw new Error(`${field} must be a string`);
+  }
+  const normalized = value.trim();
+  if (normalized.length > 100) {
+    throw new Error(`${field} must be at most 100 characters`);
+  }
+  return normalized;
+}

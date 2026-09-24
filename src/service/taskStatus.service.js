@@ -15,6 +15,18 @@ function compactAdsResult(result) {
   return { startDate: String(result.startDate || "").slice(0, 10), endDate: String(result.endDate || "").slice(0, 10), days };
 }
 
+function compactUploadTrackingResult(result) {
+  const upload = result?.upload;
+  if (!upload || upload.ok !== true || !upload.batchId) return undefined;
+  return {
+    upload: {
+      ok: true,
+      batchId: String(upload.batchId),
+      ordersCount: Number.isSafeInteger(upload.ordersCount) ? upload.ordersCount : 0,
+    },
+  };
+}
+
 async function upsertByEventId(payload) {
   const now = new Date();
   if (!payload || !payload.eventId) {
@@ -27,7 +39,11 @@ async function upsertByEventId(payload) {
     throw new Error("status is required");
   }
 
-  const result = payload.type === "IMPORT_ADS_SPEND" ? compactAdsResult(payload.result) : undefined;
+  const result = payload.type === "IMPORT_ADS_SPEND"
+    ? compactAdsResult(payload.result)
+    : payload.type === "UPLOAD_TRACKING"
+      ? compactUploadTrackingResult(payload.result)
+      : undefined;
   let deduped = false;
   let doc;
 

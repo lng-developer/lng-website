@@ -1,7 +1,9 @@
 jest.mock("../models/autoConfig.model", () => ({ findById: jest.fn(), findByIdAndUpdate: jest.fn(), updateOne: jest.fn() }));
+jest.mock("../models/shop.model", () => ({ findOne: jest.fn() }));
 
 const AutoConfig = require("../models/autoConfig.model");
-const { nextFixedRunAt, nextRunAt, nextScheduledRun, taskForConfig, update } = require("./autoConfig.controller");
+const Shop = require("../models/shop.model");
+const { nextFixedRunAt, nextRunAt, nextScheduledRun, taskForConfig, update, runNow } = require("./autoConfig.controller");
 
 test("supports intervals longer than one hour", () => {
   expect(nextRunAt(240, new Date("2026-09-21T01:10:00.000Z")).toISOString())
@@ -65,4 +67,16 @@ test("allows Ads rules to replace legacy empty scheduleHours", async () => {
 
   expect(AutoConfig.findByIdAndUpdate).toHaveBeenCalledWith("cfg-ads", expect.objectContaining({ scheduleHours: [], adsScheduleRules: rules }), expect.any(Object));
   expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ success: true }));
+});
+
+test("does not dispatch a config for an inactive shop", async () => {
+  AutoConfig.findById.mockResolvedValue({ _id: "cfg-order", shopId: "inactive-shop", type: "IMPORT_ORDER" });
+  AutoConfig.updateOne.mockResolvedValue({ acknowledged: true });
+  Shop.findOne.mockReturnValue({ lean: jest.fn().mockResolvedValue(null) });
+  const res = { status: jest.fn(function status() { return this; }), json: jest.fn() };
+
+  await runNow({ params: { id: "cfg-order" }, body: {}, app: { get: jest.fn() } }, res);
+
+  expect(res.status).toHaveBeenCalledWith(409);
+  expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ status: "inactive-shop" }));
 });

@@ -234,6 +234,12 @@ const orderCustomProductSchema = new mongoose.Schema({
   base_cost_shipping_groups: [shippingGroupSchema], // shipping breakdown per vendor_product group
 
   purchase_date: { type: Date },
+  // Deadline supplied by Amazon's order report. This is Amazon/Pacific time, not a vendor timestamp.
+  shipByDate: { type: Date, default: null, index: true },
+  earliestShipDate: { type: Date, default: null },
+  buyerRequestedCancellation: { type: Boolean, default: false },
+  buyerRequestedCancelReason: { type: String, trim: true, default: "" },
+  amazonOrderReportUpdatedAt: { type: Date, default: null },
 
   shopId: {
     type: mongoose.Schema.Types.ObjectId,

@@ -185,7 +185,11 @@ app.use((err, _req, res, _next) => {
 const PORT = process.env.PORT || 5000;
 connectDB().then(() => {
   etsyVendorSyncScheduler.start();
-  startAutoScheduler(io);
+  if (process.env.AUTO_SCHEDULER_ENABLED !== "false") {
+    startAutoScheduler(io);
+  } else {
+    console.info("[AUTO_SCHEDULER] Disabled by AUTO_SCHEDULER_ENABLED=false");
+  }
   httpServer.listen(PORT, "0.0.0.0", () => {
     console.info(`API running at http://localhost:${PORT}`);
   });

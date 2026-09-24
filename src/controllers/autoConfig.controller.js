@@ -6,6 +6,15 @@ const { emitTaskToMachine, buildTaskId } = require("../lib/taskEmitter");
 // Map lưu các cron jobs đang chạy: configId → cron job
 const activeJobs = new Map();
 
+function isGlobalConfig(config) {
+  return String(config?.shopId || "").toLowerCase() === "all";
+}
+
+async function getActiveConfigShop(config) {
+  if (isGlobalConfig(config)) return null;
+  return Shop.findOne({ _id: config.shopId, status: "Active" }).lean();
+}
+
 /**
  * Khởi động scheduler tự động theo config PULL_TRACKING
  * Gọi hàm này 1 lần khi server start
@@ -18,7 +27,9 @@ async function startAutoScheduler(io) {
     console.log(`📋 [AUTO_SCHEDULER] Found ${configs.length} active config(s)`);
 
     for (const config of configs) {
-      scheduleJob(config, io);
+      if (isGlobalConfig(config) || await getActiveConfigShop(config)) {
+        scheduleJob(config, io);
+      }
     }
 
     console.log(`✅ [AUTO_SCHEDULER] Scheduler initialized with ${activeJobs.size} job(s)\n`);
@@ -154,13 +165,17 @@ function taskForConfig(config, now = new Date(), source = "auto_scheduler", sche
 }
 
 async function dispatchConfigTask(config, io, { source = "auto_scheduler", scheduleRule = null, manualRange = null } = {}) {
+  const shop = await getActiveConfigShop(config);
+  if (!isGlobalConfig(config) && !shop) {
+    await AutoConfig.updateOne({ _id: config._id }, { $set: { lastTaskStatus: "inactive-shop", lastTaskError: "Shop is inactive", nextRunAt: null } });
+    return { ok: false, status: "inactive-shop", message: "Shop is inactive" };
+  }
   const taskSpec = taskForConfig(config, new Date(), source, scheduleRule, manualRange);
   if (!taskSpec) {
     await AutoConfig.updateOne({ _id: config._id }, { $set: { lastTaskStatus: "review-required", lastTaskError: "Upload Tracking must be reviewed manually before dispatch", nextRunAt: nextScheduledRunAt(config) } });
     return { ok: false, status: "review-required", message: "Upload Tracking must be reviewed manually before dispatch" };
   }
   if (!io) throw new Error("Socket server unavailable");
-  const shop = await Shop.findById(config.shopId).lean();
   const client = [...(shop?.clients || [])].sort((a, b) => new Date(b.lastSeen || 0) - new Date(a.lastSeen || 0))[0];
   if (!client?.clientId) {
     await AutoConfig.updateOne({ _id: config._id }, { $set: { lastTaskStatus: "no-client", lastTaskError: "Shop has no registered extension", nextRunAt: nextScheduledRunAt(config) } });
@@ -199,7 +214,13 @@ function scheduleJob(config, io) {
     console.log(`\n🔔 [AUTO_SCHEDULER] Triggered job for config: ${jobId} (${config.shopName})`);
 
       const current = await AutoConfig.findById(jobId);
-      if (!current?.status) return;
+      if (!current?.status || (!isGlobalConfig(current) && !await getActiveConfigShop(current))) {
+        if (current?.status) {
+          await AutoConfig.updateOne({ _id: jobId }, { $set: { lastTaskStatus: "inactive-shop", lastTaskError: "Shop is inactive", nextRunAt: null } });
+        }
+        stopJob(jobId);
+        return;
+      }
       try {
         if (current.type !== "PULL_TRACKING") {
           await dispatchConfigTask(current, io, { scheduleRule: next.rule });

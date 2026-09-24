@@ -2,6 +2,7 @@ const db = require("../models");
 const ShippingBatch = db.ShippingBatch;
 const OrderCustomProduct = db.orderCustomProduct;
 const Shop = db.shop;
+const ExtensionTask = db.ExtensionTask;
 const { emitTaskToMachine, buildTaskId } = require("../lib/taskEmitter");
 
 async function getRealTrackingForOrder(orderId) {
@@ -1104,8 +1105,11 @@ const checkOrdersStatus = async (req, res, next) => {
       limit = 1000,
       fromDate,
       toDate,
-      status = ["New", "Processing", "Shipped"],
-      filterType = "all", // "all", "with-tracking", "without-tracking", "submitted", "not-submitted"
+      search,
+      tracking = "all",
+      amazon = "all",
+      page = 1,
+      status = ACTIVE_TRACKING_ORDER_STATUSES,
     } = req.query;
 
     if (!machineId) {
@@ -1113,7 +1117,7 @@ const checkOrdersStatus = async (req, res, next) => {
     }
 
     const result = await checkOrdersStatusRealTime(machineId, {
-      limit, fromDate, toDate, status, filterType,
+      limit, page, fromDate, toDate, search, tracking, amazon, status,
     });
 
     return res.json(result);
@@ -1750,49 +1754,45 @@ const createBatchFromOrders = async (req, res, next) => {
 
         const completed = [];
         const tracking_fakes = [];
+        const excludedOrders = [];
         let totalReal = 0;
         let totalFake = 0;
 
         // Xử lý từng order — đọc tracking trực tiếp từ data đã fetch (tránh N+1 query)
         for (const order of shopOrders) {
           const orderId = order.orderId;
+          const shipment = getOrderShipmentSnapshot(order);
 
-          // Tìm tracking hợp lệ đầu tiên trong tất cả items
-          let realTracking = null;
-          let realCarrier = "";
-          let realTrackingReceivedAt = null;
-          for (const item of order.items || []) {
-            const t = item?.tracking_info?.tracking;
-            if (t && t.trim() && t !== '-' && t !== '---') {
-              realTracking = t.trim();
-              realCarrier = carrierFromTrackingInfo(item.tracking_info);
-              realTrackingReceivedAt = item.tracking_info?.trackingReceivedAt || null;
-              break;
-            }
-          }
-
-          if (realTracking) {
-            // ✅ Có real tracking
+          if (shipment.bulkConfirmEligible) {
             completed.push({
               orderId,
-              tracking: realTracking,
-              carrier: realCarrier,
-              trackingReceivedAt: realTrackingReceivedAt,
-              shipDate: realTrackingReceivedAt ? amazonUsDate(realTrackingReceivedAt) : "",
+              tracking: shipment.tracking,
+              carrier: shipment.trackingInfo?.carrier || "",
+              trackingReceivedAt: shipment.trackingInfo?.trackingReceivedAt || null,
+              shipDate: shipment.trackingInfo?.trackingReceivedAt ? amazonUsDate(shipment.trackingInfo.trackingReceivedAt) : "",
               isFake: false,
               source: "system",
               createdAt: new Date()
             });
             totalReal++;
           } else {
-            // ❌ Không có tracking → lưu vào tracking_fakes để theo dõi
-            tracking_fakes.push({
+            excludedOrders.push({
               orderId,
-              note: "No real tracking available",
-              createdAt: new Date()
+              reason: shipment.bulkBlockReason,
+              trackingCount: shipment.trackingCount,
             });
-            totalFake++;
           }
+        }
+
+        if (!completed.length) {
+          results.push({
+            shopId,
+            success: false,
+            message: "No selected orders are eligible for whole-order confirmation.",
+            excludedOrders,
+            orderCount: shopOrderIds.length,
+          });
+          continue;
         }
 
         // Lấy shop name từ populated shopId
@@ -1925,6 +1925,7 @@ const createBatchFromOrders = async (req, res, next) => {
           totalReal,
           totalFake,
           autoTaskSent,
+          excludedOrders,
           orders: completed.map(item => ({
             orderId: item.orderId,
             tracking: item.tracking,
@@ -1967,28 +1968,61 @@ const createBatchFromOrders = async (req, res, next) => {
 
 // ─── Private helpers for checkOrdersStatus ───────────────────────────────────
 
+const ACTIVE_TRACKING_ORDER_STATUSES = ["New", "Fulfilled", "Shipping", "Shipped"];
+const CHECK_ORDERS_MAX_LIMIT = 1000;
+
+const escapeRegex = (value) => String(value || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+function parseYmd(value, endExclusive = false) {
+  if (!value) return null;
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(String(value))) return null;
+  const date = new Date(`${value}T00:00:00.000Z`);
+  if (Number.isNaN(date.getTime())) return null;
+  if (endExclusive) date.setUTCDate(date.getUTCDate() + 1);
+  return date;
+}
+
+function validTrackingMatcher() {
+  return { $regex: "^(?!-+$).*\\S" };
+}
+
+function buildCheckOrdersQuery(machineId, { status, fromDate, toDate, search, tracking } = {}) {
+  const requestedStatuses = Array.isArray(status)
+    ? status
+    : String(status || "").split(",");
+  const allowedStatuses = requestedStatuses.filter((item) => ACTIVE_TRACKING_ORDER_STATUSES.includes(item));
+  const orderFilter = {
+    status: { $in: allowedStatuses.length ? allowedStatuses : ACTIVE_TRACKING_ORDER_STATUSES },
+    shopId: machineId,
+  };
+  const from = parseYmd(fromDate);
+  const to = parseYmd(toDate, true);
+  if (from || to) {
+    orderFilter.createdAt = {};
+    if (from) orderFilter.createdAt.$gte = from;
+    if (to) orderFilter.createdAt.$lt = to;
+  }
+
+  const term = String(search || "").trim().slice(0, 100);
+  if (term) {
+    const escaped = escapeRegex(term);
+    orderFilter.$or = [
+      { orderId: { $regex: escaped, $options: "i" } },
+      { "items.tracking_info.tracking": { $regex: escaped, $options: "i" } },
+    ];
+  }
+
+  if (tracking === "yes") {
+    orderFilter.items = { $elemMatch: { "tracking_info.tracking": validTrackingMatcher() } };
+  } else if (tracking === "no") {
+    orderFilter.$nor = [{ items: { $elemMatch: { "tracking_info.tracking": validTrackingMatcher() } } }];
+  }
+  return orderFilter;
+}
+
 const _extractOrderDetails = (orders) =>
   orders.map(order => {
-    let hasValidTracking = false;
-    let tracking = "";
-    let trackingInfo = null;
-
-    for (const item of order.items || []) {
-      const itemTracking = normalizeField(item?.tracking_info?.tracking);
-      if (itemTracking && itemTracking !== "-" && itemTracking !== "---") {
-        hasValidTracking = true;
-        tracking = itemTracking;
-        trackingInfo = {
-          tracking: itemTracking,
-          fulfillment: item.tracking_info?.fulfillment || "",
-          status: item.tracking_info?.status || "",
-          carrier: carrierFromTrackingInfo(item.tracking_info),
-          trackingReceivedAt: item.tracking_info?.trackingReceivedAt || null,
-          updated_at: item.tracking_info?.updated_at || null,
-        };
-        break;
-      }
-    }
+    const shipment = getOrderShipmentSnapshot(order);
 
     return {
       orderId: order.orderId,
@@ -1998,21 +2032,92 @@ const _extractOrderDetails = (orders) =>
       status: order.status,
       createdAt: order.createdAt,
       updatedAt: order.updatedAt,
-      hasTracking: hasValidTracking,
-      tracking: tracking || null,
-      trackingInfo,
+      shipByDate: order.shipByDate || null,
+      earliestShipDate: order.earliestShipDate || null,
+      buyerRequestedCancellation: Boolean(order.buyerRequestedCancellation),
+      buyerRequestedCancelReason: order.buyerRequestedCancelReason || "",
+      hasTracking: shipment.hasTracking,
+      tracking: shipment.tracking || null,
+      trackingInfo: shipment.trackingInfo,
       itemsCount: (order.items || []).length,
+      shipmentItems: shipment.items,
+      trackingCount: shipment.trackingCount,
+      isSplitShipment: shipment.isSplitShipment,
+      bulkConfirmEligible: shipment.bulkConfirmEligible,
+      bulkBlockReason: shipment.bulkBlockReason,
       customerEmail: order.customer?.email || null,
       totalAmount: order.total_amount || 0,
     };
   });
 
+function getOrderShipmentSnapshot(order = {}) {
+  const items = [];
+  for (const item of order.items || []) {
+    const tracking = normalizeField(item?.tracking_info?.tracking);
+    if (!tracking || tracking === "-" || tracking === "---") continue;
+    items.push({
+      orderItemId: item?.orderItemId || "",
+      quantity: Number(item?.quantity) || 1,
+      tracking,
+      carrier: carrierFromTrackingInfo(item?.tracking_info),
+      fulfillment: item?.tracking_info?.fulfillment || "",
+      trackingReceivedAt: item?.tracking_info?.trackingReceivedAt || null,
+      updatedAt: item?.tracking_info?.updated_at || null,
+    });
+  }
+  const trackingNumbers = [...new Set(items.map((item) => item.tracking))];
+  const trackingItem = items[0] || null;
+  const isSplitShipment = trackingNumbers.length > 1;
+  const blockedStatus = ["Canceled", "Cancelled", "Refund"].includes(order.status);
+  const bulkBlockReason = order.buyerRequestedCancellation
+    ? "BUYER_CANCELLATION"
+    : blockedStatus
+      ? "ORDER_NOT_ELIGIBLE"
+    : !trackingItem
+      ? "MISSING_TRACKING"
+      : !trackingItem.carrier
+        ? "MISSING_CARRIER"
+      : isSplitShipment
+        ? "SPLIT_SHIPMENT"
+        : "";
+  return {
+    hasTracking: !!trackingItem,
+    tracking: trackingItem?.tracking || "",
+    trackingInfo: trackingItem ? {
+      tracking: trackingItem.tracking,
+      fulfillment: trackingItem.fulfillment,
+      status: "",
+      carrier: trackingItem.carrier,
+      trackingReceivedAt: trackingItem.trackingReceivedAt,
+      updated_at: trackingItem.updatedAt,
+    } : null,
+    items,
+    trackingCount: trackingNumbers.length,
+    isSplitShipment,
+    bulkConfirmEligible: !bulkBlockReason,
+    bulkBlockReason,
+  };
+}
+
 const _buildSubmissionMap = async (orderIds, machineId) => {
   const orderIdsSet = new Set(orderIds);
-  // Sort createdAt ASC + luôn ghi đè trong loop → entry CUỐI (batch mới
-  // nhất) thắng. Nếu order được re-upload nhiều lần, lấy lần đẩy gần nhất.
+  const successfulTasks = await ExtensionTask.find({
+    machineId,
+    type: "UPLOAD_TRACKING",
+    status: "completed",
+    "result.upload.ok": true,
+  })
+    .select("payload.batchId completedAt")
+    .sort({ completedAt: 1 })
+    .lean();
+  const submittedAtByBatchId = new Map(successfulTasks
+    .filter((task) => task.payload?.batchId)
+    .map((task) => [String(task.payload.batchId), task.completedAt]));
+  if (!submittedAtByBatchId.size) return new Map();
+
   const submittedBatches = await ShippingBatch.find({
     machineId,
+    _id: { $in: [...submittedAtByBatchId.keys()] },
     "completed.orderId": { $in: orderIds },
   })
     .select('_id type label createdAt completed.orderId')
@@ -2027,7 +2132,7 @@ const _buildSubmissionMap = async (orderIds, machineId) => {
         submittedToAmazon: true,
         batchId: batch._id,
         batchType: batch.type,
-        submittedAt: batch.createdAt,
+        submittedAt: submittedAtByBatchId.get(String(batch._id)),
         batchLabel: batch.label,
       });
     }
@@ -2055,43 +2160,61 @@ const _calcStats = (orders, filteredCount) => {
 // ─────────────────────────────────────────────────────────────────────────────
 
 async function checkOrdersStatusRealTime(machineId, options) {
-  const { limit, fromDate, toDate, status, filterType } = options;
+  const { limit, page, fromDate, toDate, search, tracking, amazon, status } = options;
 
   console.log(`⚡ [REAL_TIME] Using real-time query for shop: ${machineId}`);
 
-  // Logic gốc của checkOrdersStatus
-  const orderFilter = {
-    status: { $in: Array.isArray(status) ? status : [status] },
-    shopId: machineId,
-  };
+  const safeLimit = Math.min(Math.max(Math.floor(Number(limit)) || 20, 1), CHECK_ORDERS_MAX_LIMIT);
+  const safePage = Math.max(Math.floor(Number(page)) || 1, 1);
+  const baseOrderFilter = buildCheckOrdersQuery(machineId, { status, fromDate, toDate, search, tracking: "all" });
+  const orderFilter = buildCheckOrdersQuery(machineId, { status, fromDate, toDate, search, tracking });
 
-  if (fromDate || toDate) {
-    orderFilter.createdAt = {};
-    if (fromDate) {
-      const from = new Date(fromDate);
-      if (!isNaN(from.getTime())) orderFilter.createdAt.$gte = from;
-    }
-    if (toDate) {
-      const to = new Date(toDate);
-      if (!isNaN(to.getTime())) orderFilter.createdAt.$lte = to;
+  if (amazon === "yes" || amazon === "no") {
+    const successfulTasks = await ExtensionTask.find({
+      machineId,
+      type: "UPLOAD_TRACKING",
+      status: "completed",
+      "result.upload.ok": true,
+    }).select("payload.batchId").lean();
+    const submittedBatches = await ShippingBatch.find({
+      machineId,
+      _id: { $in: successfulTasks.map((task) => task.payload?.batchId).filter(Boolean) },
+      "completed.0": { $exists: true },
+    }).select("completed.orderId").lean();
+    const submittedOrderIds = [...new Set(submittedBatches.flatMap((batch) =>
+      (batch.completed || []).map((item) => item.orderId).filter(Boolean)
+    ))];
+    if (amazon === "yes") {
+      if (!submittedOrderIds.length) return { orders: [], totalCount: 0, stats: _calcStats([], 0), dataSource: "real-time" };
+      orderFilter.orderId = { $in: submittedOrderIds };
+    } else if (submittedOrderIds.length) {
+      orderFilter.orderId = { $nin: submittedOrderIds };
     }
   }
 
   // Fetch shop once (all orders for machineId belong to this shop) — tránh .populate() N+1
   const shop = await Shop.findById(machineId).select('name store').lean();
 
-  const allOrders = await OrderCustomProduct.find(orderFilter)
-    .select('orderId shopId status createdAt updatedAt items.tracking_info.tracking items.tracking_info.carrier items.tracking_info.trackingReceivedAt items.tracking_info.fulfillment items.tracking_info.status items.tracking_info.note items.tracking_info.updated_at customer.email total_amount')
+  const [allOrders, totalCount, totalScanned, totalWithTracking] = await Promise.all([
+    OrderCustomProduct.find(orderFilter)
+    .select('orderId shopId status createdAt updatedAt shipByDate earliestShipDate buyerRequestedCancellation buyerRequestedCancelReason items.orderItemId items.quantity items.tracking_info.tracking items.tracking_info.carrier items.tracking_info.trackingReceivedAt items.tracking_info.fulfillment items.tracking_info.status items.tracking_info.note items.tracking_info.updated_at customer.email total_amount')
     .sort({ createdAt: -1 })
-    .limit(Number(limit))
-    .lean();
+    .skip((safePage - 1) * safeLimit)
+    .limit(safeLimit)
+    .lean(),
+    OrderCustomProduct.countDocuments(orderFilter),
+    OrderCustomProduct.countDocuments(baseOrderFilter),
+    OrderCustomProduct.countDocuments({ ...baseOrderFilter, items: { $elemMatch: { "tracking_info.tracking": validTrackingMatcher() } } }),
+  ]);
 
   if (!allOrders.length) {
     return {
       orders: [],
-      totalCount: 0,
+      totalCount,
+      page: safePage,
+      pageSize: safeLimit,
       dataSource: 'real-time',
-      filter: { machineId, limit, fromDate, toDate, status, filterType },
+      filter: { machineId, limit: safeLimit, page: safePage, fromDate, toDate, search, tracking, amazon, status },
     };
   }
 
@@ -2118,29 +2241,19 @@ async function checkOrdersStatusRealTime(machineId, options) {
     };
   });
 
-  // Apply filterType
-  let filteredOrders = finalOrders;
-  switch (filterType) {
-    case "with-tracking":
-      filteredOrders = finalOrders.filter(o => o.hasTracking);
-      break;
-    case "without-tracking":
-      filteredOrders = finalOrders.filter(o => !o.hasTracking);
-      break;
-    case "submitted":
-      filteredOrders = finalOrders.filter(o => o.submittedToAmazon);
-      break;
-    case "not-submitted":
-      filteredOrders = finalOrders.filter(o => o.hasTracking && !o.submittedToAmazon);
-      break;
-  }
-
   return {
-    orders: filteredOrders,
-    totalCount: filteredOrders.length,
-    stats: _calcStats(finalOrders, filteredOrders.length),
+    orders: finalOrders,
+    totalCount,
+    page: safePage,
+    pageSize: safeLimit,
+    stats: {
+      ..._calcStats(finalOrders, totalCount),
+      totalScanned,
+      totalWithTracking,
+      totalWithoutTracking: Math.max(totalScanned - totalWithTracking, 0),
+    },
     dataSource: 'real-time',
-    filter: { machineId, limit, fromDate, toDate, status, filterType },
+    filter: { machineId, limit: safeLimit, page: safePage, fromDate, toDate, search, tracking, amazon, status },
   };
 }
 
@@ -2156,4 +2269,5 @@ module.exports = {
   approveTrackingReview,
   getUploadableBatches,
   createBatchFromOrders,
+  _test: { buildCheckOrdersQuery, getOrderShipmentSnapshot },
 };
