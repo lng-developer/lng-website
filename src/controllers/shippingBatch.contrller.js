@@ -2216,7 +2216,7 @@ async function checkOrdersStatusRealTime(machineId, options) {
   // Fetch shop once (all orders for machineId belong to this shop) — tránh .populate() N+1
   const shop = await Shop.findById(machineId).select('name store').lean();
 
-  const [allOrders, totalCount, totalScanned, totalWithTracking] = await Promise.all([
+  const [allOrders, totalCount, totalScanned, totalWithTracking, vendors, carriers] = await Promise.all([
     OrderCustomProduct.find(orderFilter)
     .select('orderId shopId status createdAt updatedAt shipByDate earliestShipDate buyerRequestedCancellation buyerRequestedCancelReason items.orderItemId items.quantity items.tracking_info.tracking items.tracking_info.carrier items.tracking_info.trackingReceivedAt items.tracking_info.actualShipAt items.tracking_info.shipEvidence items.tracking_info.fulfillment items.tracking_info.status items.tracking_info.note items.tracking_info.updated_at customer.email total_amount')
     .sort({ createdAt: -1 })
@@ -2226,7 +2226,14 @@ async function checkOrdersStatusRealTime(machineId, options) {
     OrderCustomProduct.countDocuments(orderFilter),
     OrderCustomProduct.countDocuments(baseOrderFilter),
     OrderCustomProduct.countDocuments({ ...baseOrderFilter, items: { $elemMatch: { "tracking_info.tracking": validTrackingMatcher() } } }),
+    OrderCustomProduct.distinct("items.tracking_info.fulfillment", baseOrderFilter),
+    OrderCustomProduct.distinct("items.tracking_info.carrier", baseOrderFilter),
   ]);
+
+  const filterOptions = {
+    vendors: vendors.filter(Boolean).sort((a, b) => a.localeCompare(b)),
+    carriers: carriers.filter(Boolean).sort((a, b) => a.localeCompare(b)),
+  };
 
   if (!allOrders.length) {
     return {
@@ -2234,6 +2241,7 @@ async function checkOrdersStatusRealTime(machineId, options) {
       totalCount,
       page: safePage,
       pageSize: safeLimit,
+      filterOptions,
       dataSource: 'real-time',
       filter: { machineId, limit: safeLimit, page: safePage, fromDate, toDate, search, tracking, amazon, vendor, carrier, carrierHandoff, status },
     };
@@ -2267,6 +2275,7 @@ async function checkOrdersStatusRealTime(machineId, options) {
     totalCount,
     page: safePage,
     pageSize: safeLimit,
+    filterOptions,
     stats: {
       ..._calcStats(finalOrders, totalCount),
       totalScanned,
