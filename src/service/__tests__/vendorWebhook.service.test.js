@@ -25,6 +25,7 @@ describe("vendorWebhookService", () => {
     jest.clearAllMocks();
     process.env = { ...oldEnv };
     delete process.env.ONOS_WEBHOOK_SECRET;
+    delete process.env.MERCHIZE_WEBHOOK_SECRET;
     delete process.env.VENDOR_WEBHOOK_SECRET;
   });
 
@@ -136,6 +137,55 @@ describe("vendorWebhookService", () => {
     });
 
     expect(db.EtsyOrder.findOne).not.toHaveBeenCalled();
+  });
+
+  test("stores Merchize in-transit shipment history as the carrier handoff", async () => {
+    process.env.MERCHIZE_WEBHOOK_SECRET = "merchize-secret";
+    const order = {
+      orderId: "113-3901968-2300226",
+      status: "Shipped",
+      vendor_submissions: { merchize: { sent: true } },
+      items: [{
+        cost_breakdown: { vendorProductId: "0123456789abcdef01234567" },
+        tracking_info: { fulfillment: "Merchize", tracking: "9214490411375405645534", carrier: "USPS", status: "Shipped" },
+      }],
+      markModified: jest.fn(),
+      save: jest.fn().mockResolvedValue(undefined),
+    };
+
+    db.EtsyOrder.findOne.mockResolvedValue(null);
+    db.orderCustomProduct.findOne.mockImplementation((query) =>
+      query.orderId === order.orderId ? Promise.resolve(order) : Promise.resolve(null)
+    );
+    mockSelectLean(db.vendorProduct.find, [
+      { _id: "0123456789abcdef01234567", vendor_id: "111111111111111111111111" },
+    ]);
+    mockSelectLean(db.vendor.find, [
+      { _id: "111111111111111111111111", name: "Merchize", fulfillment_type: "merchize" },
+    ]);
+
+    await vendorWebhookService.handleWebhook({
+      provider: "merchize",
+      payload: {
+        event_type: "ORDER.CHANGED.SHIPMENT",
+        resource: {
+          external_number: order.orderId,
+          new_shipment_status: "in_transit",
+          shipment_histories: {
+            date: "2026-09-22T16:54:56.000Z",
+            location: "RICHARDSON, TX, US",
+            status: "in_transit",
+            message: "Accepted at USPS Facility",
+          },
+        },
+      },
+      req: { headers: { "merchize-webhook-key": "merchize-secret" }, query: {} },
+    });
+
+    expect(order.items[0].tracking_info).toEqual(expect.objectContaining({
+      actualShipAt: new Date("2026-09-22T16:54:56.000Z"),
+      shipEvidence: expect.objectContaining({ provider: "merchize", event: "Accepted at USPS Facility" }),
+    }));
   });
 
   test("accepts valid Onos HMAC SHA256 signature", async () => {

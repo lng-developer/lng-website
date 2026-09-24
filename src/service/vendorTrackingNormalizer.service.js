@@ -253,6 +253,37 @@ function pickBestTracking(root) {
   };
 }
 
+function resolveCarrierAcceptanceEvent(provider, payload = {}) {
+  const key = normalizeProviderKey(provider);
+  if (key !== "merchfox" && key !== "lenful") return null;
+
+  const tracking = payload?.tracking || payload?.data?.tracking || {};
+  const events = Array.isArray(tracking?.events) ? tracking.events : [];
+  const accepted = events
+    .map((event) => {
+      const label = firstValue(event?.status, event?.description, event?.event);
+      const rawTime = firstValue(event?.time_utc, event?.datetime, event?.time_iso, event?.time, event?.created_at);
+      const actualShipAt = rawTime ? new Date(rawTime) : null;
+      return { event, label, actualShipAt };
+    })
+    .filter(({ label, actualShipAt }) =>
+      /\b(accepted|picked up|received by carrier|in possession)\b/i.test(label) &&
+      Number.isFinite(actualShipAt?.getTime())
+    )
+    .sort((a, b) => a.actualShipAt - b.actualShipAt)[0];
+
+  if (!accepted) return null;
+  return {
+    actualShipAt: accepted.actualShipAt,
+    shipEvidence: {
+      provider: key,
+      event: accepted.label,
+      location: cleanTrackingString(accepted.event?.location),
+      eventAt: accepted.actualShipAt.toISOString(),
+    },
+  };
+}
+
 function normalizeVendorTrackingPayload(provider, payload = {}) {
   const key = normalizeProviderKey(provider);
   const root = getPayloadRoot(payload);
@@ -343,4 +374,5 @@ module.exports = {
   normalizeVendorSubmissionTracking,
   normalizeVendorTrackingPayload,
   parseCarrierFromNote,
+  resolveCarrierAcceptanceEvent,
 };

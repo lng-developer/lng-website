@@ -82,6 +82,39 @@ function parseGenericWebhook(provider, payload = {}) {
   };
 }
 
+function parseMerchizeWebhook(payload = {}) {
+  const resource = payload?.resource || {};
+  const history = Array.isArray(resource.shipment_histories)
+    ? resource.shipment_histories.at(-1)
+    : resource.shipment_histories || {};
+  const event = firstValue(history.message, history.status, resource.new_shipment_status);
+  const rawTime = norm(history.date);
+  const actualShipAt = rawTime ? new Date(rawTime) : null;
+  const isCarrierHandoff =
+    lower(resource.new_shipment_status) === "in_transit" &&
+    Number.isFinite(actualShipAt?.getTime());
+
+  return {
+    provider: "merchize",
+    externalId: norm(resource.order_code),
+    orderId: norm(resource.external_number),
+    tracking: firstValue(resource.tracking_number, resource.trackingNumber),
+    carrier: firstValue(resource.tracking_company, resource.carrier),
+    status: norm(resource.new_shipment_status),
+    shipped: isCarrierHandoff,
+    actualShipAt: isCarrierHandoff ? actualShipAt : null,
+    shipEvidence: isCarrierHandoff
+      ? {
+          provider: "merchize",
+          event,
+          location: norm(history.location),
+          eventAt: actualShipAt.toISOString(),
+        }
+      : null,
+    raw: payload,
+  };
+}
+
 function parseWebhook(provider, payload = {}) {
   const key = normalizeProviderKey(provider);
   if (!key) {
@@ -90,6 +123,7 @@ function parseWebhook(provider, payload = {}) {
     throw err;
   }
   if (key === "onos") return parseOnosWebhook(payload);
+  if (key === "merchize") return parseMerchizeWebhook(payload);
   return parseGenericWebhook(key, payload);
 }
 
@@ -196,6 +230,9 @@ async function applyWebhookToOrder(provider, event, found) {
       tracking: nextTracking,
       status: nextStatus,
       note: buildTrackingNote(prev.note, event.carrier),
+      ...(event.actualShipAt && !prev.actualShipAt
+        ? { actualShipAt: event.actualShipAt, shipEvidence: event.shipEvidence }
+        : {}),
       updated_at: now,
     };
 
@@ -204,6 +241,8 @@ async function applyWebhookToOrder(provider, event, found) {
       next.status !== prevStatus ||
       next.fulfillment !== prev.fulfillment ||
       next.note !== prev.note
+      || String(next.actualShipAt || "") !== String(prev.actualShipAt || "")
+      || JSON.stringify(next.shipEvidence || null) !== JSON.stringify(prev.shipEvidence || null)
     ) {
       changedItems += 1;
     }
@@ -260,6 +299,7 @@ function extractSecretFromRequest(req) {
   if (auth.toLowerCase().startsWith("bearer ")) return auth.slice(7).trim();
   return (
     norm(req.headers?.["x-webhook-token"]) ||
+    norm(req.headers?.["merchize-webhook-key"]) ||
     norm(req.headers?.["x-provider-webhook-token"]) ||
     norm(req.headers?.["x-vendor-webhook-token"]) ||
     norm(req.query?.token)

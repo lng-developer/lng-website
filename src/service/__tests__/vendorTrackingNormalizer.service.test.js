@@ -1,6 +1,7 @@
 const {
   normalizeVendorSubmissionTracking,
   normalizeVendorTrackingPayload,
+  resolveCarrierAcceptanceEvent,
 } = require("../vendorTrackingNormalizer.service");
 
 describe("vendorTrackingNormalizer", () => {
@@ -123,5 +124,33 @@ describe("vendorTrackingNormalizer", () => {
         carrier: "USPS",
       })
     );
+  });
+
+  test("uses the first carrier-acceptance event from MerchFox", () => {
+    const result = resolveCarrierAcceptanceEvent("merchfox", {
+      tracking: {
+        events: [
+          { description: "Shipping Label Created", time_utc: "2026-09-22T15:45:07Z" },
+          { description: "Accepted at USPS Facility", location: "RICHARDSON, TX, US", time_utc: "2026-09-22T16:54:56Z" },
+        ],
+      },
+    });
+
+    expect(result.actualShipAt.toISOString()).toBe("2026-09-22T16:54:56.000Z");
+    expect(result.shipEvidence).toEqual(expect.objectContaining({ provider: "merchfox", event: "Accepted at USPS Facility" }));
+  });
+
+  test("uses Lenful acceptance event and ignores label creation", () => {
+    const result = resolveCarrierAcceptanceEvent("lenful", {
+      tracking: {
+        events: [
+          { status: "Shipping Label Created", datetime: "2026-09-07T13:28:51Z" },
+          { status: "Accepted at USPS Facility", datetime: "2026-09-09T03:05:19Z" },
+        ],
+      },
+    });
+
+    expect(result.actualShipAt.toISOString()).toBe("2026-09-09T03:05:19.000Z");
+    expect(resolveCarrierAcceptanceEvent("merchize", { tracking_number: "9214" })).toBeNull();
   });
 });

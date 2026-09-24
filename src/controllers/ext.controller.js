@@ -8,6 +8,7 @@ const taskStatusService = require("../service/taskStatus.service");
 const { emitTaskToMachine, buildTaskId } = require("../lib/taskEmitter");
 const {
   normalizeVendorTrackingPayload,
+  resolveCarrierAcceptanceEvent,
 } = require("../service/vendorTrackingNormalizer.service");
 const { logOrderLifecycleEvent } = require("../service/orderLifecycleLogger");
 const { buildOrderLifecyclePayload } = require("../service/orderLifecycleContext");
@@ -1745,6 +1746,9 @@ function applyToItemsOfVendor(
     const thePrevStatus = norm(ti.status);
     const nextTracking = tracking || prevTracking;
     const trackingReceivedAt = resolveTrackingReceivedAt(ti.trackingReceivedAt, prevTracking, nextTracking);
+    const carrierAcceptance = !ti.actualShipAt
+      ? resolveCarrierAcceptanceEvent(vendorKey, raw)
+      : null;
 
     const nextTI = {
       ...ti,
@@ -1752,6 +1756,7 @@ function applyToItemsOfVendor(
       tracking: nextTracking,
       carrier: norm(carrier) || norm(ti.carrier),
       ...(trackingReceivedAt ? { trackingReceivedAt } : {}),
+      ...(carrierAcceptance || {}),
       status: shipped ? "Shipped" : thePrevStatus || "New",
       updated_at: new Date(),
       note: buildTrackingNote(ti.note, carrier),
@@ -1761,6 +1766,8 @@ function applyToItemsOfVendor(
       nextTI.tracking !== prevTracking ||
       nextTI.carrier !== norm(ti.carrier) ||
       String(nextTI.trackingReceivedAt || "") !== String(ti.trackingReceivedAt || "") ||
+      String(nextTI.actualShipAt || "") !== String(ti.actualShipAt || "") ||
+      JSON.stringify(nextTI.shipEvidence || null) !== JSON.stringify(ti.shipEvidence || null) ||
       nextTI.status !== thePrevStatus ||
       nextTI.fulfillment !== ti.fulfillment ||
       nextTI.note !== ti.note
@@ -2057,12 +2064,16 @@ function applyToEtsyItemsOfVendor(doc, vendorKey, { tracking, carrier, shipped, 
     const prevStatus = norm(ti.status);
     const nextTracking = tracking || prevTracking;
     const trackingReceivedAt = resolveTrackingReceivedAt(ti.trackingReceivedAt, prevTracking, nextTracking);
+    const carrierAcceptance = !ti.actualShipAt
+      ? resolveCarrierAcceptanceEvent(vendorKey, raw)
+      : null;
     const nextTI = {
       ...ti,
       fulfillment: fulfillment || norm(ti.fulfillment),
       tracking: nextTracking,
       carrier: norm(carrier) || norm(ti.carrier),
       ...(trackingReceivedAt ? { trackingReceivedAt } : {}),
+      ...(carrierAcceptance || {}),
       status: shipped ? "Shipped" : prevStatus || "New",
       updated_at: new Date(),
       note: buildTrackingNote(ti.note, carrier),
@@ -2072,6 +2083,8 @@ function applyToEtsyItemsOfVendor(doc, vendorKey, { tracking, carrier, shipped, 
       nextTI.tracking !== prevTracking ||
       nextTI.carrier !== norm(ti.carrier) ||
       String(nextTI.trackingReceivedAt || "") !== String(ti.trackingReceivedAt || "") ||
+      String(nextTI.actualShipAt || "") !== String(ti.actualShipAt || "") ||
+      JSON.stringify(nextTI.shipEvidence || null) !== JSON.stringify(ti.shipEvidence || null) ||
       nextTI.status !== prevStatus ||
       nextTI.fulfillment !== ti.fulfillment ||
       nextTI.note !== ti.note
