@@ -236,7 +236,7 @@ const TRACKING_VENDOR_SUBMISSION_KEYS = [
   "onos",
   "lenful",
 ];
-const DEFAULT_TRACKING_SENT_WITHIN_DAYS = 30;
+const DEFAULT_TRACKING_SENT_WITHIN_DAYS = 15;
 
 function toPlainObject(value) {
   return value?.toObject?.() ? value.toObject() : value;
