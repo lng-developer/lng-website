@@ -54,7 +54,7 @@ test('manual upload responds successfully after emitting the extension task', as
   expect(next).not.toHaveBeenCalled();
   expect(db.RealtimeLog.create).toHaveBeenCalledWith(expect.objectContaining({
     machineId: 'machine-1',
-    action: 'manual',
+    action: 'click',
   }));
   expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ ok: true, batchId: 'batch-1' }));
 });

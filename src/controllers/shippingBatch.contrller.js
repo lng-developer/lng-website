@@ -1536,7 +1536,7 @@ const manualUploadTask = async (req, res, next) => {
       shopId: shopId || null,
       machineId: targetMachineId,
       label: batch.label,
-      action: "manual",
+      action: "click",
       level: "info",
       message: `Manual UPLOAD_TRACKING task sent from FE: ${trackingData.length} orders, file: ${filename}`,
       ts: new Date(),
