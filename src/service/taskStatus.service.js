@@ -2,6 +2,8 @@ const TaskStatusEvent = require("../models/taskStatusEvent.model");
 const ExtensionTask = require("../models/extensionTask.model");
 const AutoConfig = require("../models/autoConfig.model");
 
+const UNACKNOWLEDGED_TASK_TTL_MS = 24 * 60 * 60 * 1000;
+
 function compactAdsResult(result) {
   if (!result || typeof result !== "object" || !Array.isArray(result.days) || result.days.length > 31) return undefined;
   const days = result.days.map((item) => ({
@@ -125,4 +127,13 @@ async function findPendingTasks({ shopId, machineId, statuses, sentAfter }) {
   return ExtensionTask.find(q).sort({ createdAt: 1 }).limit(200).lean();
 }
 
-module.exports = { upsertByEventId, findPendingTasks };
+async function expireUnacknowledgedTasks({ now = new Date() } = {}) {
+  const cutoff = new Date(now.getTime() - UNACKNOWLEDGED_TASK_TTL_MS);
+  const result = await ExtensionTask.updateMany(
+    { status: "sent", sentAt: { $lt: cutoff } },
+    { $set: { status: "expired", completedAt: now, lastError: "Extension did not acknowledge task within 24 hours" } }
+  );
+  return result.modifiedCount || 0;
+}
+
+module.exports = { upsertByEventId, findPendingTasks, expireUnacknowledgedTasks, UNACKNOWLEDGED_TASK_TTL_MS };

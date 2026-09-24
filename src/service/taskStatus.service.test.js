@@ -1,10 +1,10 @@
 const TaskStatusEvent = require("../models/taskStatusEvent.model");
 const ExtensionTask = require("../models/extensionTask.model");
-const { findPendingTasks, upsertByEventId } = require("./taskStatus.service");
+const { expireUnacknowledgedTasks, findPendingTasks, upsertByEventId } = require("./taskStatus.service");
 
 jest.mock("../models/taskStatusEvent.model", () => ({ create: jest.fn() }));
 jest.mock("../models/autoConfig.model", () => ({ updateOne: jest.fn() }));
-jest.mock("../models/extensionTask.model", () => ({ find: jest.fn(), findOne: jest.fn(), updateOne: jest.fn() }));
+jest.mock("../models/extensionTask.model", () => ({ find: jest.fn(), findOne: jest.fn(), updateOne: jest.fn(), updateMany: jest.fn() }));
 
 test("findPendingTasks limits reconnect replay to fresh sent tasks", async () => {
   const sentAfter = new Date("2026-09-23T02:50:00.000Z");
@@ -21,6 +21,18 @@ test("findPendingTasks limits reconnect replay to fresh sent tasks", async () =>
     status: { $in: ["sent"] },
     sentAt: { $gte: sentAfter },
   });
+});
+
+test("expires sent tasks that were never acknowledged after the replay window", async () => {
+  ExtensionTask.updateMany.mockResolvedValue({ modifiedCount: 1 });
+
+  const result = await expireUnacknowledgedTasks({ now: new Date("2026-09-24T10:30:00.000Z") });
+
+  expect(ExtensionTask.updateMany).toHaveBeenCalledWith(
+    { status: "sent", sentAt: { $lt: new Date("2026-09-23T10:30:00.000Z") } },
+    { $set: { status: "expired", completedAt: new Date("2026-09-24T10:30:00.000Z"), lastError: "Extension did not acknowledge task within 24 hours" } }
+  );
+  expect(result).toBe(1);
 });
 
 test("completed Ads task persists only the compact business summary", async () => {

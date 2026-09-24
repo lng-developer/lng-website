@@ -2,9 +2,11 @@ const AutoConfig = require("../models/autoConfig.model");
 const { vendorSyncBatch } = require("./ext.controller");
 const Shop = require("../models/shop.model");
 const { emitTaskToMachine, buildTaskId } = require("../lib/taskEmitter");
+const { expireUnacknowledgedTasks } = require("../service/taskStatus.service");
 
 // Map lưu các cron jobs đang chạy: configId → cron job
 const activeJobs = new Map();
+let taskExpiryTimer = null;
 
 function isGlobalConfig(config) {
   return String(config?.shopId || "").toLowerCase() === "all";
@@ -23,6 +25,13 @@ async function startAutoScheduler(io) {
   console.log(`\n⏰ [AUTO_SCHEDULER] Initializing scheduler...`);
 
   try {
+    await expireUnacknowledgedTasks();
+    if (!taskExpiryTimer) {
+      taskExpiryTimer = setInterval(() => expireUnacknowledgedTasks().catch((error) => {
+        console.error("[TASK_EXPIRY] Could not expire unacknowledged tasks:", error.message);
+      }), 15 * 60 * 1000);
+      taskExpiryTimer.unref?.();
+    }
     const configs = await AutoConfig.find({ status: true });
     console.log(`📋 [AUTO_SCHEDULER] Found ${configs.length} active config(s)`);
 

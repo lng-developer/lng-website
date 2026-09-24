@@ -1,8 +1,11 @@
 // src/socket/index.js
 const presence = require("../lib/presence");
 const Shop = require("../models/shop.model");
+const ExtensionTask = require("../models/extensionTask.model");
 const taskStatusService = require("../service/taskStatus.service");
 const { upsertEtsyMessageThreads } = require("../service/etsyMessage.service");
+
+const PENDING_TASK_REPLAY_MS = 24 * 60 * 60 * 1000;
 
 async function saveClientPresence({ shopId, machineId, label, version, status, touchLastSeen }) {
   const now = new Date();
@@ -265,12 +268,15 @@ module.exports = function registerSocketHandlers({ app, io }) {
       try {
         const targetMachineId = payload.machineId || machineId;
         const targetShopId = payload.shopId || shopId;
+        const now = new Date();
+
+        await taskStatusService.expireUnacknowledgedTasks({ now });
 
         const pending = await taskStatusService.findPendingTasks({
           shopId: targetShopId,
           machineId: targetMachineId,
           statuses: ["sent"],
-          sentAfter: new Date(Date.now() - 5 * 60 * 1000),
+          sentAfter: new Date(now.getTime() - PENDING_TASK_REPLAY_MS),
         });
 
         for (const t of pending) {
@@ -283,6 +289,10 @@ module.exports = function registerSocketHandlers({ app, io }) {
               : new Date().toISOString(),
             resent: true,
           });
+          await ExtensionTask.updateOne(
+            { taskId: t.taskId, status: "sent" },
+            { $inc: { resendCount: 1 }, $set: { lastResentAt: now } }
+          );
         }
 
         console.log(

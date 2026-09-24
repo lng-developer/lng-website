@@ -9,7 +9,7 @@ const extensionTaskSchema = new mongoose.Schema(
     payload: { type: mongoose.Schema.Types.Mixed },
     status: {
       type: String,
-      enum: ["queued", "sent", "received", "completed", "failed"],
+      enum: ["queued", "sent", "received", "completed", "failed", "expired"],
       default: "sent",
       index: true,
     },
