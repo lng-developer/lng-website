@@ -53,6 +53,27 @@ const TrackingReviewSchema = new mongoose.Schema(
   { _id: false }
 );
 
+const AmazonFeedSchema = new mongoose.Schema(
+  {
+    amazonBatchId: { type: String, default: "" },
+    status: {
+      type: String,
+      enum: ["submitted", "processing", "done", "failed", "needs_review"],
+      default: null,
+    },
+    submittedAt: { type: Date, default: null },
+    completedAt: { type: Date, default: null },
+    recordsProcessed: { type: Number, default: 0 },
+    recordsActivated: { type: Number, default: 0 },
+    errorCount: { type: Number, default: 0 },
+    warningCount: { type: Number, default: 0 },
+    reportText: { type: String, default: "" },
+    reportSha256: { type: String, default: "" },
+    failureReason: { type: String, default: "" },
+  },
+  { _id: false }
+);
+
 const ShippingBatchSchema = new mongoose.Schema(
   {
     machineId: { type: String, required: true },
@@ -81,6 +102,9 @@ const ShippingBatchSchema = new mongoose.Schema(
 
     // Shipping confirmations require an explicit human review before dispatch.
     review: { type: TrackingReviewSchema, default: () => ({}) },
+
+    // Amazon's own Processing Report is the final delivery evidence.
+    amazonFeed: { type: AmazonFeedSchema, default: () => ({}) },
 
     // ✅ Thêm field tracking upload task
     uploadTaskSent: { type: Boolean, default: false },
