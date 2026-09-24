@@ -6,6 +6,22 @@ const ExtensionTask = db.ExtensionTask;
 const RealtimeLog = db.RealtimeLog;
 const { emitTaskToMachine, buildTaskId } = require("../lib/taskEmitter");
 
+const downloadAmazonFeedReport = async (req, res, next) => {
+  try {
+    const batch = await ShippingBatch.findById(req.params.batchId);
+    const reportText = batch?.amazonFeed?.reportText;
+    if (!reportText) return res.status(404).json({ ok: false, message: "Amazon Processing Report not found" });
+
+    const amazonBatchId = String(batch.amazonFeed.amazonBatchId || batch._id);
+    return res
+      .type("text/plain")
+      .attachment(`amazon-processing-report-${amazonBatchId}.txt`)
+      .send(reportText);
+  } catch (error) {
+    next(error);
+  }
+};
+
 async function getRealTrackingForOrder(orderId) {
   const order = await OrderCustomProduct.findOne({ orderId: orderId });
   return order?.items[0]?.tracking_info?.tracking || null;
@@ -2299,5 +2315,6 @@ module.exports = {
   approveTrackingReview,
   getUploadableBatches,
   createBatchFromOrders,
+  downloadAmazonFeedReport,
   _test: { buildCheckOrdersQuery, getOrderShipmentSnapshot },
 };

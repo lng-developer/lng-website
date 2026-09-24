@@ -1,8 +1,10 @@
 // src/socket/index.js
 const presence = require("../lib/presence");
 const Shop = require("../models/shop.model");
+const ShippingBatch = require("../models/shippingBatch.model");
 const ExtensionTask = require("../models/extensionTask.model");
 const taskStatusService = require("../service/taskStatus.service");
+const { applyAmazonFeedStatus } = require("../service/amazonFeedStatus.service");
 const { upsertEtsyMessageThreads } = require("../service/etsyMessage.service");
 
 const PENDING_TASK_REPLAY_MS = 24 * 60 * 60 * 1000;
@@ -259,6 +261,30 @@ module.exports = function registerSocketHandlers({ app, io }) {
         if (typeof ack === "function") {
           ack({ ok: false, message: err.message });
         }
+      }
+    });
+
+    // Amazon Processing Report events are accepted only from the authenticated
+    // extension machine that owns the ShippingBatch.
+    socket.on("client:amazon_feed_status", async (payload = {}, ack) => {
+      try {
+        const result = await applyAmazonFeedStatus({
+          ShippingBatch,
+          batchId: payload.batchId,
+          machineId,
+          event: payload,
+        });
+        io.to(`shop:${shopId}`).emit("amazon_feed:status", {
+          batchId: result.batchId,
+          status: result.status,
+          terminal: result.terminal,
+          amazonFeed: result.amazonFeed,
+          at: Date.now(),
+        });
+        if (typeof ack === "function") ack({ ok: true, status: result.status, terminal: result.terminal });
+      } catch (error) {
+        console.error("[SOCKET] client:amazon_feed_status rejected:", error.code || error.message);
+        if (typeof ack === "function") ack({ ok: false, code: error.code || "AMAZON_FEED_STATUS_REJECTED" });
       }
     });
 

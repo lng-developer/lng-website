@@ -22,6 +22,11 @@ router.post(
   shippingBatchController.createUpdateBatchFromSystem
 );
 router.get("/:batchId/download", shippingBatchController.downloadCompletedFile);
+router.get(
+  "/:batchId/amazon-feed-report",
+  authenticateToken,
+  shippingBatchController.downloadAmazonFeedReport
+);
 
 // COMMENTED OUT - removed fake tracking logic
 // router.post("/update-all-fake", shippingBatchController.updateAllFakeTracking);
