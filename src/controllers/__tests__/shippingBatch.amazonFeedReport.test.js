@@ -1,5 +1,5 @@
 jest.mock("../../models", () => ({
-  ShippingBatch: { findById: jest.fn() },
+  ShippingBatch: { findById: jest.fn(), find: jest.fn() },
 }));
 
 const db = require("../../models");
@@ -35,4 +35,23 @@ test("returns 404 when no Amazon Processing Report was retained", async () => {
   await controller.downloadAmazonFeedReport({ params: { batchId: "batch-1" } }, res, jest.fn());
 
   expect(res.status).toHaveBeenCalledWith(404);
+});
+
+test("includes Amazon feed reconciliation in the batch list", async () => {
+  db.ShippingBatch.find.mockReturnValue({
+    sort: () => ({
+      limit: () => [{
+        _id: "batch-1",
+        machineId: "machine-1",
+        amazonFeed: { status: "done", amazonBatchId: "93703020720" },
+      }],
+    }),
+  });
+  const res = makeRes();
+
+  await controller.listShippingBatches({ query: {} }, res, jest.fn());
+
+  expect(res.json).toHaveBeenCalledWith(expect.objectContaining({
+    batches: [expect.objectContaining({ amazonFeed: { status: "done", amazonBatchId: "93703020720" } })],
+  }));
 });

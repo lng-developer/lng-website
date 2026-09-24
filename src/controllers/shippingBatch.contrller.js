@@ -266,6 +266,7 @@ const listShippingBatches = async (req, res, next) => {
       tracking_fakes: b.tracking_fakes,
       type: b.type,
       confirmShipDate: b.confirmShipDate || "",
+      amazonFeed: b.amazonFeed || {},
     }));
 
     return res.json({
