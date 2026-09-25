@@ -75,7 +75,7 @@ function buildPayload(orderObj) {
   };
 }
 
-function buildPlatformPayload(orderObj) {
+function buildPlatformPayload(orderObj, sourceChannel = "AMAZON") {
   const legacyPayload = buildPayload(orderObj);
 
   return {
@@ -83,7 +83,7 @@ function buildPlatformPayload(orderObj) {
       {
         ...legacyPayload,
         source: "portal",
-        sourceChannel: "AMAZON",
+        sourceChannel: sourceChannel === "ETSY" ? "ETSY" : "AMAZON",
       },
     ],
   };
@@ -96,7 +96,7 @@ function getPlatformEndpoint() {
 }
 
 /* -------------------------- Sender ------------------------- */
-async function send(orderDoc) {
+async function send(orderDoc, options = {}) {
     const orderObj = orderDoc.toObject
         ? orderDoc.toObject({ getters: false, virtuals: false })
         : orderDoc;
@@ -104,7 +104,7 @@ async function send(orderDoc) {
     const platformEndpoint = getPlatformEndpoint();
     const tenantApiKey = String(process.env.FULFILLMENT_TENANT_API_KEY || "").trim();
     const usePlatform = Boolean(platformEndpoint && tenantApiKey);
-    const payload = usePlatform ? buildPlatformPayload(orderObj) : buildPayload(orderObj);
+    const payload = usePlatform ? buildPlatformPayload(orderObj, options.sourceChannel) : buildPayload(orderObj);
     const items = usePlatform ? payload.data?.[0]?.items : payload.items;
     if (!items?.length) {
         const err = new Error("LNG: No line items to send.");

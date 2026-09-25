@@ -51,4 +51,25 @@ describe("lng fulfillment provider", () => {
       }
     );
   });
+
+  test("labels an Etsy order as ETSY when the caller provides its channel", async () => {
+    axios.post.mockResolvedValueOnce({ data: { success: true, inserted: 1 } });
+
+    await lng.send(
+      {
+        orderId: "4180852827",
+        customer_infor: { name: "Etsy Buyer", country: "US" },
+        items: [{ orderItemId: "ITEM-ETSY-1", quantity: 1 }],
+      },
+      { sourceChannel: "ETSY" },
+    );
+
+    expect(axios.post).toHaveBeenCalledWith(
+      "https://platform.example/api/portal/orders",
+      expect.objectContaining({
+        data: [expect.objectContaining({ sourceChannel: "ETSY" })],
+      }),
+      expect.any(Object),
+    );
+  });
 });

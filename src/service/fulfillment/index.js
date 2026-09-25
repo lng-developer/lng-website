@@ -55,7 +55,7 @@ function compactError(error) {
  * @param {Document} orderDoc - Mongoose doc
  * @param {string} vendorKey - 'grabink' | 'merchfox' | 'merchize' | 'printway' | 'mangotee' | 'lng' | 'lenful' | 'ss88' | 'pgprint' | 'luxurypro' | 'onos'
  */
-async function sendToVendor(orderDoc, vendorKey) {
+async function sendToVendor(orderDoc, vendorKey, options = {}) {
     const provider = PROVIDER_MAP.get(vendorKey);
     if (!provider) {
         const err = new Error(`Unknown vendor provider: ${vendorKey}`);
@@ -71,7 +71,7 @@ async function sendToVendor(orderDoc, vendorKey) {
     let data;
     let externalId;
     try {
-        ({ data, externalId } = await provider.send(orderDoc));
+        ({ data, externalId } = await provider.send(orderDoc, options));
     } catch (error) {
         writeSubmission(orderDoc, vendorKey, {
             sent: false,
@@ -116,7 +116,7 @@ async function sendToVendor(orderDoc, vendorKey) {
  *  3) provider.canHandle(orderDoc) === true (theo thứ tự trong PROVIDERS)
  *  4) fallback 'grabink'
  */
-async function send(orderDoc, vendorKey) {
+async function send(orderDoc, vendorKey, options = {}) {
     let key = vendorKey || orderDoc.vendor;
 
     if (!key) {
@@ -130,7 +130,7 @@ async function send(orderDoc, vendorKey) {
         key = auto?.key || 'grabink';
     }
 
-    return sendToVendor(orderDoc, key);
+    return sendToVendor(orderDoc, key, options);
 }
 
 module.exports = { send, sendToVendor, PROVIDERS };

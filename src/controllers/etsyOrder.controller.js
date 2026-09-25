@@ -4706,7 +4706,7 @@ async function sendEtsyOrderToVendor({ order, provider, req, previousOverallStat
     prepareEtsyOrderForFulfillment(order);
 
     try {
-        const result = await FulfillmentService.send(order, providerKey);
+        const result = await FulfillmentService.send(order, providerKey, { sourceChannel: "ETSY" });
         await logOrderHistory({
             orderDoc: order,
             action: "SEND_TO_VENDOR",
