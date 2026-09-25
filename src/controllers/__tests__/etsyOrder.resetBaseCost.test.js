@@ -28,6 +28,17 @@ jest.mock('../../service/etsyTrackingResponse.service', () => ({
   buildEtsyTrackingSummary: jest.fn(),
 }));
 
+jest.mock('../../models/extensionTask.model', () => ({
+  findOne: jest.fn(),
+}));
+
+jest.mock('../../lib/taskEmitter', () => ({
+  buildTaskId: jest.fn(({ type, shopId, payload }) =>
+    `${String(type).toLowerCase()}:${shopId}:${payload.orderId}_${payload.trackingNumber}`
+  ),
+  emitTaskToMachine: jest.fn(),
+}));
+
 jest.mock('axios', () => ({
   post: jest.fn(),
 }));
@@ -38,6 +49,8 @@ const FulfillmentService = require('../../service/fulfillment');
 const { uploadFilePathToR2 } = require('../../service/cloudflareR2/r2.service');
 const { logOrderHistory } = require('../../service/orderHistoryLogger');
 const { logOrderLifecycleEvent } = require('../../service/orderLifecycleLogger');
+const ExtensionTask = require('../../models/extensionTask.model');
+const { emitTaskToMachine } = require('../../lib/taskEmitter');
 const controller = require('../etsyOrder.controller');
 
 function makeRes() {
@@ -624,6 +637,133 @@ describe('updateEtsyOrderTrackingForAllItems lifecycle', () => {
       status: 'success',
       metadata: { fromStatus: 'New', toStatus: 'Shipped' },
     }));
+  });
+
+  test('stores the first valid carrier handoff date for every Etsy item', async () => {
+    const beforeDoc = { _id: 'etsy-oid-2', orderId: 'ETSY-HANDOFF-1', status: 'Shipped' };
+    const actualShipAt = new Date('2026-09-25T03:00:00.000Z');
+    const updated = {
+      _id: 'etsy-oid-2',
+      orderId: 'ETSY-HANDOFF-1',
+      status: 'Shipped',
+      items: [{ transactionId: 't1', tracking_info: { status: 'Shipped', tracking: 'YT456', actualShipAt } }],
+    };
+    db.EtsyOrder.findOne.mockReturnValueOnce({ lean: jest.fn().mockResolvedValue(beforeDoc) });
+    db.EtsyOrder.findOneAndUpdate.mockResolvedValue(updated);
+
+    const req = {
+      params: { orderId: 'ETSY-HANDOFF-1' },
+      body: { tracking: 'YT456', actualShipAt: actualShipAt.toISOString() },
+      user: { _id: 'u1', email: 'cs@example.com' },
+      ip: '127.0.0.1',
+      headers: { 'user-agent': 'jest' },
+    };
+    const res = makeRes();
+
+    await controller.updateEtsyOrderTrackingForAllItems(req, res);
+
+    expect(db.EtsyOrder.findOneAndUpdate).toHaveBeenCalledWith(
+      { orderId: 'ETSY-HANDOFF-1' },
+      {
+        $set: expect.objectContaining({
+          'items.$[].tracking_info.tracking': 'YT456',
+          'items.$[carrierPending].tracking_info.actualShipAt': actualShipAt,
+        }),
+      },
+      {
+        new: true,
+        arrayFilters: [{ 'carrierPending.tracking_info.actualShipAt': null }],
+      }
+    );
+  });
+
+  test('queues a new Etsy tracking number once for the shop extension', async () => {
+    const shopId = '6881aba9c1bbdfc541b5cd4d';
+    const beforeDoc = { _id: 'etsy-oid-3', orderId: 'ETSY-UPLOAD-1', shopId, status: 'New' };
+    const updated = {
+      _id: 'etsy-oid-3',
+      orderId: 'ETSY-UPLOAD-1',
+      status: 'New',
+      items: [{ transactionId: 't1', tracking_info: { status: 'Shipped', tracking: '9200190339407916396940' } }],
+    };
+    db.EtsyOrder.findOne.mockReturnValueOnce({ lean: jest.fn().mockResolvedValue(beforeDoc) });
+    db.EtsyOrder.findOneAndUpdate.mockResolvedValue(updated);
+    db.EtsyOrder.updateOne.mockResolvedValue({ modifiedCount: 1 });
+    ExtensionTask.findOne.mockReturnValue({ lean: jest.fn().mockResolvedValue(null) });
+    emitTaskToMachine.mockResolvedValue({ taskId: `etsy_upload_tracking:${shopId}:ETSY-UPLOAD-1_9200190339407916396940` });
+
+    const req = {
+      params: { orderId: 'ETSY-UPLOAD-1' },
+      body: { tracking: '9200190339407916396940' },
+      app: { get: jest.fn(() => ({ to: jest.fn() })) },
+      user: { _id: 'u1', email: 'cs@example.com' },
+      ip: '127.0.0.1',
+      headers: { 'user-agent': 'jest' },
+    };
+    const res = makeRes();
+
+    await controller.updateEtsyOrderTrackingForAllItems(req, res);
+
+    expect(emitTaskToMachine).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        type: 'ETSY_UPLOAD_TRACKING',
+        shopId,
+        machineId: shopId,
+        payload: expect.objectContaining({
+          mongoShopId: shopId,
+          shopId,
+          machineId: shopId,
+          orderId: 'ETSY-UPLOAD-1',
+          trackingNumber: '9200190339407916396940',
+        }),
+      })
+    );
+  });
+
+  test('does not re-queue an Etsy tracking task that is already completed', async () => {
+    const shopId = '6881aba9c1bbdfc541b5cd4d';
+    const beforeDoc = { _id: 'etsy-oid-4', orderId: 'ETSY-UPLOAD-2', shopId, status: 'Shipped' };
+    const updated = {
+      _id: 'etsy-oid-4',
+      orderId: 'ETSY-UPLOAD-2',
+      status: 'Shipped',
+      items: [{ transactionId: 't1', tracking_info: { status: 'Shipped', tracking: 'YT123' } }],
+    };
+    db.EtsyOrder.findOne.mockReturnValueOnce({ lean: jest.fn().mockResolvedValue(beforeDoc) });
+    db.EtsyOrder.findOneAndUpdate.mockResolvedValue(updated);
+    ExtensionTask.findOne.mockReturnValue({ lean: jest.fn().mockResolvedValue({ status: 'completed' }) });
+
+    const req = {
+      params: { orderId: 'ETSY-UPLOAD-2' },
+      body: { tracking: 'YT123' },
+      app: { get: jest.fn(() => ({ to: jest.fn() })) },
+      user: { _id: 'u1', email: 'cs@example.com' },
+      ip: '127.0.0.1',
+      headers: { 'user-agent': 'jest' },
+    };
+    const res = makeRes();
+
+    await controller.updateEtsyOrderTrackingForAllItems(req, res);
+
+    expect(emitTaskToMachine).not.toHaveBeenCalled();
+  });
+
+  test('rejects an invalid Etsy carrier handoff date', async () => {
+    const req = {
+      params: { orderId: 'ETSY-HANDOFF-2' },
+      body: { tracking: 'YT789', actualShipAt: 'not-a-date' },
+      user: { _id: 'u1', email: 'cs@example.com' },
+      ip: '127.0.0.1',
+      headers: { 'user-agent': 'jest' },
+    };
+    const res = makeRes();
+
+    await controller.updateEtsyOrderTrackingForAllItems(req, res);
+
+    expect(res.status).toHaveBeenCalledWith(400);
+    expect(res.json).toHaveBeenCalledWith({ message: 'actualShipAt must be a valid ISO date' });
+    expect(db.EtsyOrder.findOneAndUpdate).not.toHaveBeenCalled();
   });
 });
 

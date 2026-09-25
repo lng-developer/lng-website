@@ -22,6 +22,8 @@ const {
     buildEtsyTrackingInfoResponse,
     buildEtsyTrackingSummary,
 } = require("../service/etsyTrackingResponse.service");
+const ExtensionTask = require("../models/extensionTask.model");
+const { buildTaskId, emitTaskToMachine } = require("../lib/taskEmitter");
 const logger = require("../helper/logger");
 const {
     applyRulesToSku,
@@ -3849,6 +3851,7 @@ const updateEtsyOrderTrackingForAllItems = async (req, res) => {
         const body = req.body || {};
         const fulfillment = body.fulfillment !== undefined ? String(body.fulfillment).trim() : undefined;
         const tracking = body.tracking !== undefined ? String(body.tracking).trim() : undefined;
+        const actualShipAt = normalizeEtsyActualShipAt(body.actualShipAt);
         const note = body.note !== undefined ? String(body.note) : undefined;
         const status = body.status !== undefined ? String(body.status).trim() : undefined;
         const noteTarget = String(body.transactionId || body.orderItemId || "").trim();
@@ -3876,6 +3879,9 @@ const updateEtsyOrderTrackingForAllItems = async (req, res) => {
         }
 
         if (!orderId) return res.status(400).json({ message: "orderId is required" });
+        if (body.actualShipAt !== undefined && !actualShipAt) {
+            return res.status(400).json({ message: "actualShipAt must be a valid ISO date" });
+        }
         if (status && !ETSY_TRACKING_STATUSES.includes(status)) {
             return res.status(400).json({
                 message: "Invalid status",
@@ -3893,7 +3899,8 @@ const updateEtsyOrderTrackingForAllItems = async (req, res) => {
             fulfillment === undefined &&
             tracking === undefined &&
             status === undefined &&
-            noteUpdates.length === 0
+            noteUpdates.length === 0 &&
+            !actualShipAt
         ) {
             return res.status(400).json({
                 message: "No updatable fields provided (fulfillment/tracking/status/itemNotes)",
@@ -3918,6 +3925,7 @@ const updateEtsyOrderTrackingForAllItems = async (req, res) => {
         const set = {};
         if (fulfillment !== undefined) set["items.$[].tracking_info.fulfillment"] = fulfillment;
         if (tracking !== undefined) set["items.$[].tracking_info.tracking"] = tracking;
+        if (actualShipAt) set["items.$[carrierPending].tracking_info.actualShipAt"] = actualShipAt;
 
         if (nextStatus !== undefined) {
             set["items.$[].tracking_info.status"] = nextStatus;
@@ -3937,7 +3945,12 @@ const updateEtsyOrderTrackingForAllItems = async (req, res) => {
             ? await EtsyOrder.findOneAndUpdate(
                 { orderId },
                 { $set: set },
-                { new: true }
+                {
+                    new: true,
+                    ...(actualShipAt
+                        ? { arrayFilters: [{ "carrierPending.tracking_info.actualShipAt": null }] }
+                        : {}),
+                }
             )
             : await EtsyOrder.findOne({ orderId });
 
@@ -4004,6 +4017,8 @@ const updateEtsyOrderTrackingForAllItems = async (req, res) => {
             }));
         }
 
+        const etsyUpload = await queueEtsyTrackingUpload({ req, order: beforeDoc, tracking });
+
         const responseScaleOverall =
             ["Fulfilled", "Shipping", "Shipped"].includes(nextStatus)
                 ? "Sent"
@@ -4023,12 +4038,51 @@ const updateEtsyOrderTrackingForAllItems = async (req, res) => {
                 noteUpdates,
                 noteResults,
             },
+            etsyUpload,
         });
     } catch (err) {
         logger.error(`updateEtsyOrderTrackingForAllItems error: ${err.message}`);
         return res.status(500).json({ message: "Update failed", error: err.message });
     }
 };
+
+async function queueEtsyTrackingUpload({ req, order, tracking }) {
+    const shopId = String(order?.shopId || "").trim();
+    const trackingNumber = String(tracking || "").trim();
+    if (!trackingNumber || trackingNumber === "-" || !/^[a-fA-F0-9]{24}$/.test(shopId)) {
+        return { status: "skipped" };
+    }
+
+    const type = "ETSY_UPLOAD_TRACKING";
+    const payload = {
+        machineId: shopId,
+        mongoShopId: shopId,
+        shopId,
+        orderId: order.orderId,
+        trackingNumber,
+    };
+    const taskId = buildTaskId({ type, shopId, machineId: shopId, payload });
+    const existing = await ExtensionTask.findOne({ taskId }, { status: 1 }).lean();
+    if (["sent", "received", "completed"].includes(existing?.status)) {
+        return { status: existing.status, taskId };
+    }
+
+    const io = req.app?.get?.("io");
+    if (!io) {
+        logger.error("Etsy tracking task was not queued: Socket.IO unavailable");
+        return { status: "unavailable", taskId };
+    }
+
+    await emitTaskToMachine(io, { taskId, type, shopId, machineId: shopId, payload });
+    return { status: "queued", taskId };
+}
+
+function normalizeEtsyActualShipAt(value) {
+    if (value === undefined || value === null || value === "") return null;
+    if (typeof value !== "string") return null;
+    const date = new Date(value);
+    return Number.isNaN(date.getTime()) ? null : date;
+}
 
 const ETSY_SCALE_KNOWN = [
     "Need Scale",
