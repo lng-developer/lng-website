@@ -153,4 +153,11 @@ describe("vendorTrackingNormalizer", () => {
     expect(result.actualShipAt.toISOString()).toBe("2026-09-09T03:05:19.000Z");
     expect(resolveCarrierAcceptanceEvent("merchize", { tracking_number: "9214" })).toBeNull();
   });
+
+  test.each([
+    ["merchize", { shipment_histories: [{ message: "Received by carrier", date: "2026-09-10T04:00:00Z" }] }],
+    ["beeful", { tracking: { events: [{ event: "Picked up", time: "2026-09-10T05:00:00Z" }] } }],
+  ])("uses carrier acceptance events from %s", (provider, payload) => {
+    expect(resolveCarrierAcceptanceEvent(provider, payload)?.actualShipAt).toBeInstanceOf(Date);
+  });
 });

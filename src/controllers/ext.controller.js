@@ -236,6 +236,8 @@ const TRACKING_VENDOR_SUBMISSION_KEYS = [
   "onos",
   "lenful",
 ];
+const CARRIER_HANDOFF_VENDOR_KEYS = new Set(["beeful", "merchfox", "merchize", "lenful"]);
+const CARRIER_HANDOFF_SUBMISSION_KEYS = ["grabink", "beeful", "merchfox", "merchize", "lenful"];
 const DEFAULT_TRACKING_SENT_WITHIN_DAYS = 15;
 
 function toPlainObject(value) {
@@ -259,15 +261,17 @@ function getTrackingSentAfter({ sentAfter, sentWithinDays } = {}) {
   return new Date(Date.now() - days * 24 * 60 * 60 * 1000);
 }
 
-function buildSentVendorSubmissionQuery(sentAfter) {
+function buildSentVendorSubmissionQuery(sentAfter, keys = TRACKING_VENDOR_SUBMISSION_KEYS) {
   const sentAtFilter = sentAfter ? { $gte: sentAfter } : { $exists: true };
   return {
     $or: [
-      ...TRACKING_VENDOR_SUBMISSION_KEYS.map((key) => ({
+      ...keys.map((key) => ({
         [`vendor_submissions.${key}.sent`]: true,
         [`vendor_submissions.${key}.sent_at`]: sentAtFilter,
       })),
-      { "grabink_submission.sent": true, "grabink_submission.sent_at": sentAtFilter },
+      ...(keys.includes("grabink") || keys.includes("beeful")
+        ? [{ "grabink_submission.sent": true, "grabink_submission.sent_at": sentAtFilter }]
+        : []),
     ],
   };
 }
@@ -296,6 +300,15 @@ function getSentTrackingVendorKeys(doc = {}, { sentAfter = null } = {}) {
   }
 
   return [...keys];
+}
+
+function hasMissingCarrierHandoff(doc = {}) {
+  return (doc.items || []).some((item) => !item?.tracking_info?.actualShipAt);
+}
+
+function getCarrierHandoffVendorKeys(doc = {}, options) {
+  return getSentTrackingVendorKeys(doc, options)
+    .filter((vendorKey) => CARRIER_HANDOFF_VENDOR_KEYS.has(vendorKey));
 }
 
 function getItemVendorKey(doc, item, sentVendorKeys = []) {
@@ -1873,7 +1886,7 @@ function applyToItemsOfVendor(
   return changed;
 }
 
-async function updateOrderByVendors(orderId, vpidToVendorPrefetched = null) {
+async function updateOrderByVendors(orderId, vpidToVendorPrefetched = null, allowedVendorKeys = null) {
   const doc = await OrderCustomProduct.findOne({ orderId: orderId.trim() });
   if (!doc) throw new Error(`Order not found in DB: ${orderId}`);
 
@@ -1887,7 +1900,8 @@ async function updateOrderByVendors(orderId, vpidToVendorPrefetched = null) {
 
   doc.__vpidToVendor = vpidToVendor;
 
-  const vendorKeys = getSentTrackingVendorKeys(doc);
+  const vendorKeys = getSentTrackingVendorKeys(doc)
+    .filter((vendorKey) => !allowedVendorKeys || allowedVendorKeys.includes(vendorKey));
   doc.__sentTrackingVendorKeys = vendorKeys;
 
   if (vendorKeys.length === 0) {
@@ -1981,8 +1995,17 @@ async function previewOrderVendorTracking(orderId) {
 async function runBatch({ max = 1100, dryRun = false, sentAfter = null, sentWithinDays = null } = {}) {
   const trackingSentAfter = getTrackingSentAfter({ sentAfter, sentWithinDays });
   const candidates = await OrderCustomProduct.find({
-    status: "Fulfilled",
-    ...buildSentVendorSubmissionQuery(trackingSentAfter),
+    $or: [
+      {
+        status: "Fulfilled",
+        ...buildSentVendorSubmissionQuery(trackingSentAfter),
+      },
+      {
+        status: "Shipped",
+        "items.tracking_info.actualShipAt": null,
+        ...buildSentVendorSubmissionQuery(trackingSentAfter, CARRIER_HANDOFF_SUBMISSION_KEYS),
+      },
+    ],
   })
     .sort({ createdAt: -1 })
     .limit(max)
@@ -1998,9 +2021,9 @@ async function runBatch({ max = 1100, dryRun = false, sentAfter = null, sentWith
 
   const vpidToVendor = await buildVendorMapsFromVpidSet(vpidSet);
 
-  const filtered = candidates.filter((o) => {
-    return getSentTrackingVendorKeys(o, { sentAfter: trackingSentAfter }).length > 0;
-  });
+  const filtered = candidates.filter((o) => o.status === "Shipped"
+    ? hasMissingCarrierHandoff(o) && getCarrierHandoffVendorKeys(o, { sentAfter: trackingSentAfter }).length > 0
+    : getSentTrackingVendorKeys(o, { sentAfter: trackingSentAfter }).length > 0);
 
   if (dryRun) {
     return {
@@ -2012,7 +2035,9 @@ async function runBatch({ max = 1100, dryRun = false, sentAfter = null, sentWith
       vendorsPerOrder: filtered.map((o) => {
         return {
           orderId: o.orderId,
-          vendorKeys: getSentTrackingVendorKeys(o, { sentAfter: trackingSentAfter }),
+          vendorKeys: o.status === "Shipped"
+            ? getCarrierHandoffVendorKeys(o, { sentAfter: trackingSentAfter })
+            : getSentTrackingVendorKeys(o, { sentAfter: trackingSentAfter }),
         };
       }),
     };
@@ -2021,7 +2046,11 @@ async function runBatch({ max = 1100, dryRun = false, sentAfter = null, sentWith
   let ok = 0, fail = 0;
   for (const o of filtered) {
     try {
-      await updateOrderByVendors(o.orderId, vpidToVendor);
+      await updateOrderByVendors(
+        o.orderId,
+        vpidToVendor,
+        o.status === "Shipped" ? getCarrierHandoffVendorKeys(o, { sentAfter: trackingSentAfter }) : null,
+      );
       ok++;
     } catch (err) {
       fail++;

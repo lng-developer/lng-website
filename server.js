@@ -10,6 +10,7 @@ const connectDB = require("./src/config/db.config");
 const registerSocketHandlers = require("./src/socket/index");
 const presence = require("./src/lib/presence");
 const etsyVendorSyncScheduler = require("./src/service/etsyVendorSyncScheduler");
+const fulfillmentTrackingPullScheduler = require("./src/service/fulfillmentTrackingPullScheduler");
 const { startAutoScheduler } = require("./src/controllers/autoConfig.controller");
 
 // ===== App
@@ -142,6 +143,9 @@ function shutdown() {
     etsyVendorSyncScheduler.stop();
   } catch { }
   try {
+    fulfillmentTrackingPullScheduler.stop();
+  } catch { }
+  try {
     io.close();
   } catch { }
   try {
@@ -185,6 +189,7 @@ app.use((err, _req, res, _next) => {
 const PORT = process.env.PORT || 5000;
 connectDB().then(() => {
   etsyVendorSyncScheduler.start();
+  fulfillmentTrackingPullScheduler.start();
   if (process.env.AUTO_SCHEDULER_ENABLED !== "false") {
     startAutoScheduler(io);
   } else {

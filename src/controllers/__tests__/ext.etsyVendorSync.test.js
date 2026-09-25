@@ -221,6 +221,43 @@ describe("ext Etsy vendor sync", () => {
     ]);
   });
 
+  test("custom-product dry-run rechecks recent shipped orders missing carrier handoff only for configured providers", async () => {
+    mockCustomOrderFindLean([
+      {
+        orderId: "SHIPPED-MERCHFOX",
+        status: "Shipped",
+        vendor_submissions: { merchfox: { sent: true, sent_at: new Date() } },
+        items: [{ tracking_info: { actualShipAt: null }, cost_breakdown: { vendorProductId: "vp-merchfox" } }],
+      },
+    ]);
+    mockSelectLean(db.vendorProduct.find, [
+      { _id: "vp-merchfox", vendor_id: "vendor-merchfox" },
+    ]);
+    mockSelectLean(db.vendor.find, [
+      { _id: "vendor-merchfox", name: "MerchFox", fulfillment_type: "API" },
+    ]);
+
+    const result = await controller.runBatch({ max: 10, dryRun: true });
+
+    expect(db.orderCustomProduct.find).toHaveBeenCalledWith({
+      $or: expect.arrayContaining([
+        expect.objectContaining({ status: "Fulfilled" }),
+        expect.objectContaining({
+          status: "Shipped",
+          "items.tracking_info.actualShipAt": null,
+        }),
+      ]),
+    });
+    expect(result).toEqual(expect.objectContaining({
+      scanned: 1,
+      orderIds: ["SHIPPED-MERCHFOX"],
+      vendorsPerOrder: [{
+        orderId: "SHIPPED-MERCHFOX",
+        vendorKeys: ["merchfox"],
+      }],
+    }));
+  });
+
   test("custom-product Lenful sync surfaces token errors without saving", async () => {
     const save = jest.fn();
     db.orderCustomProduct.findOne.mockResolvedValue({

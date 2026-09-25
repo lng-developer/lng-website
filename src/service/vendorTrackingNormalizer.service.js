@@ -255,14 +255,20 @@ function pickBestTracking(root) {
 
 function resolveCarrierAcceptanceEvent(provider, payload = {}) {
   const key = normalizeProviderKey(provider);
-  if (key !== "merchfox" && key !== "lenful") return null;
+  const providerKey = key === "grabink" ? "beeful" : key;
+  if (!["beeful", "merchfox", "merchize", "lenful"].includes(providerKey)) return null;
 
   const tracking = payload?.tracking || payload?.data?.tracking || {};
-  const events = Array.isArray(tracking?.events) ? tracking.events : [];
+  const events = [
+    tracking?.events,
+    payload?.shipment_histories,
+    payload?.data?.shipment_histories,
+    payload?.tracking_response?.shipment_histories,
+  ].find(Array.isArray) || [];
   const accepted = events
     .map((event) => {
-      const label = firstValue(event?.status, event?.description, event?.event);
-      const rawTime = firstValue(event?.time_utc, event?.datetime, event?.time_iso, event?.time, event?.created_at);
+      const label = firstValue(event?.status, event?.description, event?.event, event?.message);
+      const rawTime = firstValue(event?.time_utc, event?.datetime, event?.time_iso, event?.time, event?.created_at, event?.date);
       const actualShipAt = rawTime ? new Date(rawTime) : null;
       return { event, label, actualShipAt };
     })
@@ -276,7 +282,7 @@ function resolveCarrierAcceptanceEvent(provider, payload = {}) {
   return {
     actualShipAt: accepted.actualShipAt,
     shipEvidence: {
-      provider: key,
+      provider: providerKey,
       event: accepted.label,
       location: cleanTrackingString(accepted.event?.location),
       eventAt: accepted.actualShipAt.toISOString(),
