@@ -201,6 +201,22 @@ const amazonFinanceTotalSchema = new mongoose.Schema(
   { _id: false }
 );
 
+const amazonConfirmationSchema = new mongoose.Schema(
+  {
+    state: {
+      type: String,
+      enum: ["reserved", "submitted", "confirmed", "needs_review", "failed"],
+      required: true,
+    },
+    batchId: { type: mongoose.Schema.Types.ObjectId, ref: "ShippingBatch", required: true },
+    amazonBatchId: { type: String, default: "" },
+    reservedAt: { type: Date, default: null },
+    submittedAt: { type: Date, default: null },
+    finalizedAt: { type: Date, default: null },
+  },
+  { _id: false }
+);
+
 /**
  * Order schema
  */
@@ -242,6 +258,7 @@ const orderCustomProductSchema = new mongoose.Schema({
   buyerRequestedCancellation: { type: Boolean, default: false },
   buyerRequestedCancelReason: { type: String, trim: true, default: "" },
   amazonOrderReportUpdatedAt: { type: Date, default: null },
+  amazonConfirmation: { type: amazonConfirmationSchema, default: undefined },
 
   shopId: {
     type: mongoose.Schema.Types.ObjectId,
