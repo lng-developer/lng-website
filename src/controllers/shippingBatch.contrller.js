@@ -5,6 +5,12 @@ const Shop = db.shop;
 const ExtensionTask = db.ExtensionTask;
 const RealtimeLog = db.RealtimeLog;
 const { emitTaskToMachine, buildTaskId } = require("../lib/taskEmitter");
+const {
+  amazonUsDate,
+  carrierFromTrackingInfo,
+  evaluateAmazonConfirmationEligibility,
+  normalizeField,
+} = require("../service/amazonConfirmationEligibility.service");
 
 const downloadAmazonFeedReport = async (req, res, next) => {
   try {
@@ -488,34 +494,6 @@ function buildShipDateString(baseDate) {
   );
 
   return shipDate.toISOString().replace(".000Z", "+00:00");
-}
-
-// Chuẩn hóa field để bỏ khoảng trắng, dấu " và dấu , ở cuối
-function normalizeField(value) {
-  if (value === null || value === undefined) return "";
-  return String(value)
-    .trim() // bỏ khoảng trắng 2 đầu
-    .replace(/^"+|"+$/g, "") // bỏ " ở đầu/cuối nếu có
-    .replace(/,+$/g, ""); // bỏ dấu phẩy ở cuối (case "9214...,")
-}
-
-function carrierFromTrackingInfo(info = {}) {
-  const structuredCarrier = normalizeField(info.carrier);
-  if (structuredCarrier) return structuredCarrier;
-  const legacyCarrier = normalizeField(info.note)
-    .split("|")
-    .map(part => normalizeField(part))
-    .reverse()
-    .find(part => /^carrier:/i.test(part));
-  return legacyCarrier ? normalizeField(legacyCarrier.replace(/^carrier:/i, "")) : "";
-}
-
-function amazonUsDate(date = new Date()) {
-  const parts = new Intl.DateTimeFormat("en-US", {
-    timeZone: "America/Los_Angeles", year: "numeric", month: "2-digit", day: "2-digit",
-  }).formatToParts(date);
-  const byType = Object.fromEntries(parts.map(part => [part.type, part.value]));
-  return `${byType.year}-${byType.month}-${byType.day}`;
 }
 
 function buildCompletedShippingFile(completed, options = {}) {
@@ -2098,6 +2076,7 @@ const _extractOrderDetails = (orders) =>
   });
 
 function getOrderShipmentSnapshot(order = {}) {
+  const eligibility = evaluateAmazonConfirmationEligibility({ order });
   const items = [];
   for (const item of order.items || []) {
     const tracking = normalizeField(item?.tracking_info?.tracking);
@@ -2117,20 +2096,8 @@ function getOrderShipmentSnapshot(order = {}) {
   const trackingNumbers = [...new Set(items.map((item) => item.tracking))];
   const trackingItem = items[0] || null;
   const isSplitShipment = trackingNumbers.length > 1;
-  const blockedStatus = ["Canceled", "Cancelled", "Refund"].includes(order.status);
-  const bulkBlockReason = order.buyerRequestedCancellation
-    ? "BUYER_CANCELLATION"
-    : blockedStatus
-      ? "ORDER_NOT_ELIGIBLE"
-    : !trackingItem
-      ? "MISSING_TRACKING"
-      : !trackingItem.carrier
-        ? "MISSING_CARRIER"
-        : isSplitShipment
-          ? "SPLIT_SHIPMENT"
-          : !trackingItem.actualShipAt
-            ? "MISSING_ACTUAL_SHIP_DATE"
-            : "";
+  const firstReason = eligibility.reasons[0] || "";
+  const bulkBlockReason = firstReason === "SPLIT_OR_UNTRACKED_ITEM" ? "SPLIT_SHIPMENT" : firstReason;
   return {
     hasTracking: !!trackingItem,
     tracking: trackingItem?.tracking || "",
@@ -2147,7 +2114,8 @@ function getOrderShipmentSnapshot(order = {}) {
     items,
     trackingCount: trackingNumbers.length,
     isSplitShipment,
-    bulkConfirmEligible: !bulkBlockReason,
+    eligibility,
+    bulkConfirmEligible: eligibility.readyForReview,
     bulkBlockReason,
   };
 }

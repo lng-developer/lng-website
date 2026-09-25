@@ -17,6 +17,7 @@ describe("actual ship date eligibility", () => {
 
   test("uses the Los Angeles date from the carrier handoff timestamp", () => {
     const shipment = controller._test.getOrderShipmentSnapshot({
+      shipByDate: new Date("2026-09-20T07:00:00.000Z"),
       items: [
         {
           orderItemId: "i1",
@@ -31,6 +32,11 @@ describe("actual ship date eligibility", () => {
     });
 
     expect(shipment.bulkConfirmEligible).toBe(true);
+    expect(shipment.eligibility).toMatchObject({
+      readyForReview: true,
+      shipDate: "2026-09-18",
+      reasons: [],
+    });
     expect(shipment.trackingInfo.actualShipAt.toISOString()).toBe(
       "2026-09-19T01:20:23.000Z",
     );
