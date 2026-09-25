@@ -1,7 +1,7 @@
 const cron = require("node-cron");
 
 const DEFAULT_CRON = "5 * * * *";
-const DEFAULT_TIMEOUT_MS = 30000;
+const DEFAULT_TIMEOUT_MS = 120000;
 let job = null;
 let running = false;
 
