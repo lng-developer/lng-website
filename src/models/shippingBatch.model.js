@@ -77,6 +77,7 @@ const AmazonFeedSchema = new mongoose.Schema(
 const ShippingBatchSchema = new mongoose.Schema(
   {
     machineId: { type: String, required: true },
+    shopId: { type: mongoose.Schema.Types.ObjectId, ref: "Shop", default: null, index: true },
     label: { type: String },
     confirmShipDate: { type: Date },
 

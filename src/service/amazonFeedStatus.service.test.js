@@ -4,6 +4,7 @@ function makeBatch(overrides = {}) {
   return {
     _id: "batch-1",
     machineId: "machine-1",
+    shopId: "shop-1",
     completed: [{ orderId: "112-0319169-1534648" }],
     amazonFeed: {},
     save: jest.fn().mockResolvedValue(undefined),
@@ -26,9 +27,11 @@ describe("applyAmazonFeedStatus", () => {
   test("stores a terminal report from the owning machine", async () => {
     const batch = makeBatch();
     const ShippingBatch = { findById: jest.fn().mockResolvedValue(batch) };
+    const OrderModel = { findOneAndUpdate: jest.fn().mockResolvedValue({ orderId: "112-0319169-1534648" }) };
 
     const result = await applyAmazonFeedStatus({
       ShippingBatch,
+      OrderModel,
       batchId: "batch-1",
       machineId: "machine-1",
       event: {
@@ -46,5 +49,17 @@ describe("applyAmazonFeedStatus", () => {
     expect(result.terminal).toBe(true);
     expect(batch.amazonFeed.amazonBatchId).toBe("93703020720");
     expect(batch.save).toHaveBeenCalledTimes(1);
+    expect(OrderModel.findOneAndUpdate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        orderId: "112-0319169-1534648",
+        shopId: "shop-1",
+        "amazonConfirmation.batchId": "batch-1",
+        "amazonConfirmation.state": "submitted",
+      }),
+      expect.objectContaining({
+        $set: expect.objectContaining({ "amazonConfirmation.state": "confirmed" }),
+      }),
+      { new: true },
+    );
   });
 });

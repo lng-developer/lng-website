@@ -1,4 +1,5 @@
 const { reconcileAmazonFeed } = require("./amazonFeedReconciliation.service");
+const { finalizeAmazonConfirmation } = require("./amazonConfirmationReservation.service");
 
 function createStatusError(code, message) {
   const error = new Error(message);
@@ -6,7 +7,7 @@ function createStatusError(code, message) {
   return error;
 }
 
-async function applyAmazonFeedStatus({ ShippingBatch, batchId, machineId, event }) {
+async function applyAmazonFeedStatus({ ShippingBatch, OrderModel, batchId, machineId, event }) {
   if (!ShippingBatch || !batchId || !machineId) {
     throw createStatusError("INVALID_INPUT", "batchId and machineId are required");
   }
@@ -29,6 +30,20 @@ async function applyAmazonFeedStatus({ ShippingBatch, batchId, machineId, event 
   if (!result.duplicate) {
     batch.amazonFeed = result.next;
     await batch.save();
+  }
+  if (result.terminal && OrderModel && batch.shopId) {
+    const state = result.next.status === "done" ? "confirmed" : result.next.status;
+    const transitions = await Promise.all((batch.completed || []).map((item) => finalizeAmazonConfirmation({
+      OrderModel,
+      orderId: item.orderId,
+      shopId: batch.shopId,
+      batchId: batch._id,
+      state,
+      amazonBatchId: result.next.amazonBatchId,
+    })));
+    if (transitions.some(({ finalized }) => !finalized)) {
+      throw createStatusError("ORDER_FINALIZATION_REJECTED", "Amazon feed was stored but an order confirmation could not be finalized");
+    }
   }
   return {
     batchId: String(batch._id),
