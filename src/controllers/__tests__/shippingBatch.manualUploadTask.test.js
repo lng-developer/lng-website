@@ -26,18 +26,18 @@ function makeRes() {
   return res;
 }
 
-test('manual upload responds successfully after emitting the extension task', async () => {
+test('manual upload uses the carrier-confirmed batch ship date', async () => {
   const batch = {
     _id: 'batch-1',
     shopId: 'shop-1',
     machineId: 'machine-1',
     label: 'Batch 1',
-    completed: [{ orderId: '111-3898217-9805865', tracking: '9214490411397506652594', carrier: 'USPS', shipDate: '2026-09-26' }],
+    completed: [{ orderId: '111-3898217-9805865', tracking: '9214490411397506652594', carrier: 'USPS', shipDate: '2026-09-23' }],
     review: {
       approvedAt: new Date(),
       confirmedSingleShipment: true,
       confirmedNoTransparency: true,
-      shipDate: '2026-09-23',
+      shipDate: '2026-09-22',
     },
     save: jest.fn().mockResolvedValue(),
   };

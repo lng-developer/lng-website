@@ -502,69 +502,102 @@ function buildShipDateString(baseDate) {
   return shipDate.toISOString().replace(".000Z", "+00:00");
 }
 
-function buildCompletedShippingFile(completed, options = {}) {
+const SHIPPING_CONFIRMATION_HEADERS = [
+  "order-id", "order-item-id", "quantity", "ship-date", "carrier-code",
+  "carrier-name", "tracking-number", "ship-method", "transparency_code",
+  "ship_from_address_name", "ship_from_address_line1", "ship_from_address_line2",
+  "ship_from_address_line3", "ship_from_address_city", "ship_from_address_county",
+  "ship_from_address_state_or_region", "ship_from_address_postalcode",
+  "ship_from_address_countrycode", "ship_from_supply_source_id",
+];
+
+function buildCompletedShippingRow(item, options = {}) {
   const {
     carrierCode = "USPS",
     shipMethod = "USPS First Class",
-    shipDate, // đã build sẵn ở ngoài
+    shipDate,
   } = options;
+  if (!item.orderId || !item.tracking) return null;
 
-  const headers = [
-    "order-id", "order-item-id", "quantity", "ship-date", "carrier-code",
-    "carrier-name", "tracking-number", "ship-method", "transparency_code",
-    "ship_from_address_name", "ship_from_address_line1", "ship_from_address_line2",
-    "ship_from_address_line3", "ship_from_address_city", "ship_from_address_county",
-    "ship_from_address_state_or_region", "ship_from_address_postalcode",
-    "ship_from_address_countrycode", "ship_from_supply_source_id",
-  ];
-  let content = `${headers.join("\t")}\n`;
+  const orderId = normalizeField(item.orderId);
+  const tracking = normalizeField(item.tracking);
+  const itemShipDate = normalizeField(item.shipDate) || normalizeField(shipDate);
+  if (!orderId || !tracking) return null;
 
-  for (const item of completed) {
-    if (!item.orderId || !item.tracking) continue;
+  let finalCarrierCode = carrierCode;
+  let finalShipMethod = shipMethod;
 
-    const orderId = normalizeField(item.orderId);
-    const tracking = normalizeField(item.tracking);
-    const itemShipDate = normalizeField(shipDate) || normalizeField(item.shipDate);
-
-    if (!orderId || !tracking) continue;
-
-    let finalCarrierCode = carrierCode;
-    let finalShipMethod = shipMethod;
-
-    if (tracking.startsWith("4PX")) {
-      finalCarrierCode = "4PX";
-      finalShipMethod = "4PX-Global Express";
-    }
-
-    if (tracking.startsWith("UK")) {
-      finalCarrierCode = "Yanwen";
-      finalShipMethod = "Yanwen Air Economy Mail General";
-    }
-
-    if (tracking.startsWith("UL")) {
-      finalCarrierCode = "Yanwen";
-      finalShipMethod = "Yanwen Air Economy Mail General";
-    }
-
-    if (tracking.startsWith("YT")) {
-      finalCarrierCode = "Yun Express";
-      finalShipMethod = "YunExpress Global Direct line (standard )-Tracked";
-    }
-
-    if (tracking.startsWith("TBA")) {
-      finalCarrierCode = "Amazon Shipping";
-      finalShipMethod = "Standard Shipping";
-    }
-
-    content += [
-      orderId, "", "", itemShipDate, finalCarrierCode, "", tracking, finalShipMethod,
-      "", "", "", "", "", "", "", "", "", "", "",
-    ].join("\t");
-
-    content += "\n";
+  if (tracking.startsWith("4PX")) {
+    finalCarrierCode = "4PX";
+    finalShipMethod = "4PX-Global Express";
+  }
+  if (tracking.startsWith("UK") || tracking.startsWith("UL")) {
+    finalCarrierCode = "Yanwen";
+    finalShipMethod = "Yanwen Air Economy Mail General";
+  }
+  if (tracking.startsWith("YT")) {
+    finalCarrierCode = "Yun Express";
+    finalShipMethod = "YunExpress Global Direct line (standard )-Tracked";
+  }
+  if (tracking.startsWith("TBA")) {
+    finalCarrierCode = "Amazon Shipping";
+    finalShipMethod = "Standard Shipping";
   }
 
-  return content;
+  return [
+    orderId, "", "", itemShipDate, finalCarrierCode, "", tracking, finalShipMethod,
+    "", "", "", "", "", "", "", "", "", "", "",
+  ];
+}
+
+function buildShippingConfirmationPreview(completed, options = {}) {
+  const rows = completed
+    .map((item) => buildCompletedShippingRow(item, options))
+    .filter(Boolean)
+    .map((values) => Object.fromEntries(SHIPPING_CONFIRMATION_HEADERS.map((header, index) => [header, values[index]])));
+  return { format: "TSV", headers: SHIPPING_CONFIRMATION_HEADERS, rows };
+}
+
+function buildCompletedShippingFile(completed, options = {}) {
+  const rows = completed.map((item) => buildCompletedShippingRow(item, options)).filter(Boolean);
+  return `${SHIPPING_CONFIRMATION_HEADERS.join("\t")}\n${rows.map((row) => row.join("\t")).join("\n")}${rows.length ? "\n" : ""}`;
+}
+
+const idString = (value) => String(value?._id || value || "");
+
+function makeReviewBatchResult(batch, { shopId, shopName, reused = false, excludedOrders = [] } = {}) {
+  const completed = batch.completed || [];
+  return {
+    shopId: idString(batch.shopId) || shopId,
+    shopName,
+    batchId: batch._id,
+    batchLabel: batch.label,
+    success: true,
+    reused,
+    totalOrders: completed.length,
+    totalReal: completed.length,
+    totalFake: 0,
+    autoTaskSent: false,
+    excludedOrders,
+    uploadPreview: buildShippingConfirmationPreview(completed),
+    orders: completed.map((item) => ({
+      orderId: item.orderId,
+      tracking: item.tracking,
+      carrier: item.carrier || "",
+      trackingReceivedAt: item.trackingReceivedAt || null,
+      shipDate: item.shipDate || "",
+      isFake: item.isFake,
+      source: item.source,
+    })),
+  };
+}
+
+function draftOwnsCurrentReservations(batch, ordersById) {
+  return (batch.completed || []).every((item) => {
+    const order = ordersById.get(item.orderId);
+    return order?.amazonConfirmation?.state === "reserved"
+      && idString(order.amazonConfirmation.batchId) === idString(batch._id);
+  });
 }
 
 const downloadCompletedFile = async (req, res, next) => {
@@ -1452,11 +1485,9 @@ const manualUploadTask = async (req, res, next) => {
 
     console.log(`🚀 [MANUAL] Target machineId determined: ${targetMachineId}`);
 
-    const shipDateStr = batch.review.shipDate;
     const fileContent = buildCompletedShippingFile(batch.completed, {
       carrierCode: "USPS",
       shipMethod: "USPS First Class",
-      shipDate: shipDateStr,
     });
 
     const filename = batch.fileName ||
@@ -1515,7 +1546,7 @@ const manualUploadTask = async (req, res, next) => {
       uploadParams: {
         carrierCode: "USPS",
         shipMethod: "USPS First Class",
-        shipDate: shipDateStr
+        shipDate: batch.review.shipDate,
       },
 
       autoGenerated: false,
@@ -1607,7 +1638,7 @@ const manualUploadTask = async (req, res, next) => {
       uploadParams: {
         carrierCode: "USPS",
         shipMethod: "USPS First Class",
-        shipDate: shipDateStr
+        shipDate: batch.review.shipDate
       },
       manual: true,
       force: force,
@@ -1637,6 +1668,13 @@ const approveTrackingReview = async (req, res, next) => {
     if (batch.uploadTaskSent) return res.status(409).json({ ok: false, message: "Batch has already been sent" });
     if ((batch.tracking_fakes || []).length || !(batch.completed || []).length) {
       return res.status(400).json({ ok: false, message: "Only complete orders with real tracking can be reviewed" });
+    }
+    const carrierShipDates = [...new Set((batch.completed || []).map((item) => normalizeField(item.shipDate)).filter(Boolean))];
+    if (carrierShipDates.length !== 1) {
+      return res.status(409).json({ ok: false, message: "Batch must contain exactly one carrier-confirmed ship date" });
+    }
+    if (shipDate !== carrierShipDates[0]) {
+      return res.status(409).json({ ok: false, message: "shipDate must match the carrier-confirmed date" });
     }
     batch.review = { approvedAt: new Date(), shipDate, confirmedSingleShipment, confirmedNoTransparency };
     await batch.save();
@@ -1827,6 +1865,49 @@ const createBatchFromOrders = async (req, res, next) => {
           continue;
         }
 
+        const requestedOrderIds = new Set(shopOrderIds);
+        const ordersById = new Map(shopOrders.map((order) => [order.orderId, order]));
+        const draftBatches = await ShippingBatch.find({
+          shopId,
+          type: "CONFIRM",
+          uploadTaskSent: false,
+          $or: [
+            { "review.approvedAt": { $exists: false } },
+            { "review.approvedAt": null },
+          ],
+        }).lean();
+        const reusableDrafts = draftBatches.filter((batch) => {
+          const batchOrderIds = (batch.completed || []).map((item) => item.orderId);
+          return batchOrderIds.length
+            && batchOrderIds.every((orderId) => requestedOrderIds.has(orderId))
+            && draftOwnsCurrentReservations(batch, ordersById);
+        });
+        const reusedOrderIds = new Set(reusableDrafts.flatMap((batch) => (batch.completed || []).map((item) => item.orderId)));
+        const reservedButNotReusable = shopOrders.filter((order) => order.amazonConfirmation?.state === "reserved" && !reusedOrderIds.has(order.orderId));
+        const invalidDraft = reusableDrafts.find((batch) => new Set((batch.completed || []).map((item) => normalizeField(item.shipDate)).filter(Boolean)).size !== 1);
+
+        if (invalidDraft) {
+          results.push({
+            shopId,
+            success: false,
+            message: "Draft batch has multiple carrier ship dates and must be discarded before recreating it.",
+            excludedOrders: (invalidDraft.completed || []).map((item) => ({ orderId: item.orderId, reason: "DRAFT_BATCH_MIXED_SHIP_DATES" })),
+            orderCount: shopOrderIds.length,
+          });
+          continue;
+        }
+
+        if (reservedButNotReusable.length) {
+          results.push({
+            shopId,
+            success: false,
+            message: "A selected order is reserved by another Amazon confirmation draft.",
+            excludedOrders: reservedButNotReusable.map((order) => ({ orderId: order.orderId, reason: "AMAZON_CONFIRMATION_EXISTS" })),
+            orderCount: shopOrderIds.length,
+          });
+          continue;
+        }
+
         const completed = [];
         const tracking_fakes = [];
         const excludedOrders = [];
@@ -1834,7 +1915,13 @@ const createBatchFromOrders = async (req, res, next) => {
         let totalFake = 0;
 
         // Xử lý từng order — đọc tracking trực tiếp từ data đã fetch (tránh N+1 query)
-        for (const order of shopOrders) {
+        for (const draft of reusableDrafts) {
+          const shopInfo = shopOrders[0];
+          const shopName = shopInfo.shopId?.name || shopInfo.shopId?.store || `Shop ${shopId}`;
+          results.push(makeReviewBatchResult(draft, { shopId, shopName, reused: true }));
+        }
+
+        for (const order of shopOrders.filter((order) => !reusedOrderIds.has(order.orderId))) {
           const orderId = order.orderId;
           const shipment = getOrderShipmentSnapshot(order);
 
@@ -1859,7 +1946,7 @@ const createBatchFromOrders = async (req, res, next) => {
           }
         }
 
-        if (!completed.length) {
+        if (!completed.length && !reusableDrafts.length) {
           results.push({
             shopId,
             success: false,
@@ -1870,15 +1957,25 @@ const createBatchFromOrders = async (req, res, next) => {
           continue;
         }
 
+        if (!completed.length) continue;
+
         // Lấy shop name từ populated shopId
         const shopInfo = shopOrders[0];
         const shopName = shopInfo.shopId?.name || shopInfo.shopId?.store || `Shop ${shopId}`;
-        const batchLabel = label ? `${label} - ${shopName}` : `FE Batch - ${shopName}`;
+        const batchLabelBase = label ? `${label} - ${shopName}` : `FE Batch - ${shopName}`;
+        const completedByShipDate = new Map();
+        for (const item of completed) {
+          const shipDate = normalizeField(item.shipDate);
+          if (!completedByShipDate.has(shipDate)) completedByShipDate.set(shipDate, []);
+          completedByShipDate.get(shipDate).push(item);
+        }
 
+        for (const [shipDate, batchCompleted] of completedByShipDate) {
+        const batchLabel = completedByShipDate.size > 1 ? `${batchLabelBase} · ${shipDate}` : batchLabelBase;
         const batchId = new Types.ObjectId();
         const reservedOrderIds = [];
         let reservationFailed = false;
-        for (const item of completed) {
+        for (const item of batchCompleted) {
           const reservation = await reserveAmazonConfirmation({
             OrderModel: OrderCustomProduct,
             orderId: item.orderId,
@@ -1918,11 +2015,11 @@ const createBatchFromOrders = async (req, res, next) => {
             label: batchLabel,
             type: "CONFIRM",
             status: "CONFIRM_FILE_READY",
-            completed,
+            completed: batchCompleted,
             tracking_fakes,
             stats: {
-              totalOrders: completed.length,
-              totalReal,
+              totalOrders: batchCompleted.length,
+              totalReal: batchCompleted.length,
               totalFake
             }
           });
@@ -1938,12 +2035,12 @@ const createBatchFromOrders = async (req, res, next) => {
 
         createdBatches.push(batch);
 
-        console.log(`✅ [CREATE_BATCH] Created batch ${batch._id} for shop ${shopId} with ${completed.length} orders (${totalReal} real, ${totalFake} fake)`);
+        console.log(`✅ [CREATE_BATCH] Created batch ${batch._id} for shop ${shopId} with ${batchCompleted.length} orders (${batchCompleted.length} real, ${totalFake} fake)`);
 
         // Shipping confirmation changes the seller account; dispatch only after review.
         let autoTaskSent = false;
         const canAutoDispatch = false;
-        if (canAutoDispatch && autoUpload && totalReal > 0) {
+        if (canAutoDispatch && autoUpload && batchCompleted.length > 0) {
           try {
             const io = req.app.get("io");
             if (io) {
@@ -1962,7 +2059,7 @@ const createBatchFromOrders = async (req, res, next) => {
               }
               // Tạo file content
               const shipDateStr = buildShipDateString(new Date());
-              const fileContent = buildCompletedShippingFile(completed, {
+              const fileContent = buildCompletedShippingFile(batchCompleted, {
                 carrierCode,
                 shipMethod,
                 shipDate: shipDateStr,
@@ -1975,7 +2072,7 @@ const createBatchFromOrders = async (req, res, next) => {
                 machineId,
                 shopId,
                 label: batchLabel,
-                trackingData: completed.map(item => ({
+                trackingData: batchCompleted.map(item => ({
                   orderId: item.orderId,
                   tracking: item.tracking,
                   isFake: item.isFake,
@@ -2025,7 +2122,7 @@ const createBatchFromOrders = async (req, res, next) => {
                 label: batchLabel,
                 action: "create_batch",
                 level: "info",
-                message: `Created batch from FE orders and sent upload task: ${completed.length} orders for shop ${shopName}`,
+                message: `Created batch from FE orders and sent upload task: ${batchCompleted.length} orders for shop ${shopName}`,
                 ts: new Date(),
               });
 
@@ -2037,26 +2134,12 @@ const createBatchFromOrders = async (req, res, next) => {
         }
 
         results.push({
-          shopId,
-          shopName,
-          batchId: batch._id,
+          ...makeReviewBatchResult(batch, { shopId, shopName, excludedOrders }),
           batchLabel,
-          success: true,
-          totalOrders: completed.length,
-          totalReal,
           totalFake,
           autoTaskSent,
-          excludedOrders,
-          orders: completed.map(item => ({
-            orderId: item.orderId,
-            tracking: item.tracking,
-            carrier: item.carrier || "",
-            trackingReceivedAt: item.trackingReceivedAt || null,
-            shipDate: item.shipDate || "",
-            isFake: item.isFake,
-            source: item.source
-          }))
         });
+        }
 
       } catch (shopError) {
         console.error(`❌ [CREATE_BATCH] Failed to process shop ${shopId}:`, shopError.message);
@@ -2070,13 +2153,14 @@ const createBatchFromOrders = async (req, res, next) => {
     }
 
     const successCount = results.filter(r => r.success).length;
+    const failedCount = results.filter(r => !r.success).length;
     const totalOrdersProcessed = results.reduce((sum, r) => sum + (r.totalOrders || 0), 0);
 
     return res.status(201).json({
       ok: true,
       totalShops: shopIds.length,
       successfulBatches: successCount,
-      failedBatches: shopIds.length - successCount,
+      failedBatches: failedCount,
       totalOrdersProcessed,
       batches: results,
       message: `Created ${successCount} batches for ${shopIds.length} shops with ${totalOrdersProcessed} total orders`

@@ -10,8 +10,8 @@
  */
 
 jest.mock('../../models', () => ({
-  orderCustomProduct: { find: jest.fn(), findOne: jest.fn() },
-  ShippingBatch: { create: jest.fn() },
+  orderCustomProduct: { find: jest.fn(), findOne: jest.fn(), findOneAndUpdate: jest.fn() },
+  ShippingBatch: { create: jest.fn(), find: jest.fn() },
   OrderStatusSnapshot: { exists: jest.fn() },
 }));
 
@@ -38,7 +38,7 @@ function makeOrder(orderId, shopId, shopName, tracking = null) {
     orderId,
     shopId: shopName ? { _id: shopId, name: shopName } : shopId,
     items: tracking
-      ? [{ tracking_info: { tracking } }]
+      ? [{ tracking_info: { tracking, carrier: 'USPS', actualShipAt: new Date('2026-09-24T05:00:00.000Z') } }]
       : [],
   };
 }
@@ -58,6 +58,8 @@ function makeRes() {
 
 beforeEach(() => {
   jest.clearAllMocks();
+  db.ShippingBatch.find.mockReturnValue({ lean: jest.fn().mockResolvedValue([]) });
+  db.orderCustomProduct.findOneAndUpdate.mockResolvedValue({ _id: 'reserved-order' });
   db.ShippingBatch.create.mockImplementation(async (data) => ({
     _id: 'batch-id-' + Math.random().toString(36).slice(2),
     ...data,
@@ -189,7 +191,7 @@ describe('shopName from populated shopId', () => {
     const orderWithStore = {
       orderId: 'O1',
       shopId: { _id: shopId, store: storeValue },
-      items: [{ tracking_info: { tracking: 'TRK001' } }],
+      items: [{ tracking_info: { tracking: 'TRK001', carrier: 'USPS', actualShipAt: new Date('2026-09-24T05:00:00.000Z') } }],
     };
 
     db.orderCustomProduct.find.mockReturnValue(makeFindMock([orderWithStore]));
@@ -208,8 +210,8 @@ describe('shopName from populated shopId', () => {
 
 // ─── tracking_fakes schema safety ─────────────────────────────────────────
 
-describe('tracking_fakes schema safety', () => {
-  test('orders with no tracking go to tracking_fakes without tracking field', async () => {
+describe('orders without eligible carrier evidence', () => {
+  test('orders with no tracking stay excluded and do not create an Amazon batch', async () => {
     const shopId = 'shop1';
     const orderNoTracking = makeOrder('O1', shopId, 'Test Shop', null);
 
@@ -222,23 +224,19 @@ describe('tracking_fakes schema safety', () => {
       jest.fn()
     );
 
-    const [batchData] = db.ShippingBatch.create.mock.calls[0];
-    expect(batchData.tracking_fakes).toHaveLength(1);
-    expect(batchData.tracking_fakes[0]).not.toHaveProperty('tracking');
-    expect(batchData.tracking_fakes[0].orderId).toBe('O1');
+    expect(db.ShippingBatch.create).not.toHaveBeenCalled();
+    expect(res.json).toHaveBeenCalledWith(expect.objectContaining({
+      batches: [expect.objectContaining({ success: false, excludedOrders: [expect.objectContaining({ orderId: 'O1', reason: 'ORDER_NOT_ELIGIBLE' })] })],
+    }));
   });
 
-  test('invalid tracking values (dash, empty) count as no tracking', async () => {
+  test('invalid tracking values stay excluded and do not create an Amazon batch', async () => {
     const shopId = 'shop1';
     const dashes = ['-', '---', '  '];
 
     for (const badTracking of dashes) {
       jest.clearAllMocks();
-      db.ShippingBatch.create.mockImplementation(async (data) => ({
-        _id: 'id',
-        ...data,
-        save: jest.fn(),
-      }));
+      db.ShippingBatch.find.mockReturnValue({ lean: jest.fn().mockResolvedValue([]) });
 
       const orderBadTracking = {
         orderId: 'O1',
@@ -255,9 +253,7 @@ describe('tracking_fakes schema safety', () => {
         jest.fn()
       );
 
-      const [batchData] = db.ShippingBatch.create.mock.calls[0];
-      expect(batchData.tracking_fakes).toHaveLength(1);
-      expect(batchData.completed).toHaveLength(0);
+      expect(db.ShippingBatch.create).not.toHaveBeenCalled();
     }
   });
 });
@@ -288,7 +284,7 @@ describe('completed items structure', () => {
     });
   });
 
-  test('stats match completed and tracking_fakes counts', async () => {
+  test('stats count only the eligible orders included in the batch', async () => {
     const shopId = 'shop1';
     const orders = [
       makeOrder('O1', shopId, 'Test Shop', 'TRK001'),
@@ -307,7 +303,7 @@ describe('completed items structure', () => {
 
     const [batchData] = db.ShippingBatch.create.mock.calls[0];
     expect(batchData.stats.totalReal).toBe(2);
-    expect(batchData.stats.totalFake).toBe(1);
+    expect(batchData.stats.totalFake).toBe(0);
     expect(batchData.stats.totalOrders).toBe(2);
   });
 });
