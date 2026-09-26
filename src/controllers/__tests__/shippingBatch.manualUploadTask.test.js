@@ -32,7 +32,7 @@ test('manual upload responds successfully after emitting the extension task', as
     shopId: 'shop-1',
     machineId: 'machine-1',
     label: 'Batch 1',
-    completed: [{ orderId: '111-3898217-9805865', tracking: '9214490411397506652594', carrier: 'USPS' }],
+    completed: [{ orderId: '111-3898217-9805865', tracking: '9214490411397506652594', carrier: 'USPS', shipDate: '2026-09-26' }],
     review: {
       approvedAt: new Date(),
       confirmedSingleShipment: true,
@@ -73,6 +73,11 @@ test('manual upload responds successfully after emitting the extension task', as
   expect(db.RealtimeLog.create).toHaveBeenCalledWith(expect.objectContaining({
     machineId: 'machine-1',
     action: 'click',
+  }));
+  expect(emitTaskToMachine).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
+    payload: expect.objectContaining({
+      file: expect.objectContaining({ content: expect.stringContaining('2026-09-23') }),
+    }),
   }));
   expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ ok: true, batchId: 'batch-1' }));
 });

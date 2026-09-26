@@ -524,7 +524,7 @@ function buildCompletedShippingFile(completed, options = {}) {
 
     const orderId = normalizeField(item.orderId);
     const tracking = normalizeField(item.tracking);
-    const itemShipDate = normalizeField(item.shipDate) || shipDate;
+    const itemShipDate = normalizeField(shipDate) || normalizeField(item.shipDate);
 
     if (!orderId || !tracking) continue;
 
