@@ -2,6 +2,7 @@
 const presence = require("../lib/presence");
 const Shop = require("../models/shop.model");
 const ShippingBatch = require("../models/shippingBatch.model");
+const OrderCustomProduct = require("../models/orderCustomProduct.model");
 const ExtensionTask = require("../models/extensionTask.model");
 const taskStatusService = require("../service/taskStatus.service");
 const { applyAmazonFeedStatus } = require("../service/amazonFeedStatus.service");
@@ -270,6 +271,7 @@ module.exports = function registerSocketHandlers({ app, io }) {
       try {
         const result = await applyAmazonFeedStatus({
           ShippingBatch,
+          OrderModel: OrderCustomProduct,
           batchId: payload.batchId,
           machineId,
           event: payload,

@@ -5,12 +5,18 @@ const Shop = db.shop;
 const ExtensionTask = db.ExtensionTask;
 const RealtimeLog = db.RealtimeLog;
 const { emitTaskToMachine, buildTaskId } = require("../lib/taskEmitter");
+const { Types } = require("mongoose");
 const {
   amazonUsDate,
   carrierFromTrackingInfo,
   evaluateAmazonConfirmationEligibility,
   normalizeField,
 } = require("../service/amazonConfirmationEligibility.service");
+const {
+  markAmazonConfirmationSubmitted,
+  releaseAmazonConfirmationReservation,
+  reserveAmazonConfirmation,
+} = require("../service/amazonConfirmationReservation.service");
 
 const downloadAmazonFeedReport = async (req, res, next) => {
   try {
@@ -1414,6 +1420,36 @@ const manualUploadTask = async (req, res, next) => {
       });
     }
 
+    const batchShopId = String(batch.shopId || "");
+    if (!batchShopId) {
+      return res.status(409).json({ ok: false, message: "Legacy batch has no assigned shop" });
+    }
+    if (shopId && String(shopId) !== batchShopId) {
+      return res.status(409).json({ ok: false, message: "Requested shop does not own this batch" });
+    }
+    const targetPresence = req.app.get("presence")?.getByMachine(targetMachineId);
+    if (!targetPresence || targetPresence.status !== "online" || String(targetPresence.shopId) !== batchShopId) {
+      return res.status(409).json({ ok: false, message: "Assigned extension is offline or connected to another shop" });
+    }
+
+    const batchOrderIds = batch.completed.map((item) => item.orderId);
+    const batchOrders = await OrderCustomProduct.find({
+      orderId: { $in: batchOrderIds },
+      shopId: batch.shopId,
+    }).lean();
+    const invalidOrder = batch.completed.find((item) => {
+      const order = batchOrders.find((candidate) => candidate.orderId === item.orderId);
+      const eligibility = order && evaluateAmazonConfirmationEligibility({ order });
+      return !eligibility?.readyForReview || eligibility.tracking !== item.tracking || eligibility.carrier !== item.carrier;
+    });
+    if (invalidOrder) {
+      return res.status(409).json({
+        ok: false,
+        message: "Batch order is no longer eligible for Amazon confirmation",
+        orderId: invalidOrder.orderId,
+      });
+    }
+
     console.log(`🚀 [MANUAL] Target machineId determined: ${targetMachineId}`);
 
     const shipDateStr = batch.review.shipDate;
@@ -1510,6 +1546,9 @@ const manualUploadTask = async (req, res, next) => {
       hasClients: roomSize > 0,
       totalSockets: io.sockets.sockets.size
     });
+    if (!roomSize) {
+      return res.status(409).json({ ok: false, message: "Assigned extension socket is offline" });
+    }
 
     const emitted = await emitTaskToMachine(io, {
       type: "UPLOAD_TRACKING",
@@ -1520,6 +1559,20 @@ const manualUploadTask = async (req, res, next) => {
     recipients = 1;
     targetInfo = `machine:${targetMachineId}`;
     console.log(`📡 [MANUAL] Task emitted (taskId=${emitted.taskId})`);
+
+    const transitions = await Promise.all(batch.completed.map((item) => markAmazonConfirmationSubmitted({
+      OrderModel: OrderCustomProduct,
+      orderId: item.orderId,
+      shopId: batch.shopId,
+      batchId: batch._id,
+    })));
+    if (transitions.some(({ submitted }) => !submitted)) {
+      batch.uploadTaskSent = true;
+      batch.uploadTaskSentAt = new Date();
+      batch.uploadTaskSentBy = "frontend";
+      await batch.save();
+      return res.status(409).json({ ok: false, message: "Task was accepted but order reservation state needs review" });
+    }
 
     console.log(`📡 [MANUAL] Task emitted successfully to ${targetInfo} with ${roomSize} clients`);
 
@@ -1590,6 +1643,26 @@ const approveTrackingReview = async (req, res, next) => {
     return res.json({ ok: true, batchId: batch._id, review: batch.review });
   } catch (err) {
     next(err);
+  }
+};
+
+const discardShippingBatch = async (req, res, next) => {
+  try {
+    const batch = await ShippingBatch.findById(req.params.batchId);
+    if (!batch) return res.status(404).json({ ok: false, message: "Batch not found" });
+    if (batch.uploadTaskSent) return res.status(409).json({ ok: false, message: "Submitted batches cannot be discarded" });
+    if (!batch.shopId) return res.status(409).json({ ok: false, message: "Legacy batch cannot be discarded safely" });
+
+    const releases = await Promise.all((batch.completed || []).map(({ orderId }) => releaseAmazonConfirmationReservation({
+      OrderModel: OrderCustomProduct,
+      orderId,
+      shopId: batch.shopId,
+      batchId: batch._id,
+    })));
+    await batch.deleteOne();
+    return res.json({ ok: true, batchId: batch._id, releasedOrders: releases.filter(Boolean).length });
+  } catch (error) {
+    next(error);
   }
 };
 
@@ -1802,20 +1875,66 @@ const createBatchFromOrders = async (req, res, next) => {
         const shopName = shopInfo.shopId?.name || shopInfo.shopId?.store || `Shop ${shopId}`;
         const batchLabel = label ? `${label} - ${shopName}` : `FE Batch - ${shopName}`;
 
-        // Tạo batch cho shop này
-        const batch = await ShippingBatch.create({
-          machineId,
-          label: batchLabel,
-          type: "CONFIRM",
-          status: "CONFIRM_FILE_READY",
-          completed,
-          tracking_fakes,
-          stats: {
-            totalOrders: completed.length,
-            totalReal,
-            totalFake
+        const batchId = new Types.ObjectId();
+        const reservedOrderIds = [];
+        let reservationFailed = false;
+        for (const item of completed) {
+          const reservation = await reserveAmazonConfirmation({
+            OrderModel: OrderCustomProduct,
+            orderId: item.orderId,
+            shopId,
+            batchId,
+          });
+          if (reservation.reserved) {
+            reservedOrderIds.push(item.orderId);
+            continue;
           }
-        });
+
+          await Promise.all(reservedOrderIds.map((orderId) => releaseAmazonConfirmationReservation({
+            OrderModel: OrderCustomProduct,
+            orderId,
+            shopId,
+            batchId,
+          })));
+          results.push({
+            shopId,
+            success: false,
+            message: "An order is already reserved for Amazon confirmation.",
+            excludedOrders: [{ orderId: item.orderId, reason: "AMAZON_CONFIRMATION_EXISTS" }],
+            orderCount: shopOrderIds.length,
+          });
+          reservationFailed = true;
+          break;
+        }
+
+        if (reservationFailed) continue;
+
+        let batch;
+        try {
+          batch = await ShippingBatch.create({
+            _id: batchId,
+            machineId,
+            shopId,
+            label: batchLabel,
+            type: "CONFIRM",
+            status: "CONFIRM_FILE_READY",
+            completed,
+            tracking_fakes,
+            stats: {
+              totalOrders: completed.length,
+              totalReal,
+              totalFake
+            }
+          });
+        } catch (error) {
+          await Promise.all(reservedOrderIds.map((orderId) => releaseAmazonConfirmationReservation({
+            OrderModel: OrderCustomProduct,
+            orderId,
+            shopId,
+            batchId,
+          })));
+          throw error;
+        }
 
         createdBatches.push(batch);
 
@@ -2068,6 +2187,7 @@ const _extractOrderDetails = (orders) =>
       shipmentItems: shipment.items,
       trackingCount: shipment.trackingCount,
       isSplitShipment: shipment.isSplitShipment,
+      eligibility: shipment.eligibility,
       bulkConfirmEligible: shipment.bulkConfirmEligible,
       bulkBlockReason: shipment.bulkBlockReason,
       customerEmail: order.customer?.email || null,
@@ -2218,7 +2338,7 @@ async function checkOrdersStatusRealTime(machineId, options) {
 
   const [allOrders, totalCount, totalScanned, totalWithTracking, vendors, carriers] = await Promise.all([
     OrderCustomProduct.find(orderFilter)
-    .select('orderId shopId status createdAt updatedAt shipByDate earliestShipDate buyerRequestedCancellation buyerRequestedCancelReason items.orderItemId items.quantity items.tracking_info.tracking items.tracking_info.carrier items.tracking_info.trackingReceivedAt items.tracking_info.actualShipAt items.tracking_info.shipEvidence items.tracking_info.fulfillment items.tracking_info.status items.tracking_info.note items.tracking_info.updated_at customer.email total_amount')
+    .select('orderId shopId status createdAt updatedAt shipByDate earliestShipDate buyerRequestedCancellation buyerRequestedCancelReason amazonConfirmation items.orderItemId items.quantity items.tracking_info.tracking items.tracking_info.carrier items.tracking_info.trackingReceivedAt items.tracking_info.actualShipAt items.tracking_info.shipEvidence items.tracking_info.fulfillment items.tracking_info.status items.tracking_info.note items.tracking_info.updated_at customer.email total_amount')
     .sort({ createdAt: -1 })
     .skip((safePage - 1) * safeLimit)
     .limit(safeLimit)
@@ -2297,8 +2417,9 @@ module.exports = {
   checkOrdersStatus,
   manualUploadTask,
   approveTrackingReview,
+  discardShippingBatch,
   getUploadableBatches,
   createBatchFromOrders,
   downloadAmazonFeedReport,
-  _test: { buildCheckOrdersQuery, getOrderShipmentSnapshot },
+  _test: { buildCheckOrdersQuery, extractOrderDetails: _extractOrderDetails, getOrderShipmentSnapshot },
 };

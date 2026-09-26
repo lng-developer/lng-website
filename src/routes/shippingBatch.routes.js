@@ -64,6 +64,12 @@ router.post(
   shippingBatchController.approveTrackingReview
 );
 
+router.post(
+  "/:batchId/discard",
+  authenticateToken,
+  shippingBatchController.discardShippingBatch
+);
+
 // ✅ Route mới: FE lấy danh sách batch có thể upload
 router.get(
   "/uploadable",
