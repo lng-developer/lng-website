@@ -185,6 +185,36 @@ describe("Amazon confirmation eligibility guards", () => {
     }));
   });
 
+  test("lists sent batches with their Amazon feed status", async () => {
+    const batch = {
+      _id: "sent-1",
+      shopId: "shop-1",
+      machineId: "machine-1",
+      label: "Manual Upload - Store One",
+      type: "CONFIRM",
+      status: "CONFIRM_FILE_READY",
+      completed: [{ orderId: "112-0319169-1534648", tracking: "9234690339407902297338", carrier: "USPS", shipDate: "2026-09-24" }],
+      uploadTaskSent: true,
+      uploadTaskSentAt: new Date("2026-09-25T12:00:00.000Z"),
+      amazonFeed: { status: "done", recordsActivated: 1 },
+    };
+    const query = { sort: jest.fn(), skip: jest.fn(), limit: jest.fn(), select: jest.fn() };
+    query.sort.mockReturnValue(query);
+    query.skip.mockReturnValue(query);
+    query.limit.mockReturnValue(query);
+    query.select.mockResolvedValue([batch]);
+    db.ShippingBatch.find.mockReturnValue(query);
+    db.ShippingBatch.countDocuments.mockResolvedValue(1);
+    const res = response();
+
+    await controller.getUploadableBatches({ query: { machineId: "machine-1", sent: "true" } }, res, jest.fn());
+
+    expect(db.ShippingBatch.find).toHaveBeenCalledWith(expect.objectContaining({ uploadTaskSent: true }));
+    expect(res.json).toHaveBeenCalledWith(expect.objectContaining({
+      batches: [expect.objectContaining({ uploadTaskSent: true, amazonFeed: expect.objectContaining({ status: "done" }) })],
+    }));
+  });
+
   test("creates separate confirmation batches for different Los Angeles ship dates", async () => {
     const laterOrder = {
       ...validOrder(),

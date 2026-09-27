@@ -1724,6 +1724,7 @@ const getUploadableBatches = async (req, res, next) => {
       machineId,
       status = "CONFIRM_FILE_READY",
       type,
+      sent,
       limit = 20,
       page = 1,
     } = req.query;
@@ -1737,6 +1738,8 @@ const getUploadableBatches = async (req, res, next) => {
 
     if (machineId) filter.machineId = machineId;
     if (type) filter.type = type;
+    if (sent === "true") filter.uploadTaskSent = true;
+    if (sent === "false") filter.uploadTaskSent = false;
 
     const [batches, total] = await Promise.all([
       ShippingBatch.find(filter)
@@ -1756,6 +1759,7 @@ const getUploadableBatches = async (req, res, next) => {
         uploadTaskSent: 1,
         uploadTaskSentAt: 1,
         uploadTaskSentBy: 1,
+        amazonFeed: 1,
         completed: 1,
       }),
       ShippingBatch.countDocuments(filter),
@@ -1771,7 +1775,8 @@ const getUploadableBatches = async (req, res, next) => {
       canUpload: !batch.uploadTaskSent, // Có thể upload nếu chưa gửi task
       uploadTaskSent: batch.uploadTaskSent || false,
       uploadTaskSentAt: batch.uploadTaskSentAt || null,
-      uploadTaskSentBy: batch.uploadTaskSentBy || null
+      uploadTaskSentBy: batch.uploadTaskSentBy || null,
+      amazonFeed: batch.amazonFeed || {},
     }));
 
     return res.json({

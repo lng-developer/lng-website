@@ -837,6 +837,16 @@ function amazonOrderMetadataFromRow(row = {}) {
   };
 }
 
+function applyAmazonOrderMetadata(order, row = {}) {
+  const metadata = amazonOrderMetadataFromRow(row);
+  if (metadata.shipByDate) order.shipByDate = metadata.shipByDate;
+  if (metadata.earliestShipDate) order.earliestShipDate = metadata.earliestShipDate;
+  order.buyerRequestedCancellation = metadata.buyerRequestedCancellation;
+  order.buyerRequestedCancelReason = metadata.buyerRequestedCancelReason;
+  order.amazonOrderReportUpdatedAt = metadata.amazonOrderReportUpdatedAt;
+  return metadata;
+}
+
 const updateOrdersFromXlsx = async (req, res) => {
   try {
     const filePath = req.file.path;
@@ -1209,13 +1219,11 @@ const updateOrdersFromXlsx = async (req, res) => {
       let skipProcessingZip = false;
 
       if (existing) {
-        const amazonMetadata = amazonOrderMetadataFromRow(row);
-        existing.shipByDate = amazonMetadata.shipByDate;
-        existing.earliestShipDate = amazonMetadata.earliestShipDate;
-        existing.buyerRequestedCancellation = amazonMetadata.buyerRequestedCancellation;
-        existing.buyerRequestedCancelReason = amazonMetadata.buyerRequestedCancelReason;
-        existing.amazonOrderReportUpdatedAt = amazonMetadata.amazonOrderReportUpdatedAt;
-        if (normalizeImportedItemScaleStatuses(existing)) {
+        const amazonMetadata = applyAmazonOrderMetadata(existing, row);
+        if (!amazonMetadata.shipByDate) {
+          console.warn(`[IMPORT_ORDERS] Missing latest_ship_date for ${orderId}; received=${JSON.stringify(row.latest_ship_date ?? null)}; columns=${Object.keys(row).join(",")}`);
+        }
+        if (normalizeImportedItemScaleStatuses(existing) || existing.isModified?.()) {
           await existing.save();
         }
         const exists = existing.items.some(
@@ -5458,7 +5466,7 @@ module.exports = {
   updateTrackingByOrderId,
   applyManualVendorMapping,
   updateOrderItemQuantity,
-  _test: { parseAmazonReportDate, amazonOrderMetadataFromRow, normalizeTrackingCallbackField, normalizeActualShipAt }
+  _test: { parseAmazonReportDate, amazonOrderMetadataFromRow, applyAmazonOrderMetadata, normalizeTrackingCallbackField, normalizeActualShipAt }
 };
 
 function normalizeActualShipAt(value) {
