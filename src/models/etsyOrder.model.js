@@ -84,6 +84,7 @@ const EtsyOrderItemEmbeddedSchema = new Schema(
         tracking_info: {
             fulfillment: { type: String },
             tracking: { type: String },
+            actualShipAt: { type: Date, default: null },
             status: { type: String },
             note: { type: String },
             updated_at: { type: Date },
