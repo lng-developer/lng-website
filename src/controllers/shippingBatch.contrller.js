@@ -1720,8 +1720,11 @@ const getUploadableBatches = async (req, res, next) => {
       machineId,
       status = "CONFIRM_FILE_READY",
       type,
-      limit = 20
+      limit = 20,
+      page = 1,
     } = req.query;
+    const pageSize = Math.min(Math.max(Number(limit) || 20, 1), 100);
+    const currentPage = Math.max(Number(page) || 1, 1);
 
     const filter = {
       status,
@@ -1731,12 +1734,15 @@ const getUploadableBatches = async (req, res, next) => {
     if (machineId) filter.machineId = machineId;
     if (type) filter.type = type;
 
-    const batches = await ShippingBatch.find(filter)
+    const [batches, total] = await Promise.all([
+      ShippingBatch.find(filter)
       .sort({ createdAt: -1 })
-      .limit(Number(limit))
+      .skip((currentPage - 1) * pageSize)
+      .limit(pageSize)
       .select({
         _id: 1,
         machineId: 1,
+        shopId: 1,
         label: 1,
         type: 1,
         status: 1,
@@ -1745,15 +1751,16 @@ const getUploadableBatches = async (req, res, next) => {
         stats: 1,
         uploadTaskSent: 1,
         uploadTaskSentAt: 1,
-        uploadTaskSentBy: 1
-      });
+        uploadTaskSentBy: 1,
+        completed: 1,
+      }),
+      ShippingBatch.countDocuments(filter),
+    ]);
 
     const result = batches.map(batch => ({
-      batchId: batch._id,
-      machineId: batch.machineId,
-      label: batch.label,
-      type: batch.type,
+      ...makeReviewBatchResult(batch, { shopId: batch.shopId }),
       status: batch.status,
+      type: batch.type,
       createdAt: batch.createdAt,
       fileName: batch.fileName,
       stats: batch.stats,
@@ -1765,7 +1772,9 @@ const getUploadableBatches = async (req, res, next) => {
 
     return res.json({
       ok: true,
-      total: result.length,
+      total,
+      page: currentPage,
+      pageSize,
       batches: result
     });
 

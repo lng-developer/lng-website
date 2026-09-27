@@ -1,6 +1,6 @@
 jest.mock("../../models", () => ({
   orderCustomProduct: { find: jest.fn(), updateOne: jest.fn() },
-  ShippingBatch: { create: jest.fn(), find: jest.fn(), findById: jest.fn(), findByIdAndDelete: jest.fn() },
+  ShippingBatch: { create: jest.fn(), find: jest.fn(), findById: jest.fn(), findByIdAndDelete: jest.fn(), countDocuments: jest.fn() },
   ExtensionTask: { find: jest.fn() },
   RealtimeLog: { create: jest.fn() },
   shop: { findById: jest.fn() },
@@ -129,6 +129,55 @@ describe("Amazon confirmation eligibility guards", () => {
       batches: [expect.objectContaining({
         batchId: draftId,
         reused: true,
+        uploadPreview: expect.objectContaining({
+          headers: expect.arrayContaining(["order-id", "tracking-number", "ship-method"]),
+        }),
+      })],
+    }));
+  });
+
+  test("lists unsubmitted drafts in the same review shape used by new batches", async () => {
+    const draft = {
+      _id: "draft-1",
+      shopId: "shop-1",
+      machineId: "machine-1",
+      label: "Manual Upload - Store One",
+      type: "CONFIRM",
+      status: "CONFIRM_FILE_READY",
+      completed: [{
+        orderId: "112-0319169-1534648",
+        tracking: "9234690339407902297338",
+        carrier: "USPS",
+        shipDate: "2026-09-24",
+      }],
+      uploadTaskSent: false,
+    };
+    const query = {
+      sort: jest.fn(),
+      skip: jest.fn(),
+      limit: jest.fn(),
+      select: jest.fn(),
+    };
+    query.sort.mockReturnValue(query);
+    query.skip.mockReturnValue(query);
+    query.limit.mockReturnValue(query);
+    query.select.mockResolvedValue([draft]);
+    db.ShippingBatch.find.mockReturnValue(query);
+    db.ShippingBatch.countDocuments.mockResolvedValue(21);
+    const res = response();
+
+    await controller.getUploadableBatches({ query: { machineId: "machine-1", page: "2" } }, res, jest.fn());
+
+    expect(res.json).toHaveBeenCalledWith(expect.objectContaining({
+      total: 21,
+      page: 2,
+      pageSize: 20,
+      batches: [expect.objectContaining({
+        batchId: "draft-1",
+        shopId: "shop-1",
+        status: "CONFIRM_FILE_READY",
+        type: "CONFIRM",
+        orders: [expect.objectContaining({ orderId: draft.completed[0].orderId, shipDate: "2026-09-24" })],
         uploadPreview: expect.objectContaining({
           headers: expect.arrayContaining(["order-id", "tracking-number", "ship-method"]),
         }),
