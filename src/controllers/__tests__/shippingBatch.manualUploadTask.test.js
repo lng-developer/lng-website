@@ -59,6 +59,7 @@ test('manual upload uses the carrier-confirmed batch ship date', async () => {
     orderId: '111-3898217-9805865',
     shopId: 'shop-1',
     status: 'Shipped',
+    amazonConfirmation: { state: 'reserved', batchId: 'batch-1' },
     shipByDate: new Date('2026-09-24T07:00:00.000Z'),
     items: [{ tracking_info: { tracking: '9214490411397506652594', carrier: 'USPS', actualShipAt: new Date('2026-09-23T05:00:00.000Z') } }],
   }]) };

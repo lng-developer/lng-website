@@ -286,6 +286,7 @@ const orderCustomProductSchema = new mongoose.Schema({
   address_validation: {
     isValid: { type: Boolean, default: null },
     smartyResponse: { type: Object, default: null },
+    checkedAt: { type: Date, default: null },
   },
   scale_overall_status: {
     type: String,

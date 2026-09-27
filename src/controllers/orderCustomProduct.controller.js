@@ -610,6 +610,8 @@ const validateInvalidAddressesBatch = async (req, res) => {
         orderId: 1,
         customer_infor: 1,
         address_validation: 1,
+        scale_overall_status: 1,
+        "items.scale_status": 1,
         purchase_date: 1,
         status: 1,
         shopId: 1,
@@ -650,14 +652,18 @@ const validateInvalidAddressesBatch = async (req, res) => {
       // Nếu là system error (vd 402) => log lại, không đánh invalid, không overwrite nếu bạn không muốn
       // Ở đây mình vẫn lưu để trace (trừ khi dryRun).
       if (!dryRun) {
+        const updates = {
+          "address_validation.isValid": validationResult.isValid,
+          "address_validation.smartyResponse": validationResult.smartyResponse,
+          "address_validation.checkedAt": new Date(),
+        };
+        if (validationResult.isValid === true && o.scale_overall_status === "Address Invalid") {
+          const allItemsComplete = Array.isArray(o.items) && o.items.length > 0 && o.items.every((item) => item?.scale_status === "Complete");
+          updates.scale_overall_status = allItemsComplete ? "Ready" : "Pending";
+        }
         await OrderCustomProduct.updateOne(
           { orderId },
-          {
-            $set: {
-              address_validation: validationResult,
-              address_validation_checked_at: new Date(),
-            },
-          }
+          { $set: updates }
         );
       }
 

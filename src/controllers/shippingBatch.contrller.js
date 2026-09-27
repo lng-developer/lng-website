@@ -1472,7 +1472,11 @@ const manualUploadTask = async (req, res, next) => {
     }).lean();
     const invalidOrder = batch.completed.find((item) => {
       const order = batchOrders.find((candidate) => candidate.orderId === item.orderId);
-      const eligibility = order && evaluateAmazonConfirmationEligibility({ order });
+      const reservationBelongsToBatch = order?.amazonConfirmation?.state === "reserved"
+        && String(order.amazonConfirmation.batchId) === String(batch._id);
+      const eligibility = order && evaluateAmazonConfirmationEligibility({
+        order: reservationBelongsToBatch ? { ...order, amazonConfirmation: undefined } : order,
+      });
       return !eligibility?.readyForReview || eligibility.tracking !== item.tracking || eligibility.carrier !== item.carrier;
     });
     if (invalidOrder) {
