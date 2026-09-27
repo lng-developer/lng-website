@@ -1075,7 +1075,7 @@ describe('pushEtsyPlatformOrders production gate', () => {
       shopId: { _id: 'shop-1', name: 'Etsy Shop' },
       buyer: {},
       shipping: {},
-      items: [{ transactionId: 'tx-1', fulfillment_file: { front: 'https://cdn.example/front.png' }, cost_breakdown: {} }],
+      items: [{ transactionId: 'tx-1', fulfillment_file: { front: 'https://cdn.example/front.png' }, cost_breakdown: null }],
       markModified: jest.fn(),
       save,
     };

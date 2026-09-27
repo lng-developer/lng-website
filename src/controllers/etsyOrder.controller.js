@@ -4294,7 +4294,7 @@ const hasEtsyProductionFile = (item) =>
     Boolean(item?.svgFile) || getFulfillmentFileKeys(item?.fulfillment_file || item?.fulfillmentFile).length > 0;
 
 const withEtsyProductionVendorOverride = (costBreakdown) => {
-    const costCenter = toPlainObject(costBreakdown);
+    const costCenter = toPlainObject(costBreakdown) || {};
     if (costCenter.vendorProductId) return costCenter;
     return {
         ...costCenter,
