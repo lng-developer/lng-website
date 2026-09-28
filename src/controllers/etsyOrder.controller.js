@@ -28,6 +28,7 @@ const logger = require("../helper/logger");
 const {
     applyRulesToSku,
     buildRulesFromConfig,
+    getSkuMappingScopeQuery,
 } = require("../utils/skuMigrate");
 
 const etsyFulfillmentUploadDir = path.join(process.cwd(), "tmp_uploads", "etsy_fulfillment");
@@ -413,6 +414,7 @@ const loadActiveEtsySkuMappingConfigs = async () => {
         $and: [
             { $or: [{ valid_from: null }, { valid_from: { $lte: now } }] },
             { $or: [{ valid_to: null }, { valid_to: { $gte: now } }] },
+            getSkuMappingScopeQuery("etsy_orders"),
         ],
     })
         .sort({ priority: 1, createdAt: 1 })

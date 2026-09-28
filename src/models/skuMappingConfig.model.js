@@ -9,6 +9,9 @@ const skuMappingConfigSchema = new mongoose.Schema({
     productMap: { type: Map, of: String, default: {} }, // Map token sản phẩm ở giữa (OLD -> NEW)
     exactMap: { type: Map, of: String, default: {} }, // Map đúng-hệt SKU cũ -> SKU mới
 
+    // [] keeps legacy configs global; scoped configs only run in their declared source.
+    scopes: { type: [String], enum: ['amazon_ads', 'etsy_ads', 'etsy_orders'], default: [] },
+
     options: {
         upperProduct: { type: Boolean, default: true },
         // Giữ useToday cho tương thích cũ; nhưng util sẽ ưu tiên dateOptional
