@@ -123,7 +123,7 @@ function nextScheduledRun(config, now = new Date()) {
       if (at > now) candidates.push({ at, rule });
     }
   }
-  candidates.sort((a, b) => a.at - b.at);
+  candidates.sort((a, b) => (a.at - b.at) || (a.rule.daysOfWeek.length - b.rule.daysOfWeek.length));
   return candidates[0];
 }
 
