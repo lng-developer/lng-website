@@ -7,7 +7,7 @@ const SkuMappingConfig = db.SkuMappingConfig;
 const Shop = db.shop;
 const mongoose = require("mongoose");
 const { Types } = mongoose;
-const { resolveMappedSku } = require("../utils/skuMigrate");
+const { getSkuMappingScopeQuery, resolveMappedSku } = require("../utils/skuMigrate");
 
 // ép số
 const toNum = (v) => {
@@ -133,6 +133,7 @@ const importAdsForDay = async (req, res) => {
       $and: [
         { $or: [{ valid_from: null }, { valid_from: { $lte: now } }] },
         { $or: [{ valid_to: null }, { valid_to: { $gte: now } }] },
+        getSkuMappingScopeQuery("amazon_ads"),
       ],
     }).sort({ priority: 1, updatedAt: -1 }).lean();
     const allSkusOrNames = spendRows
