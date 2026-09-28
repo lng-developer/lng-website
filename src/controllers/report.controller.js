@@ -11,6 +11,7 @@ const {
   AMAZON_FEE_RATE,
   calcAmazonRevenue,
   calcAmazonOrderProfit,
+  calcAmazonReportProfit,
 } = require("../utils/amazonFinance");
 const AMZ_REPORT_TIMEZONE = "America/New_York";
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -919,17 +920,18 @@ const getReportMatrix = async (req, res) => {
     for (const sellerName of Object.keys(result)) {
       const S = result[sellerName];
       for (let i = 0; i < dayList.length; i++) {
-        const p1 =
-          S.revenue[i] -
-          (S.baseCost[i] +
-            S.fee[i] +
-            S.refund[i] +
-            Math.abs(S.itemPromotionDiscount[i]));
+        const { profit1, profit2 } = calcAmazonReportProfit({
+          revenue: S.revenue[i],
+          baseCost: S.baseCost[i],
+          fee: S.fee[i],
+          discount: S.itemPromotionDiscount[i],
+          ads: S.ads[i],
+          opCost: S.opCost[i],
+          refund: S.refund[i],
+        });
 
-        const p2 = p1 - (S.ads[i] + S.opCost[i]);
-
-        S.profit1[i] = +p1.toFixed(2);
-        S.profit2[i] = +p2.toFixed(2);
+        S.profit1[i] = profit1;
+        S.profit2[i] = profit2;
       }
 
       const sum = (a) => +a.reduce((x, y) => x + (y || 0), 0).toFixed(2);
