@@ -4412,6 +4412,7 @@ const serializeEtsyOrderForFulfillmentPlatform = (order) => ({
 });
 
 const recordEtsyFulfillmentPlatformV2Failure = async (orders, fulfillment, req = null) => {
+    const pendingReconciliation = fulfillment?.pendingReconciliation === true;
     await Promise.all(
         (orders || []).map(async (order) => {
             const prevSubmission = order.fulfillment_platform_v2_submission || {};
@@ -4422,6 +4423,7 @@ const recordEtsyFulfillmentPlatformV2Failure = async (orders, fulfillment, req =
                 attempt_count: attemptCount,
                 last_response: fulfillment,
                 sourceChannel: "ETSY",
+                pending_reconciliation: pendingReconciliation,
             };
             await order.save();
             await logOrderLifecycleEvent(buildOrderLifecyclePayload({
@@ -4429,9 +4431,11 @@ const recordEtsyFulfillmentPlatformV2Failure = async (orders, fulfillment, req =
                 req,
                 fallbackPlatform: "etsy",
                 stage: "VENDOR_PUSH",
-                eventType: "VENDOR_PUSH_FAILED",
-                status: "failed",
-                reason: "Failed to push Etsy orders to Fulfillment Platform",
+                eventType: pendingReconciliation ? "VENDOR_PUSH_PENDING_RECONCILIATION" : "VENDOR_PUSH_FAILED",
+                status: pendingReconciliation ? "pending" : "failed",
+                reason: pendingReconciliation
+                    ? "Fulfillment Platform request timed out; reconciliation required"
+                    : "Failed to push Etsy orders to Fulfillment Platform",
                 metadata: {
                     provider: "fulfillment-platform-v2",
                     attemptCount,
@@ -4574,6 +4578,7 @@ const pushEtsyOrdersToFulfillmentPlatformV2 = async ({ orders, req }) => {
         await recordEtsyFulfillmentPlatformV2Success({ orders, fulfillment, req });
         return { fulfillment };
     } catch (err) {
+        const pendingReconciliation = err.code === "ECONNABORTED" || /timeout/i.test(err.message || "");
         const fulfillment = err.response
             ? toSafeFulfillmentSummary(err.response.data, false)
             : toSafeFulfillmentSummary(
@@ -4584,6 +4589,7 @@ const pushEtsyOrdersToFulfillmentPlatformV2 = async ({ orders, req }) => {
                 },
                 false
             );
+        if (pendingReconciliation) fulfillment.pendingReconciliation = true;
 
         await recordEtsyFulfillmentPlatformV2Failure(orders, fulfillment, req);
 
