@@ -28,6 +28,7 @@ const logger = require("../helper/logger");
 const {
     applyRulesToSku,
     buildRulesFromConfig,
+    getSkuMappingScopeQuery,
 } = require("../utils/skuMigrate");
 
 const etsyFulfillmentUploadDir = path.join(process.cwd(), "tmp_uploads", "etsy_fulfillment");
@@ -54,6 +55,7 @@ const toBooleanStrict = (value) => {
     if (String(value).toLowerCase() === "false") return false;
     return null;
 };
+const roundMoney = (value) => Math.round((Number(value) || 0) * 100) / 100;
 
 const escapeRegExp = (value = "") => String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 const ETSY_LIST_SELECT_FIELDS = [
@@ -67,6 +69,7 @@ const ETSY_LIST_SELECT_FIELDS = [
     "shipping",
     "seller",
     "items",
+    "totals",
     "base_cost",
     "manual_vendor_required",
     "numberOfItems",
@@ -413,6 +416,7 @@ const loadActiveEtsySkuMappingConfigs = async () => {
         $and: [
             { $or: [{ valid_from: null }, { valid_from: { $lte: now } }] },
             { $or: [{ valid_to: null }, { valid_to: { $gte: now } }] },
+            getSkuMappingScopeQuery("etsy_orders"),
         ],
     })
         .sort({ priority: 1, createdAt: 1 })
@@ -1363,6 +1367,7 @@ const getListOrders = async (req, res) => {
             invalidAddress,
             includeLogs,
             logLimit,
+            includeCostSummary,
             sortBy = "saleDate",
             sortOrder = "desc",
         } = req.query;
@@ -1378,7 +1383,7 @@ const getListOrders = async (req, res) => {
         const sortField = allowedSortFields.includes(sortBy) ? sortBy : "saleDate";
         const sortDir = sortOrder === "asc" ? 1 : -1;
 
-        const [total, rawData] = await Promise.all([
+        const queryPromises = [
             EtsyOrder.countDocuments(filter),
             EtsyOrder.find(filter)
                 .select(ETSY_LIST_SELECT_FIELDS)
@@ -1390,7 +1395,36 @@ const getListOrders = async (req, res) => {
                 .skip(skip)
                 .limit(limitNum)
                 .lean(),
-        ]);
+        ];
+
+        if (toBooleanStrict(includeCostSummary) === true) {
+            queryPromises.push(EtsyOrder.aggregate([
+                { $match: filter },
+                {
+                    $group: {
+                        _id: null,
+                        orders: { $sum: 1 },
+                        revenue: { $sum: { $ifNull: ["$totals.orderTotal", 0] } },
+                        baseCost: { $sum: { $ifNull: ["$base_cost", 0] } },
+                    },
+                },
+            ]));
+        }
+
+        const [total, rawData, summaryRows = []] = await Promise.all(queryPromises);
+        const summaryRow = summaryRows[0] || {};
+        const summaryRevenue = roundMoney(summaryRow.revenue);
+        const summaryBaseCost = roundMoney(summaryRow.baseCost);
+        const summaryFee = roundMoney(summaryRevenue * 0.21);
+        const summary = toBooleanStrict(includeCostSummary) === true
+            ? {
+                orders: Number(summaryRow.orders) || total,
+                revenue: summaryRevenue,
+                baseCost: summaryBaseCost,
+                fee: summaryFee,
+                profit: roundMoney(summaryRevenue - summaryBaseCost - summaryFee),
+            }
+            : null;
 
         const historyByOrder = new Map();
         if (String(includeLogs).toLowerCase() === "true" && rawData.length) {
@@ -1441,6 +1475,9 @@ const getListOrders = async (req, res) => {
         const data = rawData.map((order) => {
             const shop = order.shopId || {};
             const sellerPopulated = order.seller?.sellerId || null;
+            const revenue = roundMoney(order.totals?.orderTotal);
+            const fee = roundMoney(revenue * 0.21);
+            const baseCost = roundMoney(order.base_cost);
 
             return {
                 orderId: order.orderId,
@@ -1496,6 +1533,7 @@ const getListOrders = async (req, res) => {
                         } : (item.seller?.sellerCode ? { sellerCode: item.seller.sellerCode } : null),
                         title: item.itemName || "",
                         quantity: item.quantity || 1,
+                        price: roundMoney(item.unitPrice),
                         version3Data,
                         baseImageUrl: item.baseImage?.imageUrl || "",
                         listingId: item.listingId || null,
@@ -1509,7 +1547,10 @@ const getListOrders = async (req, res) => {
                         cs_note: item.cs_note || "",
                     };
                 }),
-                base_cost: order.base_cost || 0,
+                base_cost: baseCost,
+                revenue,
+                fee,
+                profit: roundMoney(revenue - baseCost - fee),
                 tracking_summary: buildEtsyTrackingSummary(order, (order.items || [])[0] || {}),
                 sumbittedoetsy: order.sumbittedoetsy ?? false,
                 address_validation: order.address_validation?.isValid ?? null,
@@ -1530,6 +1571,7 @@ const getListOrders = async (req, res) => {
             totalCount: total,
             totalPages: Math.ceil(total / limitNum),
             currentPage: pageNum,
+            ...(summary ? { summary } : {}),
         });
     } catch (error) {
         return res.status(error.statusCode || 500).json({ error: error.message });

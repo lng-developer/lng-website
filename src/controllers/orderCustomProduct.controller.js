@@ -28,6 +28,7 @@ const logger = require("../helper/logger");
 const {
   applyRulesToSku,
   buildRulesFromConfig,
+  getSkuMappingScopeQuery,
 } = require("../utils/skuMigrate");
 const {
   AMAZON_FEE_RATE,
@@ -73,8 +74,11 @@ async function loadActiveSkuMappingConfigs() {
   const now = new Date();
   const configs = await SkuMappingConfig.find({
     is_active: true,
-    $or: [{ valid_from: null }, { valid_from: { $lte: now } }],
-    $or: [{ valid_to: null }, { valid_to: { $gte: now } }],
+    $and: [
+      { $or: [{ valid_from: null }, { valid_from: { $lte: now } }] },
+      { $or: [{ valid_to: null }, { valid_to: { $gte: now } }] },
+      getSkuMappingScopeQuery(),
+    ],
   })
     .sort({ priority: 1, updatedAt: -1 })
     .lean();

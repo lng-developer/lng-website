@@ -16,6 +16,21 @@ function calcAmazonFee(finance = {}) {
   return round2(revenue * AMAZON_FEE_RATE);
 }
 
+function calcAmazonReportProfit({
+  revenue = 0,
+  baseCost = 0,
+  fee = 0,
+  discount = 0,
+  ads = 0,
+  opCost = 0,
+  refund = 0,
+} = {}) {
+  const profit1 = round2(revenue - baseCost - fee - abs2(discount) - ads);
+  const profit2 = round2(profit1 - opCost - refund);
+
+  return { profit1, profit2 };
+}
+
 function calcAmazonOrderProfit({ finance = {}, baseCost = 0 } = {}) {
   const revenue = calcAmazonRevenue(finance);
   const discount = abs2(finance.item_promotion_discount);
@@ -34,5 +49,6 @@ module.exports = {
   AMAZON_FEE_RATE,
   calcAmazonRevenue,
   calcAmazonFee,
+  calcAmazonReportProfit,
   calcAmazonOrderProfit,
 };

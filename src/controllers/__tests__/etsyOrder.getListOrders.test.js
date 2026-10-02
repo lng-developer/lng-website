@@ -115,6 +115,14 @@ describe("getListOrders", () => {
     );
   });
 
+  test("does not aggregate financial totals for regular Etsy order lists", async () => {
+    const res = makeRes();
+
+    await controller.getListOrders({ query: { page: "1", limit: "10" } }, res);
+
+    expect(db.EtsyOrder.aggregate).not.toHaveBeenCalled();
+  });
+
   test("includes chronological history for the Etsy order when includeLogs=true", async () => {
     const orderId = new mongoose.Types.ObjectId("507f1f77bcf86cd799439011");
     mockFindLean([{ _id: orderId, orderId: "4105971529", items: [] }]);
@@ -152,6 +160,37 @@ describe("getListOrders", () => {
     expect(res.json.mock.calls[0][0].data[0].items[0].seller).toEqual(expect.objectContaining({
       sellerCode: "J2512",
     }));
+  });
+
+  test("returns paged financial fields and a full filtered summary for the Etsy cost report", async () => {
+    mockFindLean([{
+      _id: new mongoose.Types.ObjectId("507f1f77bcf86cd799439011"),
+      orderId: "4148263696",
+      base_cost: 33.18,
+      totals: { orderTotal: 83.51 },
+      items: [{ transactionId: "5185730497", sku: "J2609-NK-071526-11", quantity: 1, unitPrice: 100.95 }],
+    }]);
+    db.EtsyOrder.countDocuments.mockResolvedValue(286);
+    db.EtsyOrder.aggregate.mockResolvedValue([{ orders: 286, revenue: 16010.86, baseCost: 6604.17 }]);
+    const res = makeRes();
+
+    await controller.getListOrders({ query: { page: "1", limit: "10", includeCostSummary: "true" } }, res);
+
+    const payload = res.json.mock.calls[0][0];
+    expect(db.EtsyOrder.find.mock.results[0].value.select).toHaveBeenCalledWith(expect.stringContaining("totals"));
+    expect(payload.summary).toEqual({
+      orders: 286,
+      revenue: 16010.86,
+      baseCost: 6604.17,
+      fee: 3362.28,
+      profit: 6044.41,
+    });
+    expect(payload.data[0]).toEqual(expect.objectContaining({
+      revenue: 83.51,
+      fee: 17.54,
+      profit: 32.79,
+    }));
+    expect(payload.data[0].items[0]).toEqual(expect.objectContaining({ price: 100.95 }));
   });
 
   test("uses exact orderId search path before broad regex search", async () => {

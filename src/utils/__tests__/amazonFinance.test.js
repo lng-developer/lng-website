@@ -1,6 +1,7 @@
 const {
   calcAmazonOrderProfit,
   calcAmazonRevenue,
+  calcAmazonReportProfit,
 } = require("../amazonFinance");
 
 test("amazon revenue excludes marketplace tax", () => {
@@ -44,4 +45,18 @@ test("amazon fee fallback uses fifteen percent of revenue", () => {
       baseCost: 0,
     }),
   ).toMatchObject({ fee: 18, profit1: 102 });
+});
+
+test("amazon sale report puts ads in profit 1 and refund in profit 2", () => {
+  expect(
+    calcAmazonReportProfit({
+      revenue: 100,
+      baseCost: 20,
+      fee: 15,
+      discount: 3,
+      ads: 7,
+      opCost: 10,
+      refund: 5,
+    }),
+  ).toMatchObject({ profit1: 55, profit2: 40 });
 });

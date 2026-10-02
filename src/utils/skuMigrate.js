@@ -117,6 +117,17 @@ function applyRulesToSku(sku, rules) {
     return { ok: true, changed: next !== sku, next };
 }
 
+function getSkuMappingScopeQuery(scope) {
+    const globalConfigs = [
+        { scopes: { $exists: false } },
+        { scopes: { $size: 0 } },
+    ];
+
+    return {
+        $or: scope ? [...globalConfigs, { scopes: scope }] : globalConfigs,
+    };
+}
+
 function resolveMappedSku(sku, configs = []) {
     for (const cfg of configs) {
         const result = applyRulesToSku(sku, buildRulesFromConfig(cfg));
@@ -125,4 +136,4 @@ function resolveMappedSku(sku, configs = []) {
     return sku;
 }
 
-module.exports = { mapLikeToPlain, buildRulesFromConfig, applyRulesToSku, resolveMappedSku };
+module.exports = { mapLikeToPlain, buildRulesFromConfig, applyRulesToSku, getSkuMappingScopeQuery, resolveMappedSku };

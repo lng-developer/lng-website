@@ -25,3 +25,15 @@ test("list response excludes raw Etsy Ads payloads", async () => {
     "-rows.rawStats -rows.rawListing -sourceMeta -rawOverview"
   );
 });
+
+const { getSkuMappingScopeQuery } = jest.requireActual("../../utils/skuMigrate");
+
+test("Etsy Ads scope includes scoped and legacy global configs", () => {
+  expect(getSkuMappingScopeQuery("etsy_ads")).toEqual({
+    $or: [
+      { scopes: { $exists: false } },
+      { scopes: { $size: 0 } },
+      { scopes: "etsy_ads" },
+    ],
+  });
+});

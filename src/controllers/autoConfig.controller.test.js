@@ -56,6 +56,19 @@ test("runs the Saturday reconciliation in Vietnam time with its own data range",
   });
 });
 
+test("prefers the Saturday reconciliation when it overlaps the daily Ads run", () => {
+  const rules = [
+    { hour: 10, minute: 30, daysOfWeek: [0, 1, 2, 3, 4, 5, 6], startDaysAgo: 1, endDaysAgo: 1 },
+    { hour: 10, minute: 30, daysOfWeek: [6], startDaysAgo: 7, endDaysAgo: 2 },
+  ];
+  const next = nextScheduledRun({ type: "IMPORT_ADS", adsScheduleRules: rules }, new Date("2026-09-25T04:00:00.000Z"));
+
+  expect(next.rule).toMatchObject({ startDaysAgo: 7, endDaysAgo: 2 });
+  expect(taskForConfig({ _id: "cfg-ads", type: "IMPORT_ADS" }, next.at, "auto_scheduler", next.rule).payload).toMatchObject({
+    startDate: "2026-09-19", endDate: "2026-09-24",
+  });
+});
+
 test("allows Ads rules to replace legacy empty scheduleHours", async () => {
   const rules = [{ hour: 7, minute: 30, daysOfWeek: [0, 1, 2, 3, 4, 5, 6], startDaysAgo: 1, endDaysAgo: 1 }];
   AutoConfig.findById.mockReturnValue({ lean: jest.fn().mockResolvedValue({ _id: "cfg-ads", type: "IMPORT_ADS" }) });
