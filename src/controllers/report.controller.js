@@ -482,7 +482,7 @@ const getReportMatrix = async (req, res) => {
     }
 
     // ===== opCost cố định =====
-    const OPCOST_PER_PERSON_PER_DAY = 30;
+    const OPCOST_PER_PERSON_PER_DAY = 10;
 
     // ===== EXCLUDE user khỏi opCost =====
     // Hiện không exclude ai. Mọi seller đều được tính opCost trong khoảng

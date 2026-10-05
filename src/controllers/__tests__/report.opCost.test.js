@@ -70,5 +70,5 @@ test("charges opCost through the selected day for a seller without an end date",
     user: { role: "Admin" },
   }, res);
 
-  expect(res.json.mock.calls[0][0].data["Active seller"].totals.opCost).toBe(30);
+  expect(res.json.mock.calls[0][0].data["Active seller"].totals.opCost).toBe(10);
 });
