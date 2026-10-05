@@ -20,6 +20,7 @@ jest.mock("../models", () => ({
 }));
 
 const db = require("../models");
+const mongoose = require("mongoose");
 const { getOrderCostStatistics } = require("./report.controller");
 
 test("returns total Ads spend for the selected Orders Cost date range", async () => {
@@ -34,4 +35,6 @@ test("returns total Ads spend for the selected Orders Cost date range", async ()
   await getOrderCostStatistics({ query: { from: "2026-10-01", to: "2026-10-02" }, user: { role: "Admin" } }, res);
 
   expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ ads: 20 }));
+  const pipeline = mongoose.connection.collection.mock.results[0].value.aggregate.mock.calls[0][0];
+  expect(pipeline).toContainEqual({ $match: expect.objectContaining({ status: { $nin: ["Cancelled", "Canceled"] } }) });
 });

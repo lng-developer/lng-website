@@ -985,7 +985,9 @@ const getOrderCostStatistics = async (req, res) => {
     const isAdmin = /^admin$/i.test(role);
     const isSeller = /^seller$/i.test(role);
 
-    const matchStage = {};
+    const matchStage = {
+      status: { $nin: ["Cancelled", "Canceled"] },
+    };
 
     // Seller chỉ xem đơn của mình
     if (isSeller) {
@@ -1010,7 +1012,7 @@ const getOrderCostStatistics = async (req, res) => {
           .map((s) => s.trim())
           .filter(Boolean)) ||
       (status ? [status] : []);
-    if (statusesArr.length) matchStage.status = { $in: statusesArr };
+    if (statusesArr.length) matchStage.status.$in = statusesArr;
 
     // search
     if (search && search.trim()) {
