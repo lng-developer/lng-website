@@ -1254,12 +1254,56 @@ const getOrderCostStatistics = async (req, res) => {
       },
     ] = await col.aggregate(pipeline, { allowDiskUse: true }).toArray();
 
-    res.json(stats);
+    const { fromParts, toParts } = getAmzReportDateRange(from, to);
+    const ads = await getOrderCostAdsSpend({
+      fromParts,
+      toParts,
+      shopName,
+      sellerId: isSeller ? tokenUserId : sellerId,
+    });
+
+    res.json({ ...stats, ads });
   } catch (err) {
     console.error(err);
     res.status(500).json({ ok: false, message: "Failed to compute stats" });
   }
 };
+
+async function getOrderCostAdsSpend({ fromParts, toParts, shopName, sellerId }) {
+  if (!fromParts || !toParts) return 0;
+
+  const docs = await AdsDailySummary.find(
+    {
+      day: {
+        $gte: new Date(Date.UTC(fromParts.year, fromParts.month - 1, fromParts.day)),
+        $lte: new Date(Date.UTC(toParts.year, toParts.month - 1, toParts.day, 23, 59, 59, 999)),
+      },
+    },
+    { total_spend: 1, by_seller: 1 },
+  ).lean();
+
+  const shopIds = shopName?.trim()
+    ? new Set(
+        (await Shop.find({ name: { $regex: new RegExp(shopName.trim(), "i") } }, { _id: 1 }).lean()).map(
+          (shop) => String(shop._id),
+        ),
+      )
+    : null;
+
+  return +docs
+    .reduce((total, day) => {
+      if (!shopIds && !sellerId) return total + num(day.total_spend);
+      return total + (day.by_seller || [])
+        .filter((seller) => !sellerId || String(seller?.seller?._id) === String(sellerId))
+        .reduce(
+          (sellerTotal, seller) => sellerTotal + (seller.by_shop || [])
+            .filter((shop) => !shopIds || shopIds.has(String(shop.shop_id)))
+            .reduce((shopTotal, shop) => shopTotal + num(shop.spend), 0),
+          0,
+        );
+    }, 0)
+    .toFixed(2);
+}
 
 const importAmazonRefundCSV = async (req, res) => {
   try {
