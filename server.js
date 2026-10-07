@@ -11,6 +11,7 @@ const registerSocketHandlers = require("./src/socket/index");
 const presence = require("./src/lib/presence");
 const etsyVendorSyncScheduler = require("./src/service/etsyVendorSyncScheduler");
 const fulfillmentTrackingPullScheduler = require("./src/service/fulfillmentTrackingPullScheduler");
+const viettelPostTrackingScheduler = require("./src/service/viettelPostTrackingScheduler");
 const { startAutoScheduler } = require("./src/controllers/autoConfig.controller");
 
 // ===== App
@@ -146,6 +147,9 @@ function shutdown() {
     fulfillmentTrackingPullScheduler.stop();
   } catch { }
   try {
+    viettelPostTrackingScheduler.stop();
+  } catch { }
+  try {
     io.close();
   } catch { }
   try {
@@ -190,6 +194,7 @@ const PORT = process.env.PORT || 5000;
 connectDB().then(() => {
   etsyVendorSyncScheduler.start();
   fulfillmentTrackingPullScheduler.start();
+  viettelPostTrackingScheduler.start();
   if (process.env.AUTO_SCHEDULER_ENABLED !== "false") {
     startAutoScheduler(io);
   } else {

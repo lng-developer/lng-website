@@ -12,6 +12,7 @@ describe("server bootstrap", () => {
     const connectDB = jest.fn().mockResolvedValue();
     const etsyStart = jest.fn();
     const fulfillmentTrackingStart = jest.fn();
+    const viettelTrackingStart = jest.fn();
     const startAutoScheduler = jest.fn();
 
     jest.doMock("../../src/config/env.config", () => jest.fn());
@@ -30,6 +31,10 @@ describe("server bootstrap", () => {
     }));
     jest.doMock("../../src/service/fulfillmentTrackingPullScheduler", () => ({
       start: fulfillmentTrackingStart,
+      stop: jest.fn(),
+    }));
+    jest.doMock("../../src/service/viettelPostTrackingScheduler", () => ({
+      start: viettelTrackingStart,
       stop: jest.fn(),
     }));
     jest.doMock("../../src/controllers/autoConfig.controller", () => ({
@@ -88,6 +93,7 @@ describe("server bootstrap", () => {
     expect(connectDB).toHaveBeenCalledTimes(1);
     expect(etsyStart).toHaveBeenCalledTimes(1);
     expect(fulfillmentTrackingStart).toHaveBeenCalledTimes(1);
+    expect(viettelTrackingStart).toHaveBeenCalledTimes(1);
     expect(startAutoScheduler).toHaveBeenCalledTimes(1);
     expect(httpServer.requestTimeout).toBe(0);
     expect(listen).toHaveBeenCalledWith(5000, "0.0.0.0", expect.any(Function));
