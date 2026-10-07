@@ -39,6 +39,7 @@ const VendorWebhookLog = require("./vendorWebhookLog.model")
 const OrderProductShopify = require("./orderProductShopify.model")
 const OrderLifecycleEvent = require("./orderLifecycleEvent.model")
 const ShopifyStore = require("./shopifyStore.model")
+const FulfillmentLifecycleEvent = require("./fulfillmentLifecycleEvent.model")
 
 // Cau hinh mongoose dang global
 mongoose.Promise = global.Promise;
@@ -86,6 +87,7 @@ db.VendorWebhookLog = VendorWebhookLog
 db.orderProductShopify = OrderProductShopify
 db.OrderLifecycleEvent = OrderLifecycleEvent
 db.shopifyStore = ShopifyStore
+db.FulfillmentLifecycleEvent = FulfillmentLifecycleEvent
 db.connectDB = async () => {
   await mongoose
     .connect(process.env.MONGO_URI, {

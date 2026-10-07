@@ -13,6 +13,18 @@ const EtsyOrder = db.EtsyOrder || mongoose.model("EtsyOrder");
 const OrderCustomProduct = db.orderCustomProduct || mongoose.model("OrderCustomProduct");
 const VendorProduct = db.vendorProduct || mongoose.model("VendorProduct");
 const Vendor = db.vendor || mongoose.model("Vendor");
+const FulfillmentLifecycleEvent = db.FulfillmentLifecycleEvent || mongoose.model("FulfillmentLifecycleEvent");
+
+const FULFILLMENT_LIFECYCLE_EVENT_TYPES = new Set([
+  "fulfillment.accepted",
+  "shipment.created",
+  "shipment.label_ready",
+  "tracking.updated",
+  "shipment.carrier_handoff_confirmed",
+  "shipment.cancelled",
+  "shipment.failed",
+]);
+const FULFILLMENT_LIFECYCLE_MAX_AGE_SECONDS = 5 * 60;
 
 function norm(value) {
   return cleanTrackingString(value);
@@ -326,6 +338,70 @@ function timingSafeStringEqual(a, b) {
   return crypto.timingSafeEqual(left, right);
 }
 
+function fulfillmentWebhookError(message, status) {
+  const err = new Error(message);
+  err.status = status;
+  return err;
+}
+
+function verifyFulfillmentLifecycleWebhook(req) {
+  const secret = norm(process.env.FULFILLMENT_LIFECYCLE_WEBHOOK_SECRET);
+  if (!secret) throw fulfillmentWebhookError("Fulfillment lifecycle webhook is not configured", 503);
+
+  const timestamp = norm(req?.headers?.["x-lng-event-timestamp"]);
+  const signature = normalizeHmacSignature(req?.headers?.["x-lng-signature"]);
+  const timestampSeconds = Number(timestamp);
+  if (!Number.isInteger(timestampSeconds) || Math.abs(Date.now() / 1000 - timestampSeconds) > FULFILLMENT_LIFECYCLE_MAX_AGE_SECONDS) {
+    throw fulfillmentWebhookError("Invalid or expired lifecycle webhook timestamp", 401);
+  }
+  if (!signature) throw fulfillmentWebhookError("Invalid lifecycle webhook signature", 401);
+
+  const expected = crypto.createHmac("sha256", secret).update(getRawRequestBody(req)).digest("hex");
+  if (!timingSafeStringEqual(signature, expected)) {
+    throw fulfillmentWebhookError("Invalid lifecycle webhook signature", 401);
+  }
+}
+
+function validateFulfillmentLifecyclePayload(payload = {}) {
+  const required = ["eventId", "eventType", "occurredAt", "tenantReference", "externalOrderId", "fulfillmentOrderId"];
+  if (!payload || typeof payload !== "object" || required.some((key) => !norm(payload[key]))) {
+    throw fulfillmentWebhookError("Invalid fulfillment lifecycle event", 400);
+  }
+  if (!FULFILLMENT_LIFECYCLE_EVENT_TYPES.has(payload.eventType) || Number.isNaN(new Date(payload.occurredAt).getTime())) {
+    throw fulfillmentWebhookError("Unsupported or invalid fulfillment lifecycle event", 400);
+  }
+}
+
+async function findFulfillmentLifecycleOrder(externalOrderId) {
+  const query = { orderId: externalOrderId };
+  return (await EtsyOrder.findOne(query)) || (await OrderCustomProduct.findOne(query));
+}
+
+async function handleFulfillmentLifecycleWebhook({ payload, req }) {
+  verifyFulfillmentLifecycleWebhook(req);
+  validateFulfillmentLifecyclePayload(payload);
+
+  const order = await findFulfillmentLifecycleOrder(payload.externalOrderId);
+  if (!order) throw fulfillmentWebhookError("Fulfillment lifecycle order not found", 404);
+
+  try {
+    await FulfillmentLifecycleEvent.create({
+      eventId: payload.eventId,
+      eventType: payload.eventType,
+      tenantReference: payload.tenantReference,
+      externalOrderId: payload.externalOrderId,
+      fulfillmentOrderId: payload.fulfillmentOrderId,
+      occurredAt: new Date(payload.occurredAt),
+      receivedAt: new Date(),
+    });
+  } catch (err) {
+    if (err?.code === 11000) return { ok: true, duplicate: true };
+    throw err;
+  }
+
+  return { ok: true, duplicate: false };
+}
+
 function verifyOnosHmac(req, expectedSecret) {
   const received = normalizeHmacSignature(req.headers?.["x-onos-hmac-sha256"]);
   if (!received) return false;
@@ -395,6 +471,7 @@ async function handleWebhook({ provider, payload, req }) {
 }
 
 module.exports = {
+  handleFulfillmentLifecycleWebhook,
   handleWebhook,
   parseWebhook,
   parseOnosWebhook,

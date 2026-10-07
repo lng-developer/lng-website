@@ -14,6 +14,7 @@ router.get(
   vendorWebhookController.listVendorWebhookLogs
 );
 
+router.post("/fulfillment-platform-v2", vendorWebhookController.receiveFulfillmentLifecycleWebhook);
 router.get("/:provider", vendorWebhookController.verifyVendorWebhookEndpoint);
 router.post("/:provider", vendorWebhookController.receiveVendorWebhook);
 

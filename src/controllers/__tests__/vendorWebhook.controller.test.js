@@ -1,5 +1,6 @@
 jest.mock("../../service/vendorWebhook.service", () => ({
   handleWebhook: jest.fn(),
+  handleFulfillmentLifecycleWebhook: jest.fn(),
 }));
 
 jest.mock("../../service/vendorWebhookLog.service", () => ({
@@ -99,6 +100,17 @@ describe("vendorWebhook.controller", () => {
         httpStatus: 404,
       })
     );
+  });
+
+  test("Fulfillment lifecycle callback does not use the raw vendor webhook logger", async () => {
+    vendorWebhookService.handleFulfillmentLifecycleWebhook.mockResolvedValue({ ok: true, duplicate: false });
+    const req = { body: { customer: { address: "PII" } }, headers: {} };
+    const res = makeRes();
+
+    await vendorWebhookController.receiveFulfillmentLifecycleWebhook(req, res);
+
+    expect(res.json).toHaveBeenCalledWith({ ok: true, duplicate: false });
+    expect(vendorWebhookLogService.safeCreateVendorWebhookLog).not.toHaveBeenCalled();
   });
 
   test("lists webhook logs", async () => {

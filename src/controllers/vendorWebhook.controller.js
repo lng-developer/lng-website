@@ -47,6 +47,18 @@ const receiveVendorWebhook = async (req, res) => {
   }
 };
 
+const receiveFulfillmentLifecycleWebhook = async (req, res) => {
+  try {
+    const result = await vendorWebhookService.handleFulfillmentLifecycleWebhook({
+      payload: req.body || {},
+      req,
+    });
+    return res.json(result);
+  } catch (err) {
+    return res.status(err.status || 500).json({ ok: false, message: err.message });
+  }
+};
+
 const listVendorWebhookLogs = async (req, res) => {
   try {
     const result = await vendorWebhookLogService.listVendorWebhookLogs(req.query || {});
@@ -62,5 +74,6 @@ const listVendorWebhookLogs = async (req, res) => {
 module.exports = {
   verifyVendorWebhookEndpoint,
   receiveVendorWebhook,
+  receiveFulfillmentLifecycleWebhook,
   listVendorWebhookLogs,
 };
