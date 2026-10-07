@@ -3,7 +3,7 @@ jest.mock("../../models", () => ({
   orderCustomProduct: { findOne: jest.fn() },
   vendorProduct: { find: jest.fn() },
   vendor: { find: jest.fn() },
-  FulfillmentLifecycleEvent: { create: jest.fn() },
+  FulfillmentLifecycleEvent: { create: jest.fn(), findOne: jest.fn() },
 }));
 
 const crypto = require("crypto");
@@ -48,6 +48,7 @@ describe("handleFulfillmentLifecycleWebhook", () => {
     process.env = { ...oldEnv, FULFILLMENT_LIFECYCLE_WEBHOOK_SECRET: secret };
     db.EtsyOrder.findOne.mockResolvedValue({ _id: "order-object-id" });
     db.orderCustomProduct.findOne.mockResolvedValue(null);
+    db.FulfillmentLifecycleEvent.findOne.mockResolvedValue(null);
     db.FulfillmentLifecycleEvent.create.mockResolvedValue({});
   });
 
@@ -82,11 +83,11 @@ describe("handleFulfillmentLifecycleWebhook", () => {
 
   test("returns success for a duplicate event id", async () => {
     const payload = event();
-    const duplicate = Object.assign(new Error("duplicate"), { code: 11000 });
-    db.FulfillmentLifecycleEvent.create.mockRejectedValue(duplicate);
+    db.FulfillmentLifecycleEvent.findOne.mockResolvedValue({ eventId: payload.eventId });
 
     await expect(service.handleFulfillmentLifecycleWebhook({ payload, req: request(payload) }))
       .resolves.toEqual({ ok: true, duplicate: true });
+    expect(db.EtsyOrder.findOne).not.toHaveBeenCalled();
   });
 
   test("rejects an unknown LNG order", async () => {
@@ -102,5 +103,37 @@ describe("handleFulfillmentLifecycleWebhook", () => {
     await expect(service.handleFulfillmentLifecycleWebhook({ payload, req: request(payload) }))
       .rejects.toMatchObject({ status: 400 });
     expect(db.FulfillmentLifecycleEvent.create).not.toHaveBeenCalled();
+  });
+
+  test("keeps label pending until the carrier handoff event", async () => {
+    const order = {
+      vendor_submissions: {},
+      items: [{ tracking_info: { status: "New", tracking: "" } }],
+      markModified: jest.fn(),
+      save: jest.fn().mockResolvedValue(undefined),
+    };
+    db.EtsyOrder.findOne.mockResolvedValue(order);
+    const labelReady = event();
+
+    await service.handleFulfillmentLifecycleWebhook({ payload: labelReady, req: request(labelReady) });
+    expect(order.items[0].tracking_info.status).toBe("New");
+    expect(order.vendor_submissions.fulfillment_platform_v2).toEqual(expect.objectContaining({
+      event_type: "shipment.label_ready",
+      label_url: "https://labels.example/1",
+    }));
+
+    const handoff = event({
+      eventId: "dfbc9504-8511-44f0-a7ca-80e391b373cd",
+      eventType: "shipment.carrier_handoff_confirmed",
+      occurredAt: "2026-10-07T09:00:00.000Z",
+      shipment: { shipmentId: "shipment-1", carrierCode: "VIETTEL_POST", trackingNumber: "TRACK-1", actualShipAt: "2026-10-07T08:55:00.000Z" },
+    });
+    await service.handleFulfillmentLifecycleWebhook({ payload: handoff, req: request(handoff) });
+
+    expect(order.items[0].tracking_info).toEqual(expect.objectContaining({
+      status: "Shipped",
+      actualShipAt: new Date("2026-10-07T08:55:00.000Z"),
+    }));
+    expect(order.save).toHaveBeenCalledTimes(2);
   });
 });

@@ -25,6 +25,15 @@ const FULFILLMENT_LIFECYCLE_EVENT_TYPES = new Set([
   "shipment.failed",
 ]);
 const FULFILLMENT_LIFECYCLE_MAX_AGE_SECONDS = 5 * 60;
+const FULFILLMENT_LIFECYCLE_RANK = {
+  "fulfillment.accepted": 1,
+  "shipment.created": 2,
+  "shipment.label_ready": 3,
+  "tracking.updated": 4,
+  "shipment.carrier_handoff_confirmed": 5,
+  "shipment.cancelled": 6,
+  "shipment.failed": 6,
+};
 
 function norm(value) {
   return cleanTrackingString(value);
@@ -377,12 +386,71 @@ async function findFulfillmentLifecycleOrder(externalOrderId) {
   return (await EtsyOrder.findOne(query)) || (await OrderCustomProduct.findOne(query));
 }
 
+function applyFulfillmentLifecycleEvent(order, payload, now = new Date()) {
+  const previous = order.vendor_submissions?.fulfillment_platform_v2 || {};
+  const eventAt = new Date(payload.occurredAt);
+  const previousAt = previous.occurred_at ? new Date(previous.occurred_at) : null;
+  const previousRank = FULFILLMENT_LIFECYCLE_RANK[previous.event_type] || 0;
+  const nextRank = FULFILLMENT_LIFECYCLE_RANK[payload.eventType];
+  if ((previousAt && eventAt < previousAt) || nextRank < previousRank) return { skipped: true };
+
+  const shipment = payload.shipment || {};
+  order.vendor_submissions = order.vendor_submissions || {};
+  order.vendor_submissions.fulfillment_platform_v2 = {
+    ...previous,
+    fulfillment_order_id: payload.fulfillmentOrderId,
+    event_type: payload.eventType,
+    occurred_at: eventAt,
+    ...(shipment.shipmentId ? { shipment_id: shipment.shipmentId } : {}),
+    ...(shipment.carrierShipmentId ? { carrier_shipment_id: shipment.carrierShipmentId } : {}),
+    ...(shipment.carrierCode ? { carrier: shipment.carrierCode } : {}),
+    ...(shipment.trackingNumber ? { tracking: shipment.trackingNumber } : {}),
+    ...(shipment.labelUrl ? { label_url: shipment.labelUrl } : {}),
+    ...(payload.failure?.code ? { failure_code: payload.failure.code } : {}),
+    updated_at: now,
+  };
+  if (typeof order.markModified === "function") order.markModified("vendor_submissions");
+
+  if (payload.eventType !== "shipment.carrier_handoff_confirmed") return { skipped: false, handoffConfirmed: false };
+  const actualShipAt = new Date(shipment.actualShipAt || payload.occurredAt);
+  if (Number.isNaN(actualShipAt.getTime())) return { skipped: false, handoffConfirmed: false };
+  order.items = (order.items || []).map((item) => {
+    const trackingInfo = item.tracking_info || {};
+    const matchesShipment = !trackingInfo.tracking || trackingInfo.tracking === shipment.trackingNumber;
+    if (!matchesShipment) return item;
+    return {
+      ...item,
+      tracking_info: {
+        ...trackingInfo,
+        fulfillment: "Fulfillment Platform V2",
+        ...(shipment.trackingNumber ? { tracking: shipment.trackingNumber } : {}),
+        ...(shipment.carrierCode ? { carrier: shipment.carrierCode } : {}),
+        status: "Shipped",
+        ...(trackingInfo.actualShipAt ? {} : {
+          actualShipAt,
+          shipEvidence: { provider: "fulfillment-platform-v2", shipmentId: shipment.shipmentId || "" },
+        }),
+        updated_at: now,
+      },
+    };
+  });
+  if (typeof order.markModified === "function") order.markModified("items");
+  return { skipped: false, handoffConfirmed: true };
+}
+
 async function handleFulfillmentLifecycleWebhook({ payload, req }) {
   verifyFulfillmentLifecycleWebhook(req);
   validateFulfillmentLifecyclePayload(payload);
 
+  if (await FulfillmentLifecycleEvent.findOne({ eventId: payload.eventId })) {
+    return { ok: true, duplicate: true };
+  }
+
   const order = await findFulfillmentLifecycleOrder(payload.externalOrderId);
   if (!order) throw fulfillmentWebhookError("Fulfillment lifecycle order not found", 404);
+
+  applyFulfillmentLifecycleEvent(order, payload);
+  if (typeof order.save === "function") await order.save();
 
   try {
     await FulfillmentLifecycleEvent.create({
@@ -472,6 +540,7 @@ async function handleWebhook({ provider, payload, req }) {
 
 module.exports = {
   handleFulfillmentLifecycleWebhook,
+  applyFulfillmentLifecycleEvent,
   handleWebhook,
   parseWebhook,
   parseOnosWebhook,
