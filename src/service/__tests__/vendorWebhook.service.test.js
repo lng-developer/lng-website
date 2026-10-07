@@ -3,6 +3,7 @@ jest.mock("../../models", () => ({
   orderCustomProduct: { findOne: jest.fn() },
   vendorProduct: { find: jest.fn() },
   vendor: { find: jest.fn() },
+  FulfillmentLifecycleEvent: { findOne: jest.fn(), create: jest.fn() },
 }));
 
 const db = require("../../models");

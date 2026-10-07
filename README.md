@@ -61,6 +61,8 @@ Component diagram (tóm tắt):
 
 LNG only mirrors the order lifecycle. Fulfillment Platform v2 owns Viettel Post credentials, wallet, label and carrier polling. Configure only `FULFILLMENT_LIFECYCLE_WEBHOOK_SECRET` in LNG; it must match Fulfillment's callback secret. The receiver is `POST /api/vendor-webhooks/fulfillment-platform-v2` and verifies the exact HMAC body, timestamp and event id before persisting safe metadata. Do not put Viettel Post credentials in LNG.
 
+The old direct `VIETTELPOST_*` polling path has been removed. LNG pulls Fulfillment's authenticated tracking endpoint and receives signed lifecycle callbacks; its environment must not contain Viettel Post credentials.
+
 For staging, replay a signed mock `shipment.label_ready` callback first. It records pending label/tracking only. Replay `shipment.carrier_handoff_confirmed` next to set `actualShipAt` and allow the normal marketplace-tracking path. Do not use this verification to create a real carrier shipment.
 
 7) Reporting
