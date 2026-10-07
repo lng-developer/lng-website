@@ -57,6 +57,12 @@ Component diagram (tóm tắt):
 - Vendors trả tracking → cập nhật order.
 - Upload tracking lên Amazon (batches) hoặc cập nhật marketplace.
 
+### Fulfillment Platform v2 callback
+
+LNG only mirrors the order lifecycle. Fulfillment Platform v2 owns Viettel Post credentials, wallet, label and carrier polling. Configure only `FULFILLMENT_LIFECYCLE_WEBHOOK_SECRET` in LNG; it must match Fulfillment's callback secret. The receiver is `POST /api/vendor-webhooks/fulfillment-platform-v2` and verifies the exact HMAC body, timestamp and event id before persisting safe metadata. Do not put Viettel Post credentials in LNG.
+
+For staging, replay a signed mock `shipment.label_ready` callback first. It records pending label/tracking only. Replay `shipment.carrier_handoff_confirmed` next to set `actualShipAt` and allow the normal marketplace-tracking path. Do not use this verification to create a real carrier shipment.
+
 7) Reporting
 - Scripts và services tạo báo cáo Excel/CSV (`daily_orders_report.js`, `export-orders.js`).
 
