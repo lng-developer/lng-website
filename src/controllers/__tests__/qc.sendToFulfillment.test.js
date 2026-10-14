@@ -341,6 +341,27 @@ describe("pushPlatformOrders", () => {
     process.env = oldEnv;
   });
 
+  test("blocks a cancelled order even when its Scale state is Ready", async () => {
+    const order = {
+      orderId: "ORDER-CANCELLED",
+      status: "Cancelled",
+      scale_overall_status: "Ready",
+      items: [],
+      save: jest.fn().mockResolvedValue(undefined),
+    };
+    mockFindChain([order]);
+
+    const res = makeRes();
+    await controller.pushPlatformOrders({
+      body: { orderIds: [order.orderId] },
+      user: { role: "Admin", _id: "user-1" },
+      headers: { "user-agent": "jest" },
+    }, res);
+
+    expect(axios.post).not.toHaveBeenCalled();
+    expect(res.status).toHaveBeenCalledWith(409);
+  });
+
   test("pushes selected failed DB orders to Fulfillment Platform v2 and marks local order fulfilled", async () => {
     const save = jest.fn().mockResolvedValue(undefined);
     const order = {

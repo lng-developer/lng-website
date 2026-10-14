@@ -53,6 +53,8 @@ function computeOverallScaleStatus(orderDoc) {
   return "Need Scale";
 }
 
+const isCanceledStatus = (status) => /^(canceled|cancelled)$/i.test(String(status || "").trim());
+
 function extractVersion3Data(item) {
   const surfaces = item.version3Data?.customizationInfo?.surfaces || [];
   return surfaces.flatMap((surface) =>
@@ -630,6 +632,13 @@ const confirmScaleForItem = async (req, res) => {
       }
     }
 
+    if (isCanceledStatus(order.status)) {
+      return res.status(409).json({
+        message: "Cancelled orders cannot be approved or sent to production.",
+        status: order.status,
+      });
+    }
+
     const item = Array.isArray(order.items)
       ? order.items.find((i) => i.orderItemId === orderItemId)
       : null;
@@ -1016,6 +1025,13 @@ const retrySendFulfillment = async (req, res) => {
 
     const order = await OrderCustomProduct.findOne({ orderId });
     if (!order) return res.status(404).json({ message: "Order not found" });
+
+    if (isCanceledStatus(order.status)) {
+      return res.status(409).json({
+        message: "Cancelled orders cannot be sent to production.",
+        status: order.status,
+      });
+    }
 
     if (isAddressInvalid(order)) {
       // (không đổi status ở đây để tránh “dẫm” trạng thái đang có, chỉ báo lỗi)

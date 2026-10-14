@@ -159,6 +159,67 @@ describe("order custom product lifecycle hooks", () => {
     expect(logOrderLifecycleEvent).not.toHaveBeenCalled();
   });
 
+  test("cancelling an order locks the order while preserving its Scale work", async () => {
+    const order = {
+      _id: "order-object-id",
+      orderId: "111-2222222-3333333",
+      platform: "Amazon",
+      status: "New",
+      scale_overall_status: "Ready",
+      items: [{
+        scale_status: "Complete",
+        tracking_info: { status: "New" },
+      }],
+      save: jest.fn().mockResolvedValue(undefined),
+    };
+    db.orderCustomProduct.findOne.mockResolvedValue(order);
+
+    await controller.updateOrderStatus({
+      body: { orderId: order.orderId, status: "Cancelled" },
+      user: { _id: "user-1", email: "cs@example.com" },
+      ip: "127.0.0.1",
+      headers: { "user-agent": "jest" },
+    }, makeRes());
+
+    expect(order).toMatchObject({
+      status: "Cancelled",
+      scale_overall_status: "Cancelled",
+      items: [{
+        scale_status: "Complete",
+        tracking_info: { status: "New" },
+      }],
+    });
+  });
+
+  test("un-cancelling restores Scale state from the preserved item workflow", async () => {
+    const order = {
+      _id: "order-object-id",
+      orderId: "111-2222222-3333333",
+      platform: "Amazon",
+      status: "Cancelled",
+      scale_overall_status: "Ready",
+      items: [{ scale_status: "Complete" }],
+      save: jest.fn().mockResolvedValue(undefined),
+    };
+    db.orderCustomProduct.findOne.mockResolvedValue(order);
+
+    await controller.updateOrderStatus({
+      body: { orderId: order.orderId, status: "Cancelled" },
+      user: { _id: "user-1", email: "cs@example.com" },
+      ip: "127.0.0.1",
+      headers: { "user-agent": "jest" },
+    }, makeRes());
+
+    await controller.updateOrderStatus({
+      body: { orderId: order.orderId, status: "New" },
+      user: { _id: "user-1", email: "cs@example.com" },
+      ip: "127.0.0.1",
+      headers: { "user-agent": "jest" },
+    }, makeRes());
+
+    expect(order.scale_overall_status).toBe("Ready");
+  });
+
   test("computeBaseCostForOrder logs AUTO_COST_RETEST_SUCCESS when retest matches cost", async () => {
     const order = {
       _id: "order-object-id",

@@ -210,6 +210,37 @@ describe("scale lifecycle hooks", () => {
     }));
   });
 
+  test("confirmScaleForItem does not approve or send a cancelled order", async () => {
+    const item = {
+      orderItemId: "ITEM-1",
+      scale_status: "Pending",
+      fulfillment_file: { front: "https://cdn/front.png" },
+      markModified: jest.fn(),
+    };
+    const order = {
+      _id: "order-1",
+      orderId: "ORDER-CANCELLED",
+      platform: "Amazon",
+      status: "Cancelled",
+      scale_overall_status: "Ready",
+      items: [item],
+      save: jest.fn().mockResolvedValue(undefined),
+    };
+    db.orderCustomProduct.findOne.mockResolvedValue(order);
+
+    const res = makeRes();
+    await controller.confirmScaleForItem({
+      params: { orderId: order.orderId, orderItemId: item.orderItemId },
+      body: { decision: "approve" },
+      user: { _id: "user-1", email: "qc@example.com", role: "Admin" },
+      headers: { "user-agent": "jest" },
+    }, res);
+
+    expect(FulfillmentService.send).not.toHaveBeenCalled();
+    expect(item.scale_status).toBe("Pending");
+    expect(res.status).toHaveBeenCalledWith(409);
+  });
+
   test("retrySendGrabink logs VENDOR_PUSH_SUCCESS", async () => {
     const order = {
       _id: "order-1",

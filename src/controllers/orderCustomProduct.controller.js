@@ -58,6 +58,15 @@ const norm = (s) => (ALLOWED.includes(s) ? s : "New");
 const IMPORT_SCALE_STATUS = "Need Scale";
 const ITEM_SCALE_STATUSES = new Set([IMPORT_SCALE_STATUS, "Pending", "Complete", "QC Rejected", "Cancelled"]);
 
+function computeScaleOverallStatus(items = []) {
+  if (items.length === 0) return IMPORT_SCALE_STATUS;
+  const statuses = items.map((item) => String(item?.scale_status || IMPORT_SCALE_STATUS));
+  if (statuses.some((status) => status === "QC Rejected")) return "QC Rejected";
+  if (statuses.every((status) => status === "Complete")) return "Ready";
+  if (statuses.every((status) => status === "Pending" || status === "Complete")) return "Pending";
+  return IMPORT_SCALE_STATUS;
+}
+
 function normalizeImportedItemScaleStatuses(orderDoc) {
   if (!orderDoc || !Array.isArray(orderDoc.items)) return false;
   let changed = false;
@@ -2331,7 +2340,15 @@ const updateOrderStatus = async (req, res) => {
       });
     }
 
-    order.status = status;
+    const oldScaleOverallStatus = order.scale_overall_status;
+    const wasCancelled = isCanceledStatus(oldStatus);
+    const isCancelling = isCanceledStatus(status);
+    order.status = isCancelling ? "Cancelled" : status;
+    if (isCancelling) {
+      order.scale_overall_status = "Cancelled";
+    } else if (wasCancelled) {
+      order.scale_overall_status = computeScaleOverallStatus(order.items || []);
+    }
     await order.save();
 
     // ===== LOGGER =====
@@ -2345,6 +2362,13 @@ const updateOrderStatus = async (req, res) => {
           from: oldStatus,
           to: status,
         },
+        ...(oldScaleOverallStatus !== order.scale_overall_status
+          ? [{
+              field: "scale_overall_status",
+              from: oldScaleOverallStatus || null,
+              to: order.scale_overall_status,
+            }]
+          : []),
       ],
       user: req.user,
       context: {

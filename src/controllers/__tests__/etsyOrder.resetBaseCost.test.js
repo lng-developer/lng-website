@@ -988,6 +988,29 @@ describe('pushEtsyPlatformOrders production gate', () => {
     process.env = oldEnv;
   });
 
+  test('blocks a cancelled Etsy order even when its Scale state is Ready', async () => {
+    const order = {
+      orderId: 'ETSY-CANCELLED',
+      status: 'Cancelled',
+      scale_overall_status: 'Ready',
+      case: [],
+      seller: {},
+      items: [],
+      save: jest.fn().mockResolvedValue(undefined),
+    };
+    mockFindChain([order]);
+
+    const res = makeRes();
+    await controller.pushEtsyPlatformOrders({
+      body: { orderIds: [order.orderId] },
+      user: { role: 'Admin', _id: 'user-1' },
+      headers: { 'user-agent': 'jest' },
+    }, res);
+
+    expect(axios.post).not.toHaveBeenCalled();
+    expect(res.status).toHaveBeenCalledWith(409);
+  });
+
   test('blocks Etsy production push when order has a blocking case', async () => {
     const save = jest.fn().mockResolvedValue(undefined);
     const order = {

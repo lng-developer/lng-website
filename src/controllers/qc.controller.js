@@ -1021,6 +1021,16 @@ const sendFailedOrdersToFulfillment = async (req, res) => {
       });
     }
 
+    const cancelledOrders = orders
+      .filter((order) => isCanceledStatus(order.status))
+      .map((order) => ({ orderId: order.orderId, status: order.status }));
+    if (cancelledOrders.length > 0) {
+      return res.status(409).json({
+        message: "Cancelled orders cannot be sent to fulfillment",
+        orders: cancelledOrders,
+      });
+    }
+
     const notFailedOrders = orders
       .filter((order) => order.scale_overall_status !== "Failed")
       .map((order) => ({
@@ -1321,6 +1331,16 @@ const pushPlatformOrders = async (req, res) => {
       return res.status(404).json({
         message: "Some orders were not found or are not accessible",
         orderIds: missingOrderIds,
+      });
+    }
+
+    const cancelledOrders = orders
+      .filter((order) => isCanceledStatus(order.status))
+      .map((order) => ({ orderId: order.orderId, status: order.status }));
+    if (cancelledOrders.length > 0) {
+      return res.status(409).json({
+        message: "Cancelled orders cannot be pushed to production",
+        orders: cancelledOrders,
       });
     }
 

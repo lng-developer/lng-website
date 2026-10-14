@@ -6846,6 +6846,16 @@ const pushEtsyPlatformOrders = async (req, res) => {
             });
         }
 
+        const cancelledOrders = orders
+            .filter((order) => isEtsyCanceledStatus(order.status))
+            .map((order) => ({ orderId: order.orderId, status: order.status }));
+        if (cancelledOrders.length > 0) {
+            return res.status(409).json({
+                message: "Cancelled Etsy orders cannot be pushed to production",
+                orders: cancelledOrders,
+            });
+        }
+
         const invalidAddressOrders = orders
             .filter(isEtsyAddressInvalid)
             .map((order) => ({
